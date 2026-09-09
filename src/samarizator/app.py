@@ -251,6 +251,9 @@ class Window(QMainWindow):
         add = QPushButton("+ Добавить аудио или видео")
         add.clicked.connect(self.add_file)
         side.addWidget(add)
+        self.delete_button = QPushButton("Удалить запись")
+        self.delete_button.clicked.connect(self.delete_meeting)
+        side.addWidget(self.delete_button)
         self.search = QLineEdit()
         self.search.setPlaceholderText("Поиск в записях и сводках…")
         self.search.textChanged.connect(self.refresh_list)
@@ -365,15 +368,46 @@ class Window(QMainWindow):
         current = self.mid
         self.list.blockSignals(True)
         self.list.clear()
+        found = False
         for meeting in self.store.meetings(self.search.text()):
             item = QListWidgetItem(f"{meeting['title']}\n{STATUS.get(meeting['status'], meeting['status'])}")
             item.setData(Qt.ItemDataRole.UserRole, meeting["id"])
             self.list.addItem(item)
             if meeting["id"] == current:
                 self.list.setCurrentItem(item)
+                found = True
         self.list.blockSignals(False)
-        if current:
+        if current and found:
             self.load_detail()
+        else:
+            self.mid = None
+            self.clear_detail()
+
+    def clear_detail(self):
+        self.heading.setText("Добавьте запись встречи, лекции или интервью")
+        self.info.setText("1. Распознайте локально → 2. Проверьте собеседников → 3. Создайте сводку")
+        self.table.setRowCount(0)
+        self.visible_rows = []
+        self.summary.setPlainText("")
+        self.controls()
+
+    def delete_meeting(self):
+        if self.job or not self.mid:
+            return
+        meeting = self.store.meeting(self.mid)
+        confirm = QMessageBox.question(
+            self,
+            "Удалить запись",
+            f"Удалить «{meeting['title']}» из приложения? Расшифровка и сводка будут удалены безвозвратно.\n"
+            "Исходный аудио/видео файл и уже экспортированные заметки в Obsidian не удаляются.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        self.store.delete(self.mid)
+        self.mid = None
+        self.refresh_list()
 
     def select(self, item, previous=None):
         if item:
@@ -543,6 +577,7 @@ class Window(QMainWindow):
         self.settings_button.setEnabled(not busy)
         self.transcribe.setEnabled(ready and not busy)
         self.summarize.setEnabled(ready and not busy)
+        self.delete_button.setEnabled(ready and not busy)
         self.cancel.setEnabled(busy)
         self.save_segment.setEnabled(ready and not busy)
         self.obsidian.setEnabled(

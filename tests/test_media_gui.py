@@ -59,6 +59,15 @@ def test_gui_constructs_and_shows_recording(tmp_path, monkeypatch):
     w.refresh_list()
     assert w.table.rowCount() == 1
     assert w.list.count() == 1
+    from PySide6.QtWidgets import QMessageBox
+
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
+    w.delete_meeting()
+    assert w.list.count() == 0
+    assert w.table.rowCount() == 0
+    assert w.mid is None
+    with pytest.raises(ValueError):
+        w.store.meeting(mid)
     dialog = SettingsDialog(w.settings)
     assert dialog.fields["memory_gb"].value() == 4
     from PySide6.QtCore import QCoreApplication, QEvent

@@ -69,6 +69,17 @@ def test_rename_and_search(meeting):
     assert store.meetings("XZ-2026")[0]["id"] == mid
 
 
+def test_delete_removes_meeting_segments_and_checkpoints(meeting):
+    store, mid, _ = meeting
+    store.save_chunk(mid, 0, [segment()])
+    store.save_checkpoint(mid, "source", 0, "digest")
+    store.delete(mid)
+    with pytest.raises(ValueError):
+        store.meeting(mid)
+    assert store.segments(mid) == []
+    assert store.checkpoint(mid, "source", 0) is None
+
+
 def test_speaker_overlap_is_uncertain():
     turns = [dict(start=0, end=4, speaker="A"), dict(start=0, end=4, speaker="B")]
     assert assign_speaker(0, 4, turns) == ("A / B", True)
