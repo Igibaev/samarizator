@@ -251,9 +251,6 @@ class Window(QMainWindow):
         add = QPushButton("+ Добавить аудио или видео")
         add.clicked.connect(self.add_file)
         side.addWidget(add)
-        self.delete_button = QPushButton("Удалить запись")
-        self.delete_button.clicked.connect(self.delete_meeting)
-        side.addWidget(self.delete_button)
         self.search = QLineEdit()
         self.search.setPlaceholderText("Поиск в записях и сводках…")
         self.search.textChanged.connect(self.refresh_list)
@@ -370,9 +367,23 @@ class Window(QMainWindow):
         self.list.clear()
         found = False
         for meeting in self.store.meetings(self.search.text()):
-            item = QListWidgetItem(f"{meeting['title']}\n{STATUS.get(meeting['status'], meeting['status'])}")
+            item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, meeting["id"])
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(10, 8, 6, 8)
+            label = QLabel(f"{meeting['title']}\n{STATUS.get(meeting['status'], meeting['status'])}")
+            label.setWordWrap(True)
+            row_layout.addWidget(label, 1)
+            trash = QPushButton("🗑")
+            trash.setObjectName("trashButton")
+            trash.setToolTip("Удалить запись")
+            trash.setFixedWidth(30)
+            trash.clicked.connect(lambda checked=False, mid=meeting["id"]: self.delete_meeting(mid))
+            row_layout.addWidget(trash)
+            item.setSizeHint(row.sizeHint())
             self.list.addItem(item)
+            self.list.setItemWidget(item, row)
             if meeting["id"] == current:
                 self.list.setCurrentItem(item)
                 found = True
@@ -391,10 +402,11 @@ class Window(QMainWindow):
         self.summary.setPlainText("")
         self.controls()
 
-    def delete_meeting(self):
-        if self.job or not self.mid:
+    def delete_meeting(self, mid=None):
+        mid = mid or self.mid
+        if self.job or not mid:
             return
-        meeting = self.store.meeting(self.mid)
+        meeting = self.store.meeting(mid)
         confirm = QMessageBox.question(
             self,
             "Удалить запись",
@@ -405,8 +417,9 @@ class Window(QMainWindow):
         )
         if confirm != QMessageBox.StandardButton.Yes:
             return
-        self.store.delete(self.mid)
-        self.mid = None
+        self.store.delete(mid)
+        if mid == self.mid:
+            self.mid = None
         self.refresh_list()
 
     def select(self, item, previous=None):
@@ -577,7 +590,6 @@ class Window(QMainWindow):
         self.settings_button.setEnabled(not busy)
         self.transcribe.setEnabled(ready and not busy)
         self.summarize.setEnabled(ready and not busy)
-        self.delete_button.setEnabled(ready and not busy)
         self.cancel.setEnabled(busy)
         self.save_segment.setEnabled(ready and not busy)
         self.obsidian.setEnabled(
@@ -638,8 +650,9 @@ def main():
         QPushButton:disabled { color: #87968f; background: #edf0ee; }
         QLineEdit { padding: 7px; }
         QListWidget, QTableWidget, QTextBrowser { background: white; border: 1px solid #d9dfdb; }
-        QListWidget::item { padding: 12px; }
         QListWidget::item:selected { background: #d9e9e2; color: #163f33; }
+        QPushButton#trashButton { padding: 4px; background: transparent; border-radius: 4px; }
+        QPushButton#trashButton:hover { background: #f0d3d3; }
     """)
     window = Window()
     window.show()
