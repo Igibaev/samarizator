@@ -5,9 +5,15 @@ build-backend = "hatchling.build"
 [project]
 name = "samarizator"
 version = "0.1.0"
-description = "Local-first meeting notes for macOS: Whisper, corporate LLM, Obsidian"
+description = "Local-first meeting notes for macOS: Whisper, cloud LLM, Obsidian"
 requires-python = ">=3.11,<3.14"
-dependencies = ["PySide6-Essentials>=6.8,<6.11", "httpx>=0.28,<0.29", "psutil>=7,<8", "keyring>=25,<26"]
+dependencies = [
+    "PySide6-Essentials>=6.8,<6.11",
+    "httpx>=0.28,<0.29",
+    "psutil>=7,<8",
+    "keyring>=25,<26",
+    "truststore>=0.10,<1",
+]
 
 [project.optional-dependencies]
 diarization = ["sherpa-onnx==1.13.7", "sherpa-onnx-core==1.13.7", "numpy>=2,<3", "soundfile>=0.13,<0.14"]

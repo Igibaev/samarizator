@@ -6,6 +6,7 @@ import ssl
 import time
 
 import httpx
+import truststore
 
 from .config import get_api_key
 
@@ -54,25 +55,27 @@ def validate_summary(obj, allowed):
     return obj
 
 
-class CorporateClient:
+class ChatClient:
     def __init__(self, settings, transport=None, key=None):
-        settings.validate(corporate=True)
+        settings.validate(api=True)
         self.settings = settings
         self.key = get_api_key() if key is None else key
         if not self.key:
-            raise ValueError("Сохраните корпоративный API-ключ в настройках.")
+            raise ValueError("Сохраните API-ключ модели в настройках.")
         self.transport = transport
 
     def complete(self, prompt, allowed):
         s = self.settings
-        headers = {s.auth_header: s.auth_prefix + self.key, "Content-Type": "application/json"}
+        headers = {"Authorization": f"Bearer {self.key}", "Content-Type": "application/json"}
         payload = dict(
             model=s.model,
             temperature=0.1,
             max_tokens=s.max_output_tokens,
             messages=[dict(role="system", content=SYSTEM), dict(role="user", content=prompt)],
         )
-        context = ssl.create_default_context(cafile=s.ca_file or None)
+        # Verify against the OS trust store, so a corporate root installed in the system
+        # keychain works the way curl does. certifi alone would reject an intercepted TLS chain.
+        context = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         # No redirect, telemetry, public fallback, or implicit environment proxy.
         with httpx.Client(
             verify=context,
@@ -83,20 +86,20 @@ class CorporateClient:
         ) as client:
             for attempt in range(3):
                 try:
-                    with client.stream("POST", s.endpoint, headers=headers, json=payload) as response:
+                    with client.stream("POST", s.chat_url(), headers=headers, json=payload) as response:
                         if response.status_code in {429, 502, 503, 504} and attempt < 2:
                             time.sleep(2**attempt)
                             continue
                         if not 200 <= response.status_code < 300:
                             raise ValueError(
-                                f"Корпоративный API: HTTP {response.status_code}. "
-                                "Проверьте endpoint, модель и доступ."
+                                f"API модели: HTTP {response.status_code}. "
+                                "Проверьте base URL, название модели и ключ."
                             )
                         raw = bytearray()
                         for block in response.iter_bytes():
                             raw.extend(block)
                             if len(raw) > 2_000_000:
-                                raise ValueError("Ответ корпоративной модели слишком большой.")
+                                raise ValueError("Ответ модели слишком большой.")
                     body = json.loads(raw)
                     choice = body["choices"][0]
                     if choice.get("finish_reason") not in {"stop", None}:
@@ -109,15 +112,13 @@ class CorporateClient:
                     return validate_summary(json.loads(content), allowed)
                 except httpx.HTTPError:
                     if attempt == 2:
-                        raise ValueError(
-                            "Нет соединения с корпоративным API. Проверьте VPN и сертификат."
-                        ) from None
+                        raise ValueError("Нет соединения с API модели. Проверьте base URL и сеть.") from None
                     time.sleep(2**attempt)
                 except (KeyError, IndexError, TypeError, json.JSONDecodeError):
                     raise ValueError(
                         "API вернул ответ в неподдерживаемом формате. Нужен Chat Completions JSON."
                     ) from None
-        raise RuntimeError("Корпоративный API недоступен.")
+        raise RuntimeError("API модели недоступен.")
 
 
 def blocks(segments, max_chars):
@@ -153,13 +154,13 @@ def blocks(segments, max_chars):
 
 
 def summarize(store, mid, settings, progress=lambda *_: None, client=None):
-    client = client or CorporateClient(settings)
+    client = client or ChatClient(settings)
     maps = []
     for index, block in enumerate(blocks(store.iter_segments(mid), settings.input_chars)):
         prompt = "Извлеки полный набор существенных пунктов этого блока:\n" + "\n".join(
             line for _, line in block
         )
-        digest = hashlib.sha256((settings.endpoint + settings.model + SYSTEM + prompt).encode()).hexdigest()
+        digest = hashlib.sha256((settings.chat_url() + settings.model + SYSTEM + prompt).encode()).hexdigest()
         cached = store.checkpoint(mid, "summary-map", index)
         allowed = {sid for sid, _ in block}
         if cached and cached.get("digest") == digest:
@@ -213,7 +214,7 @@ def summarize(store, mid, settings, progress=lambda *_: None, client=None):
         if len(json.dumps(reduced)) >= len(json.dumps(current)):
             raise ValueError(
                 "Модель не сокращает сводку. Промежуточные блоки сохранены; "
-                "увеличьте размер входного блока или выберите другую корпоративную модель."
+                "увеличьте размер входного блока или выберите другую модель."
             )
         current = reduced
     raise ValueError("Не удалось объединить сводку за 8 уровней. Блоки сохранены.")

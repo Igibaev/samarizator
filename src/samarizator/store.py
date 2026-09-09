@@ -153,6 +153,12 @@ class Store:
                 "WHERE status IN ('transcribing','summarizing')"
             )
 
+    def delete(self, mid):
+        with self.connect() as db:
+            db.execute("DELETE FROM segments WHERE meeting=?", (mid,))
+            db.execute("DELETE FROM checkpoints WHERE meeting=?", (mid,))
+            db.execute("DELETE FROM meetings WHERE id=?", (mid,))
+
     def rename_speaker(self, mid, old, new):
         with self.connect() as db:
             db.execute(

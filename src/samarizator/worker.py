@@ -90,7 +90,9 @@ def transcribe(store, mid, settings, work):
         for channel in [0, 1] if settings.diarization == "channels" else [None]:
             wav = work / "chunk.wav"
             extract(source, wav, work, start, length, channel)
-            result = whisper(wav, settings.whisper_model, settings.language, settings.threads, work)
+            result = whisper(
+                wav, settings.whisper_model, settings.language, settings.threads, work, settings.gpu
+            )
             rows += parse_whisper(result, start, lower, upper, turns or [], channel)
             wav.unlink()
         store.save_chunk(mid, index, sorted(rows, key=lambda r: r["start"]))
@@ -103,7 +105,7 @@ def transcribe(store, mid, settings, work):
 def main():
     phase, mid = sys.argv[1:3]
     store = Store()
-    settings = Settings(**json.loads(store.meeting(mid)["settings"]))
+    settings = Settings.from_dict(json.loads(store.meeting(mid)["settings"]))
     os.environ["SAMARIZATOR_THREADS"] = str(settings.threads)
     work_root = data_dir() / "work"
     work_root.mkdir(exist_ok=True)

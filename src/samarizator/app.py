@@ -39,6 +39,17 @@ from .knowledge import stamp
 from .process import supervise
 from .store import Store
 
+PROVIDERS = [
+    ("Указать вручную", ""),
+    ("OpenAI", "https://api.openai.com/v1"),
+    ("OpenRouter", "https://openrouter.ai/api/v1"),
+    ("Groq", "https://api.groq.com/openai/v1"),
+    ("DeepSeek", "https://api.deepseek.com/v1"),
+    ("Together", "https://api.together.xyz/v1"),
+    ("Ollama · на этом Mac", "http://localhost:11434/v1"),
+    ("LM Studio · на этом Mac", "http://localhost:1234/v1"),
+]
+
 STATUS = {
     "new": "Новая",
     "transcribing": "Распознавание",
@@ -84,7 +95,14 @@ class SettingsDialog(QDialog):
         self.fields = {}
         local = QWidget()
         form = QFormLayout(local)
-        tabs.addTab(local, "Локальная обработка")
+        tabs.addTab(local, "Распознавание речи · локально")
+        intro = QLabel(
+            "Эти модели работают на вашем Mac и превращают аудио в текст: Whisper распознаёт речь, "
+            "остальные две разделяют собеседников. Аудио никуда не отправляется.\n"
+            "Облачная модель со второй вкладки работает только с готовым текстом — она составляет сводку."
+        )
+        intro.setWordWrap(True)
+        form.addRow(intro)
         for key, label in [
             ("whisper_model", "Модель Whisper (.bin)"),
             ("segmentation_model", "Модель сегментации (.onnx)"),
@@ -129,34 +147,44 @@ class SettingsDialog(QDialog):
         language.setPlaceholderText("ru, en, kk или auto")
         self.fields["language"] = language
         form.addRow("Язык Whisper", language)
+        gpu = QCheckBox("Считать на GPU (Metal) вместо CPU")
+        gpu.setChecked(settings.gpu)
+        self.fields["gpu"] = gpu
+        form.addRow("Ускорение", gpu)
         hint = QLabel(
             "Режим каналов подходит только для записи, где каждый из двух участников записан "
             "в свой канал. Автоматические имена — условные; их можно исправить перед сводкой.\n"
-            "Контроль RSS останавливает обработку на 90% бюджета. Это не жёсткая квота ОС."
+            "Контроль RSS останавливает обработку на 90% бюджета. Это не жёсткая квота ОС.\n"
+            "GPU заметно быстрее и меньше греет ноутбук при том же качестве, но память Metal "
+            "не попадает в этот подсчёт: на длинных записях бюджет перестаёт быть точной оценкой."
         )
         hint.setWordWrap(True)
         form.addRow(hint)
         corporate = QWidget()
         api = QFormLayout(corporate)
-        tabs.addTab(corporate, "Корпоративная модель")
+        tabs.addTab(corporate, "Облачная модель · сводки")
+        self.provider = QComboBox()
+        for label, url in PROVIDERS:
+            self.provider.addItem(label, url)
+        self.provider.setCurrentIndex(max(0, self.provider.findData(settings.base_url)))
+        self.provider.activated.connect(self.pick_provider)
+        api.addRow("Провайдер", self.provider)
         for key, label in [
-            ("endpoint", "Полный HTTPS endpoint"),
-            ("model", "Имя модели"),
-            ("auth_header", "Заголовок ключа"),
-            ("auth_prefix", "Префикс ключа"),
-            ("ca_file", "Корпоративный CA (.pem), необязательно"),
+            ("base_url", "Base URL"),
+            ("model", "Название модели"),
         ]:
             line = QLineEdit(getattr(settings, key))
             self.fields[key] = line
             api.addRow(label, line)
-        self.fields["endpoint"].setPlaceholderText("https://your-company.example/v1/chat/completions")
+        self.fields["base_url"].setPlaceholderText("https://openrouter.ai/api/v1")
+        self.fields["model"].setPlaceholderText("openai/gpt-4o-mini")
         self.key = QLineEdit()
         self.key.setEchoMode(QLineEdit.EchoMode.Password)
         self.key.setPlaceholderText("Пусто — оставить сохранённый ключ")
         api.addRow("API-ключ → macOS Keychain", self.key)
         for key, label, lo, hi in [
             ("input_chars", "Символов текста на запрос", 4000, 48000),
-            ("max_output_tokens", "Лимит токенов ответа", 512, 8000),
+            ("max_output_tokens", "Лимит токенов ответа", 512, 64000),
         ]:
             spin = QSpinBox()
             spin.setRange(lo, hi)
@@ -164,10 +192,11 @@ class SettingsDialog(QDialog):
             self.fields[key] = spin
             api.addRow(label, spin)
         hint = QLabel(
-            "Поддерживается OpenAI-совместимый Chat Completions API, включая корпоративные шлюзы "
-            "и Azure с полным URL. Для api-key задайте пустой префикс.\n"
+            "Подходит любой OpenAI-совместимый Chat Completions API: OpenAI, OpenRouter, Groq, DeepSeek, "
+            "Together, а также локальные Ollama и LM Studio по адресу localhost. Ключ уходит "
+            "заголовком Authorization: Bearer; для localhost его можно оставить любым непустым.\n"
             "Аудио не отправляется. Текст уходит на этот адрес только при нажатии «Создать сводку». "
-            "Публичной модели по умолчанию нет. Для доступа может потребоваться VPN."
+            "Размер блока и лимит ответа определяют, сколько токенов расходуется на одну запись."
         )
         hint.setWordWrap(True)
         api.addRow(hint)
@@ -177,6 +206,10 @@ class SettingsDialog(QDialog):
         buttons.accepted.connect(self.save)
         buttons.rejected.connect(self.reject)
         outer.addWidget(buttons)
+
+    def pick_provider(self, index):
+        if url := self.provider.itemData(index):
+            self.fields["base_url"].setText(url)
 
     def pick(self, key, widget):
         path = (
@@ -194,12 +227,14 @@ class SettingsDialog(QDialog):
                 values[key] = (
                     field.currentData()
                     if isinstance(field, QComboBox)
+                    else field.isChecked()
+                    if isinstance(field, QCheckBox)
                     else field.value()
                     if isinstance(field, (QSpinBox, QDoubleSpinBox))
                     else field.text()
                 )
             updated = Settings(**values)
-            updated.validate(corporate=bool(updated.endpoint))
+            updated.validate(api=bool(updated.base_url))
             if self.key.text():
                 set_api_key(self.key.text())
             updated.save()
@@ -238,7 +273,7 @@ class Window(QMainWindow):
         title = QLabel("Samarizator")
         title.setObjectName("brand")
         top.addWidget(title)
-        top.addWidget(QLabel("Локальное аудио  ·  Корпоративные сводки  ·  Obsidian"))
+        top.addWidget(QLabel("Локальное аудио  ·  Облачные сводки  ·  Obsidian"))
         top.addStretch()
         self.settings_button = QPushButton("Настройки")
         self.settings_button.clicked.connect(self.configure)
@@ -365,15 +400,62 @@ class Window(QMainWindow):
         current = self.mid
         self.list.blockSignals(True)
         self.list.clear()
+        found = False
         for meeting in self.store.meetings(self.search.text()):
-            item = QListWidgetItem(f"{meeting['title']}\n{STATUS.get(meeting['status'], meeting['status'])}")
+            item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, meeting["id"])
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(10, 8, 6, 8)
+            label = QLabel(f"{meeting['title']}\n{STATUS.get(meeting['status'], meeting['status'])}")
+            label.setWordWrap(True)
+            row_layout.addWidget(label, 1)
+            trash = QPushButton("🗑")
+            trash.setObjectName("trashButton")
+            trash.setToolTip("Удалить запись")
+            trash.setFixedWidth(30)
+            trash.clicked.connect(lambda checked=False, mid=meeting["id"]: self.delete_meeting(mid))
+            row_layout.addWidget(trash)
+            item.setSizeHint(row.sizeHint())
             self.list.addItem(item)
+            self.list.setItemWidget(item, row)
             if meeting["id"] == current:
                 self.list.setCurrentItem(item)
+                found = True
         self.list.blockSignals(False)
-        if current:
+        if current and found:
             self.load_detail()
+        else:
+            self.mid = None
+            self.clear_detail()
+
+    def clear_detail(self):
+        self.heading.setText("Добавьте запись встречи, лекции или интервью")
+        self.info.setText("1. Распознайте локально → 2. Проверьте собеседников → 3. Создайте сводку")
+        self.table.setRowCount(0)
+        self.visible_rows = []
+        self.summary.setPlainText("")
+        self.controls()
+
+    def delete_meeting(self, mid=None):
+        mid = mid or self.mid
+        if self.job or not mid:
+            return
+        meeting = self.store.meeting(mid)
+        confirm = QMessageBox.question(
+            self,
+            "Удалить запись",
+            f"Удалить «{meeting['title']}» из приложения? Расшифровка и сводка будут удалены безвозвратно.\n"
+            "Исходный аудио/видео файл и уже экспортированные заметки в Obsidian не удаляются.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        self.store.delete(mid)
+        if mid == self.mid:
+            self.mid = None
+        self.refresh_list()
 
     def select(self, item, previous=None):
         if item:
@@ -414,7 +496,7 @@ class Window(QMainWindow):
         else:
             self.summary.setPlainText(
                 "После распознавания проверьте текст и говорящих. Затем нажмите «Создать сводку».\n\n"
-                "Будет отправлен только текст на настроенный корпоративный endpoint. "
+                "Будет отправлен только текст на выбранный API модели. "
                 "Результат автоматически сохранится в базе знаний."
             )
         self.controls()
@@ -461,21 +543,18 @@ class Window(QMainWindow):
             return
         try:
             meeting = self.store.meeting(self.mid)
-            original = Settings(**json.loads(meeting["settings"]))
+            original = Settings.from_dict(json.loads(meeting["settings"]))
             # Preserve transcription chunk geometry and speaker semantics on resume.
             if phase == "transcribe":
                 if not self.store.checkpoint(self.mid, "source", 0):
                     original = Settings(**asdict(self.settings))
                 else:
-                    for key in ["memory_gb", "threads", "whisper_model"]:
+                    for key in ["memory_gb", "threads", "whisper_model", "gpu"]:
                         setattr(original, key, getattr(self.settings, key))
             else:
                 for key in [
-                    "endpoint",
+                    "base_url",
                     "model",
-                    "auth_header",
-                    "auth_prefix",
-                    "ca_file",
                     "input_chars",
                     "max_output_tokens",
                     "vault",
@@ -483,7 +562,7 @@ class Window(QMainWindow):
                 ]:
                     setattr(original, key, getattr(self.settings, key))
                 if phase == "summary":
-                    original.validate(corporate=True)
+                    original.validate(api=True)
                     if not self.store.checkpoint(self.mid, "asr_complete", 0):
                         raise ValueError("Сначала завершите распознавание всей записи.")
             self.store.update(
@@ -603,8 +682,9 @@ def main():
         QPushButton:disabled { color: #87968f; background: #edf0ee; }
         QLineEdit { padding: 7px; }
         QListWidget, QTableWidget, QTextBrowser { background: white; border: 1px solid #d9dfdb; }
-        QListWidget::item { padding: 12px; }
         QListWidget::item:selected { background: #d9e9e2; color: #163f33; }
+        QPushButton#trashButton { padding: 4px; background: transparent; border-radius: 4px; }
+        QPushButton#trashButton:hover { background: #f0d3d3; }
     """)
     window = Window()
     window.show()

@@ -4,12 +4,12 @@ import httpx
 import pytest
 
 from samarizator.config import Settings
-from samarizator.summary import CorporateClient
+from samarizator.summary import ChatClient
 
 
 def make(handler):
-    settings = Settings(endpoint="https://corp.example/v1/chat/completions", model="enterprise")
-    return CorporateClient(settings, transport=httpx.MockTransport(handler), key="secret-fixture")
+    settings = Settings(base_url="https://corp.example/v1", model="enterprise")
+    return ChatClient(settings, transport=httpx.MockTransport(handler), key="secret-fixture")
 
 
 def response(content, finish="stop"):
@@ -32,6 +32,7 @@ def test_exact_endpoint_text_only_and_header():
     def handler(req):
         requests.append(req)
         assert req.url.host == "corp.example"
+        assert req.url.path == "/v1/chat/completions"
         assert req.headers["Authorization"] == "Bearer secret-fixture"
         body = json.loads(req.content)
         assert body["model"] == "enterprise"

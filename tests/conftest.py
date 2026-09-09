@@ -10,7 +10,7 @@ def meeting(tmp_path, monkeypatch):
     source = tmp_path / "recording.wav"
     source.write_bytes(b"fixture")
     settings = Settings(
-        endpoint="https://company.example/v1/chat/completions",
+        base_url="https://company.example/v1",
         model="corporate",
         vault=str(tmp_path / "vault"),
         diarization="manual",

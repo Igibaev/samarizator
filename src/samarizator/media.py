@@ -111,32 +111,17 @@ def parse_whisper(payload, offset, lower, upper, turns=(), channel=None):
     return output
 
 
-def whisper(wav, model, language, threads, work):
+def whisper(wav, model, language, threads, work, gpu=False):
     binary = shutil.which("whisper-cli")
     if not binary:
         raise ValueError("whisper-cli не найден. Запустите ./start.sh для установки.")
     prefix = work / "whisper-result"
     result = prefix.with_suffix(".json")
     result.unlink(missing_ok=True)
-    run_command(
-        [
-            binary,
-            "-m",
-            str(model),
-            "-f",
-            str(wav),
-            "-l",
-            language,
-            "-t",
-            str(threads),
-            "-ng",
-            "-oj",
-            "-of",
-            str(prefix),
-            "-ml",
-            "80",
-            "-sow",
-        ],
-        work / "whisper.log",
-    )
+    args = [binary, "-m", str(model), "-f", str(wav), "-l", language, "-t", str(threads)]
+    if not gpu:
+        # Metal allocations stay outside the RSS the watchdog can see.
+        args.append("-ng")
+    args += ["-oj", "-of", str(prefix), "-ml", "80", "-sow"]
+    run_command(args, work / "whisper.log")
     return json.loads(result.read_text())
