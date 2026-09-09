@@ -1,0 +1,28 @@
+#!/bin/bash
+set -euo pipefail
+cd "$(dirname "$0")"
+if [[ "$(uname -s)" != "Darwin" && "${SAMARIZATOR_DEV:-0}" != "1" ]]; then
+  echo 'Этот установщик предназначен для macOS. Для разработки: SAMARIZATOR_DEV=1 ./start.sh'
+  exit 1
+fi
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  if ! command -v brew >/dev/null 2>&1; then
+    echo 'Сначала установите Homebrew: https://brew.sh (потребуются права на установку).'
+    echo 'Затем повторите ./start.sh'
+    exit 1
+  fi
+  packages=()
+  command -v uv >/dev/null 2>&1 || packages+=(uv)
+  command -v ffmpeg >/dev/null 2>&1 || packages+=(ffmpeg)
+  command -v whisper-cli >/dev/null 2>&1 || packages+=(whisper-cpp)
+  if [[ ${#packages[@]} -gt 0 ]]; then brew install "${packages[@]}"; fi
+fi
+if [[ "${SAMARIZATOR_STRICT:-0}" == "1" ]]; then
+  uv sync --frozen --python 3.12
+else
+  uv sync --frozen --python 3.12 --extra diarization
+fi
+if [[ "${SAMARIZATOR_SKIP_DOWNLOAD:-0}" != "1" ]]; then
+  .venv/bin/python -m samarizator.setup_models
+fi
+exec .venv/bin/python -m samarizator.app

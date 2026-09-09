@@ -1,0 +1,74 @@
+import shutil
+import subprocess
+import wave
+
+import pytest
+
+from samarizator.media import extract, probe
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg not installed")
+def test_real_ffmpeg_stereo_extraction(tmp_path):
+    source = tmp_path / "stereo.wav"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "aevalsrc=0.5*sin(440*2*PI*t)|0:d=3:s=16000",
+            str(source),
+        ],
+        check=True,
+    )
+    duration, channels = probe(source, tmp_path)
+    assert duration == 3
+    assert channels == 2
+    left, right = tmp_path / "left.wav", tmp_path / "right.wav"
+    extract(source, left, tmp_path, start=1, duration=1, channel=0)
+    extract(source, right, tmp_path, start=1, duration=1, channel=1)
+    with wave.open(str(left)) as f:
+        assert f.getnchannels() == 1
+        assert f.getnframes() == 16000
+        assert any(f.readframes(16000))
+    with wave.open(str(right)) as f:
+        assert not any(f.readframes(16000))
+
+
+def test_gui_constructs_and_shows_recording(tmp_path, monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    monkeypatch.setenv("SAMARIZATOR_HOME", str(tmp_path / "app"))
+    from PySide6.QtWidgets import QApplication
+
+    from samarizator.app import SettingsDialog, Window
+
+    app = QApplication.instance() or QApplication([])
+    w = Window()
+    source = tmp_path / "demo.wav"
+    source.write_bytes(b"demo")
+    mid = w.store.create(source, w.settings)
+    w.store.save_chunk(mid, 0, [dict(start=0, end=1, speaker="A", text="Тест", uncertain=True)])
+    w.mid = mid
+    w.refresh_list()
+    assert w.table.rowCount() == 1
+    assert w.list.count() == 1
+    dialog = SettingsDialog(w.settings)
+    assert dialog.fields["memory_gb"].value() == 4
+    w.close()
+    app.processEvents()
+
+
+def test_sherpa_configuration_api():
+    sherpa = pytest.importorskip("sherpa_onnx")
+    config = sherpa.OfflineSpeakerDiarizationConfig(
+        segmentation=sherpa.OfflineSpeakerSegmentationModelConfig(
+            pyannote=sherpa.OfflineSpeakerSegmentationPyannoteModelConfig(model="/missing"),
+            num_threads=2,
+            provider="cpu",
+        ),
+        embedding=sherpa.SpeakerEmbeddingExtractorConfig(model="/missing", num_threads=2, provider="cpu"),
+        clustering=sherpa.FastClusteringConfig(num_clusters=-1, threshold=0.5),
+    )
+    assert config.clustering.num_clusters == -1

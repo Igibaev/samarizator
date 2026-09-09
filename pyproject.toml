@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "samarizator"
+version = "0.1.0"
+description = "Local-first meeting notes for macOS: Whisper, corporate LLM, Obsidian"
+requires-python = ">=3.11,<3.14"
+dependencies = ["PySide6>=6.8,<6.11", "httpx>=0.28,<0.29", "psutil>=7,<8", "keyring>=25,<26"]
+
+[project.optional-dependencies]
+diarization = ["sherpa-onnx>=1.12,<2", "numpy>=2,<3", "soundfile>=0.13,<0.14"]
+dev = ["pytest>=8,<10", "ruff>=0.11,<1"]
+
+[project.scripts]
+samarizator = "samarizator.app:main"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 110
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
