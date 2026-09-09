@@ -103,7 +103,7 @@ def transcribe(store, mid, settings, work):
 def main():
     phase, mid = sys.argv[1:3]
     store = Store()
-    settings = Settings(**json.loads(store.meeting(mid)["settings"]))
+    settings = Settings.from_dict(json.loads(store.meeting(mid)["settings"]))
     os.environ["SAMARIZATOR_THREADS"] = str(settings.threads)
     work_root = data_dir() / "work"
     work_root.mkdir(exist_ok=True)

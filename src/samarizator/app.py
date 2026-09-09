@@ -39,6 +39,17 @@ from .knowledge import stamp
 from .process import supervise
 from .store import Store
 
+PROVIDERS = [
+    ("Указать вручную", ""),
+    ("OpenAI", "https://api.openai.com/v1"),
+    ("OpenRouter", "https://openrouter.ai/api/v1"),
+    ("Groq", "https://api.groq.com/openai/v1"),
+    ("DeepSeek", "https://api.deepseek.com/v1"),
+    ("Together", "https://api.together.xyz/v1"),
+    ("Ollama · на этом Mac", "http://localhost:11434/v1"),
+    ("LM Studio · на этом Mac", "http://localhost:1234/v1"),
+]
+
 STATUS = {
     "new": "Новая",
     "transcribing": "Распознавание",
@@ -84,7 +95,14 @@ class SettingsDialog(QDialog):
         self.fields = {}
         local = QWidget()
         form = QFormLayout(local)
-        tabs.addTab(local, "Локальная обработка")
+        tabs.addTab(local, "Распознавание речи · локально")
+        intro = QLabel(
+            "Эти модели работают на вашем Mac и превращают аудио в текст: Whisper распознаёт речь, "
+            "остальные две разделяют собеседников. Аудио никуда не отправляется.\n"
+            "Облачная модель со второй вкладки работает только с готовым текстом — она составляет сводку."
+        )
+        intro.setWordWrap(True)
+        form.addRow(intro)
         for key, label in [
             ("whisper_model", "Модель Whisper (.bin)"),
             ("segmentation_model", "Модель сегментации (.onnx)"),
@@ -138,18 +156,22 @@ class SettingsDialog(QDialog):
         form.addRow(hint)
         corporate = QWidget()
         api = QFormLayout(corporate)
-        tabs.addTab(corporate, "Корпоративная модель")
+        tabs.addTab(corporate, "Облачная модель · сводки")
+        self.provider = QComboBox()
+        for label, url in PROVIDERS:
+            self.provider.addItem(label, url)
+        self.provider.setCurrentIndex(max(0, self.provider.findData(settings.base_url)))
+        self.provider.activated.connect(self.pick_provider)
+        api.addRow("Провайдер", self.provider)
         for key, label in [
-            ("endpoint", "Полный HTTPS endpoint"),
-            ("model", "Имя модели"),
-            ("auth_header", "Заголовок ключа"),
-            ("auth_prefix", "Префикс ключа"),
-            ("ca_file", "Корпоративный CA (.pem), необязательно"),
+            ("base_url", "Base URL"),
+            ("model", "Название модели"),
         ]:
             line = QLineEdit(getattr(settings, key))
             self.fields[key] = line
             api.addRow(label, line)
-        self.fields["endpoint"].setPlaceholderText("https://your-company.example/v1/chat/completions")
+        self.fields["base_url"].setPlaceholderText("https://openrouter.ai/api/v1")
+        self.fields["model"].setPlaceholderText("openai/gpt-4o-mini")
         self.key = QLineEdit()
         self.key.setEchoMode(QLineEdit.EchoMode.Password)
         self.key.setPlaceholderText("Пусто — оставить сохранённый ключ")
@@ -164,10 +186,11 @@ class SettingsDialog(QDialog):
             self.fields[key] = spin
             api.addRow(label, spin)
         hint = QLabel(
-            "Поддерживается OpenAI-совместимый Chat Completions API, включая корпоративные шлюзы "
-            "и Azure с полным URL. Для api-key задайте пустой префикс.\n"
+            "Подходит любой OpenAI-совместимый Chat Completions API: OpenAI, OpenRouter, Groq, DeepSeek, "
+            "Together, а также локальные Ollama и LM Studio по адресу localhost. Ключ уходит "
+            "заголовком Authorization: Bearer; для localhost его можно оставить любым непустым.\n"
             "Аудио не отправляется. Текст уходит на этот адрес только при нажатии «Создать сводку». "
-            "Публичной модели по умолчанию нет. Для доступа может потребоваться VPN."
+            "Размер блока и лимит ответа определяют, сколько токенов расходуется на одну запись."
         )
         hint.setWordWrap(True)
         api.addRow(hint)
@@ -177,6 +200,10 @@ class SettingsDialog(QDialog):
         buttons.accepted.connect(self.save)
         buttons.rejected.connect(self.reject)
         outer.addWidget(buttons)
+
+    def pick_provider(self, index):
+        if url := self.provider.itemData(index):
+            self.fields["base_url"].setText(url)
 
     def pick(self, key, widget):
         path = (
@@ -199,7 +226,7 @@ class SettingsDialog(QDialog):
                     else field.text()
                 )
             updated = Settings(**values)
-            updated.validate(corporate=bool(updated.endpoint))
+            updated.validate(api=bool(updated.base_url))
             if self.key.text():
                 set_api_key(self.key.text())
             updated.save()
@@ -238,7 +265,7 @@ class Window(QMainWindow):
         title = QLabel("Samarizator")
         title.setObjectName("brand")
         top.addWidget(title)
-        top.addWidget(QLabel("Локальное аудио  ·  Корпоративные сводки  ·  Obsidian"))
+        top.addWidget(QLabel("Локальное аудио  ·  Облачные сводки  ·  Obsidian"))
         top.addStretch()
         self.settings_button = QPushButton("Настройки")
         self.settings_button.clicked.connect(self.configure)
@@ -461,7 +488,7 @@ class Window(QMainWindow):
         else:
             self.summary.setPlainText(
                 "После распознавания проверьте текст и говорящих. Затем нажмите «Создать сводку».\n\n"
-                "Будет отправлен только текст на настроенный корпоративный endpoint. "
+                "Будет отправлен только текст на выбранный API модели. "
                 "Результат автоматически сохранится в базе знаний."
             )
         self.controls()
@@ -508,7 +535,7 @@ class Window(QMainWindow):
             return
         try:
             meeting = self.store.meeting(self.mid)
-            original = Settings(**json.loads(meeting["settings"]))
+            original = Settings.from_dict(json.loads(meeting["settings"]))
             # Preserve transcription chunk geometry and speaker semantics on resume.
             if phase == "transcribe":
                 if not self.store.checkpoint(self.mid, "source", 0):
@@ -518,11 +545,8 @@ class Window(QMainWindow):
                         setattr(original, key, getattr(self.settings, key))
             else:
                 for key in [
-                    "endpoint",
+                    "base_url",
                     "model",
-                    "auth_header",
-                    "auth_prefix",
-                    "ca_file",
                     "input_chars",
                     "max_output_tokens",
                     "vault",
@@ -530,7 +554,7 @@ class Window(QMainWindow):
                 ]:
                     setattr(original, key, getattr(self.settings, key))
                 if phase == "summary":
-                    original.validate(corporate=True)
+                    original.validate(api=True)
                     if not self.store.checkpoint(self.mid, "asr_complete", 0):
                         raise ValueError("Сначала завершите распознавание всей записи.")
             self.store.update(

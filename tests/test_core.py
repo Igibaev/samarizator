@@ -126,9 +126,42 @@ def test_invalid_evidence_and_owner_rejected():
 @pytest.mark.parametrize(
     "url", ["http://corp.test/v1", "https://user:secret@corp.test/v1", "", "file:///tmp/x"]
 )
-def test_endpoint_validation(url):
+def test_base_url_validation(url):
     with pytest.raises(ValueError):
-        Settings(endpoint=url, model="corp").validate(corporate=True)
+        Settings(base_url=url, model="corp").validate(api=True)
+
+
+@pytest.mark.parametrize(
+    "url", ["https://openrouter.ai/api/v1", "http://localhost:11434/v1", "http://127.0.0.1:1234/v1"]
+)
+def test_https_and_loopback_http_accepted(url):
+    Settings(base_url=url, model="llama").validate(api=True)
+
+
+@pytest.mark.parametrize(
+    ("base_url", "expected"),
+    [
+        ("https://openrouter.ai/api/v1", "https://openrouter.ai/api/v1/chat/completions"),
+        ("https://openrouter.ai/api/v1/", "https://openrouter.ai/api/v1/chat/completions"),
+        ("https://corp.test/v1/chat/completions", "https://corp.test/v1/chat/completions"),
+    ],
+)
+def test_chat_url_building(base_url, expected):
+    assert Settings(base_url=base_url).chat_url() == expected
+
+
+def test_old_settings_migrate_and_unknown_fields_ignored():
+    old = dict(
+        endpoint="https://corp.test/v1/chat/completions",
+        auth_header="api-key",
+        auth_prefix="",
+        ca_file="/tmp/corp.pem",
+        model="corp",
+    )
+    settings = Settings.from_dict(old)
+    assert settings.base_url == "https://corp.test/v1"
+    # The migrated value must rebuild the exact previous URL so cached summary blocks stay valid.
+    assert settings.chat_url() == old["endpoint"]
 
 
 def test_ledger_preserves_late_topics_and_cached_maps(meeting):

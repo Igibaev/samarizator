@@ -13,11 +13,8 @@ def data_dir() -> Path:
 
 @dataclass
 class Settings:
-    endpoint: str = ""
+    base_url: str = ""
     model: str = ""
-    auth_header: str = "Authorization"
-    auth_prefix: str = "Bearer "
-    ca_file: str = ""
     memory_gb: float = 4.0
     threads: int = 4
     chunk_seconds: int = 120
@@ -31,7 +28,11 @@ class Settings:
     input_chars: int = 12000
     max_output_tokens: int = 3000
 
-    def validate(self, corporate=False):
+    def chat_url(self):
+        base = self.base_url.strip().rstrip("/")
+        return base if base.endswith("/chat/completions") else base + "/chat/completions"
+
+    def validate(self, api=False):
         if not 2 <= self.memory_gb <= 64:
             raise ValueError("Бюджет памяти должен быть от 2 до 64 ГиБ.")
         if not 1 <= self.threads <= 16 or not 30 <= self.chunk_seconds <= 300:
@@ -42,22 +43,20 @@ class Settings:
             raise ValueError("Некорректный размер контекста.")
         if self.speakers != -1 and not 1 <= self.speakers <= 20:
             raise ValueError("Число собеседников: -1 (авто) или 1–20.")
-        if corporate:
-            parsed = urlparse(self.endpoint)
+        if api:
+            parsed = urlparse(self.base_url)
             if (
-                parsed.scheme != "https"
+                parsed.scheme not in {"https", "http"}
                 or not parsed.hostname
                 or parsed.username
                 or parsed.password
                 or parsed.fragment
             ):
-                raise ValueError("Укажите полный HTTPS endpoint корпоративного chat/completions API.")
+                raise ValueError("Укажите base URL совместимого API, например https://openrouter.ai/api/v1.")
+            if parsed.scheme == "http" and parsed.hostname not in {"localhost", "127.0.0.1", "::1"}:
+                raise ValueError("HTTP допустим только для локальной модели на localhost. Иначе HTTPS.")
             if not self.model.strip():
-                raise ValueError("Укажите название корпоративной модели.")
-            if self.auth_header not in {"Authorization", "api-key", "X-API-Key"}:
-                raise ValueError("Поддерживаются Authorization, api-key, X-API-Key.")
-            if self.ca_file and not Path(self.ca_file).is_file():
-                raise ValueError("Файл корпоративного CA не найден.")
+                raise ValueError("Укажите название модели.")
 
     def save(self):
         self.validate()
@@ -68,11 +67,18 @@ class Settings:
         tmp.replace(path)
 
     @classmethod
+    def from_dict(cls, values):
+        values = dict(values)
+        # Settings saved before the universal API tab held a full chat/completions endpoint.
+        if not values.get("base_url") and values.get("endpoint"):
+            values["base_url"] = values["endpoint"].strip().rstrip("/").removesuffix("/chat/completions")
+        return cls(**{k: v for k, v in values.items() if k in cls.__dataclass_fields__})
+
+    @classmethod
     def load(cls):
         path = data_dir() / "settings.json"
         if path.exists():
-            values = json.loads(path.read_text())
-            return cls(**{k: v for k, v in values.items() if k in cls.__dataclass_fields__})
+            return cls.from_dict(json.loads(path.read_text()))
         models = data_dir() / "models"
         return cls(
             whisper_model=str(models / "ggml-small-q5_1.bin"),

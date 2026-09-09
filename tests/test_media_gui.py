@@ -70,6 +70,11 @@ def test_gui_constructs_and_shows_recording(tmp_path, monkeypatch):
         w.store.meeting(mid)
     dialog = SettingsDialog(w.settings)
     assert dialog.fields["memory_gb"].value() == 4
+    dialog.fields["base_url"].setText("https://typed-by-hand.example/v1")
+    dialog.pick_provider(dialog.provider.findData("https://openrouter.ai/api/v1"))
+    assert dialog.fields["base_url"].text() == "https://openrouter.ai/api/v1"
+    dialog.pick_provider(dialog.provider.findData(""))
+    assert dialog.fields["base_url"].text() == "https://openrouter.ai/api/v1"
     from PySide6.QtCore import QCoreApplication, QEvent
 
     w.timer.stop()
