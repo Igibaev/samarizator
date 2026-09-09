@@ -3,8 +3,11 @@
 import hashlib
 import json
 import os
+import ssl
 import tarfile
 import urllib.request
+
+import truststore
 
 from .config import data_dir
 
@@ -31,8 +34,9 @@ def download(url, path):
         return
     part = path.with_suffix(path.suffix + ".part")
     print(f"Скачивание {path.name}…", flush=True)
+    context = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     try:
-        with urllib.request.urlopen(url, timeout=60) as response, part.open("wb") as f:
+        with urllib.request.urlopen(url, timeout=60, context=context) as response, part.open("wb") as f:
             while chunk := response.read(1024 * 1024):
                 f.write(chunk)
         if part.stat().st_size < 1024:

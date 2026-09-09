@@ -2,9 +2,11 @@
 
 import hashlib
 import json
+import ssl
 import time
 
 import httpx
+import truststore
 
 from .config import get_api_key
 
@@ -71,8 +73,12 @@ class ChatClient:
             max_tokens=s.max_output_tokens,
             messages=[dict(role="system", content=SYSTEM), dict(role="user", content=prompt)],
         )
+        # Verify against the OS trust store, so a corporate root installed in the system
+        # keychain works the way curl does. certifi alone would reject an intercepted TLS chain.
+        context = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         # No redirect, telemetry, public fallback, or implicit environment proxy.
         with httpx.Client(
+            verify=context,
             trust_env=False,
             follow_redirects=False,
             timeout=httpx.Timeout(180, connect=20),
