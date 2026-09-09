@@ -6,7 +6,7 @@ from dataclasses import asdict
 from urllib.parse import quote
 
 from PySide6.QtCore import QLockFile, Qt, QThread, QTimer, QUrl, Signal
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QColor, QDesktopServices, QPalette
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -545,7 +545,11 @@ class Window(QMainWindow):
         self.summarize.setEnabled(ready and not busy)
         self.cancel.setEnabled(busy)
         self.save_segment.setEnabled(ready and not busy)
-        self.obsidian.setEnabled(ready and bool(self.store.meeting(self.mid)["note"]))
+        self.obsidian.setEnabled(
+            ready
+            and bool(self.store.meeting(self.mid)["note"])
+            and bool(self.store.meeting(self.mid)["summary"])
+        )
         self.reexport.setEnabled(ready and not busy and bool(self.store.meeting(self.mid)["summary"]))
 
     def open_source(self):
@@ -569,6 +573,21 @@ def main():
     os.umask(0o077)
     app = QApplication(sys.argv)
     app.setApplicationName("Samarizator")
+    app.setStyle("Fusion")
+    palette = QPalette()
+    for role, color in [
+        (QPalette.ColorRole.Window, "#f4f5f7"),
+        (QPalette.ColorRole.WindowText, "#223e35"),
+        (QPalette.ColorRole.Base, "#ffffff"),
+        (QPalette.ColorRole.AlternateBase, "#f0f4f1"),
+        (QPalette.ColorRole.Text, "#223e35"),
+        (QPalette.ColorRole.Button, "#e3ece8"),
+        (QPalette.ColorRole.ButtonText, "#173e35"),
+        (QPalette.ColorRole.Highlight, "#d9e9e2"),
+        (QPalette.ColorRole.HighlightedText, "#163f33"),
+    ]:
+        palette.setColor(role, QColor(color))
+    app.setPalette(palette)
     lock = QLockFile(str(data_dir() / "app.lock"))
     lock.setStaleLockTime(0)
     if not lock.tryLock(100):

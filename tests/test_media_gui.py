@@ -37,6 +37,9 @@ def test_real_ffmpeg_stereo_extraction(tmp_path):
         assert not any(f.readframes(16000))
 
 
+_qt_app = None
+
+
 def test_gui_constructs_and_shows_recording(tmp_path, monkeypatch):
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     monkeypatch.setenv("SAMARIZATOR_HOME", str(tmp_path / "app"))
@@ -44,7 +47,9 @@ def test_gui_constructs_and_shows_recording(tmp_path, monkeypatch):
 
     from samarizator.app import SettingsDialog, Window
 
-    app = QApplication.instance() or QApplication([])
+    global _qt_app
+    _qt_app = QApplication.instance() or QApplication([])
+    app = _qt_app
     w = Window()
     source = tmp_path / "demo.wav"
     source.write_bytes(b"demo")
@@ -56,7 +61,14 @@ def test_gui_constructs_and_shows_recording(tmp_path, monkeypatch):
     assert w.list.count() == 1
     dialog = SettingsDialog(w.settings)
     assert dialog.fields["memory_gb"].value() == 4
+    from PySide6.QtCore import QCoreApplication, QEvent
+
+    w.timer.stop()
+    dialog.close()
+    dialog.deleteLater()
     w.close()
+    w.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
     app.processEvents()
 
 

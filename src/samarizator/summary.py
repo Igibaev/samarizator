@@ -123,23 +123,31 @@ class CorporateClient:
 def blocks(segments, max_chars):
     block, size = [], 0
     for row in segments:
-        # Bound each segment even for imported / manually edited unusually long text.
-        for pos in range(0, max(1, len(row["text"])), max_chars // 2):
-            line = json.dumps(
-                dict(
-                    id=row["id"],
-                    start=round(row["start"], 2),
-                    speaker=row["speaker"],
-                    uncertain=bool(row["uncertain"]),
-                    text=row["text"][pos : pos + max_chars // 2],
-                ),
-                ensure_ascii=False,
-            )
+        position = 0
+        while position < max(1, len(row["text"])):
+            width = min(max_chars // 2, max(1, len(row["text"]) - position))
+            while True:
+                line = json.dumps(
+                    dict(
+                        id=row["id"],
+                        start=round(row["start"], 2),
+                        speaker=row["speaker"],
+                        uncertain=bool(row["uncertain"]),
+                        text=row["text"][position : position + width],
+                    ),
+                    ensure_ascii=False,
+                )
+                if len(line) + 1 <= max_chars:
+                    break
+                if width == 1:
+                    raise ValueError("Имя собеседника слишком длинное для размера блока.")
+                width = max(1, width // 2)
             if block and size + len(line) + 1 > max_chars:
                 yield block
                 block, size = [], 0
             block.append((row["id"], line))
             size += len(line) + 1
+            position += width
     if block:
         yield block
 
@@ -174,12 +182,14 @@ def summarize(store, mid, settings, progress=lambda *_: None, client=None):
     # A reduction unit is an item, not a whole map: every request remains bounded.
     current = ledger
     for level in range(8):
-        units, group, size = [], [], 0
+        units, group, size = [], [], 2
         for item in current:
-            length = len(json.dumps(item, ensure_ascii=False))
+            length = len(json.dumps(item, ensure_ascii=False)) + 2
+            if length + 2 > settings.input_chars:
+                raise ValueError("Один пункт сводки превышает размер блока. Увеличьте входной лимит.")
             if group and size + length > settings.input_chars:
                 units.append(group)
-                group, size = [], 0
+                group, size = [], 2
             group.append(item)
             size += length
         if group:

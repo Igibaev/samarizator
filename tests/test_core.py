@@ -180,3 +180,11 @@ def test_cancellation_and_normal_completion():
         supervise([sys.executable, "-c", "import time; time.sleep(30)"], 64, cancelled=lambda: True)
     assert supervise([sys.executable, "-c", "pass"], 64) == 0
     assert rss_tree(os.getpid()) > 0
+
+
+def test_blocks_bound_json_escaped_control_characters():
+    text = "\x00" * 9000 + '\\"' * 1000
+    rows = [dict(id=1, **segment(text))]
+    batches = list(blocks(rows, 4000))
+    assert all(sum(len(line) + 1 for _, line in batch) <= 4000 for batch in batches)
+    assert "".join(json.loads(line)["text"] for batch in batches for _, line in batch) == text

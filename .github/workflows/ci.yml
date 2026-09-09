@@ -19,7 +19,7 @@ jobs:
           version: '0.8.22'
       - name: Install FFmpeg
         run: |
-          if [ "$RUNNER_OS" = "macOS" ]; then brew install ffmpeg; else sudo apt-get update && sudo apt-get install -y ffmpeg; fi
+          if [ "$RUNNER_OS" = "macOS" ]; then brew install ffmpeg; else sudo apt-get update && sudo apt-get install -y ffmpeg libegl1; fi
       - run: uv sync --frozen --python 3.12 --extra diarization --extra dev
       - run: uv run --frozen --extra diarization --extra dev ruff check src tests
       - run: uv run --frozen --extra diarization --extra dev pytest -q
