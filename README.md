@@ -13,6 +13,25 @@ git clone https://github.com/Igibaev/samarizator.git && cd samarizator
 
 Первый запуск устанавливает uv, FFmpeg, Whisper.cpp и Python-зависимости, скачивает модели и открывает окно. Нужен интернет для установки; модели занимают несколько сотен МБ, зависимости — дополнительное место. Последующие запуски используют готовое окружение и модели. Если Homebrew ещё нет, установите его по инструкции на brew.sh и повторите команду.
 
+### Ошибка SSL-сертификата при установке
+
+Если `./start.sh` падает с ошибкой проверки SSL-сертификата (часто бывает за корпоративным прокси/MITM-сертификатом), соберите системные сертификаты в один файл и повторите установку с ним:
+
+```bash
+security find-certificate -a -p /System/Library/Keychains/SystemRootCertificates.keychain > /tmp/all-certs.pem
+security find-certificate -a -p /Library/Keychains/System.keychain >> /tmp/all-certs.pem
+rm -rf .venv
+SSL_CERT_FILE=/tmp/all-certs.pem uv sync
+```
+
+Чтобы зафиксировать это на будущее (без повторного экспорта переменной каждый раз), создайте в корне проекта файл `uv.toml` рядом с `pyproject.toml`:
+
+```toml
+allow-insecure-host = ["pypi.org", "files.pythonhosted.org"]
+```
+
+Это отключает проверку TLS-сертификата именно для этих двух хостов при установке пакетов через uv — используйте только если понимаете, почему сертификат не проходит проверку (например, корпоративный прокси с собственным CA).
+
 В **Настройки → Корпоративная модель** один раз укажите:
 
 1. **Полный HTTPS endpoint** Chat Completions вашего корпоративного шлюза. Не адрес страницы чата.
