@@ -90,7 +90,9 @@ def transcribe(store, mid, settings, work):
         for channel in [0, 1] if settings.diarization == "channels" else [None]:
             wav = work / "chunk.wav"
             extract(source, wav, work, start, length, channel)
-            result = whisper(wav, settings.whisper_model, settings.language, settings.threads, work)
+            result = whisper(
+                wav, settings.whisper_model, settings.language, settings.threads, work, settings.gpu
+            )
             rows += parse_whisper(result, start, lower, upper, turns or [], channel)
             wav.unlink()
         store.save_chunk(mid, index, sorted(rows, key=lambda r: r["start"]))

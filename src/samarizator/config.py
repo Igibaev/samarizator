@@ -19,6 +19,7 @@ class Settings:
     threads: int = 4
     chunk_seconds: int = 120
     language: str = "ru"
+    gpu: bool = False
     whisper_model: str = ""
     diarization: str = "local"
     speakers: int = -1

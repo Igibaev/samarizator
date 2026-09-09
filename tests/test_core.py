@@ -7,7 +7,7 @@ import pytest
 
 from samarizator.config import Settings
 from samarizator.knowledge import export, topic_name
-from samarizator.media import assign_speaker, parse_whisper
+from samarizator.media import assign_speaker, parse_whisper, whisper
 from samarizator.process import BudgetExceeded, rss_tree, supervise
 from samarizator.summary import blocks, summarize, validate_summary
 
@@ -78,6 +78,21 @@ def test_delete_removes_meeting_segments_and_checkpoints(meeting):
         store.meeting(mid)
     assert store.segments(mid) == []
     assert store.checkpoint(mid, "source", 0) is None
+
+
+def test_gpu_setting_controls_the_no_gpu_flag(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_run(args, log, *rest, **kwargs):
+        calls.append(args)
+        (tmp_path / "whisper-result.json").write_text('{"transcription": []}')
+
+    monkeypatch.setattr("samarizator.media.shutil.which", lambda name: "/usr/bin/whisper-cli")
+    monkeypatch.setattr("samarizator.media.run_command", fake_run)
+    whisper(tmp_path / "chunk.wav", "model.bin", "ru", 4, tmp_path)
+    whisper(tmp_path / "chunk.wav", "model.bin", "ru", 4, tmp_path, gpu=True)
+    assert "-ng" in calls[0]
+    assert "-ng" not in calls[1]
 
 
 def test_speaker_overlap_is_uncertain():

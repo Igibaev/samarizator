@@ -147,10 +147,16 @@ class SettingsDialog(QDialog):
         language.setPlaceholderText("ru, en, kk или auto")
         self.fields["language"] = language
         form.addRow("Язык Whisper", language)
+        gpu = QCheckBox("Считать на GPU (Metal) вместо CPU")
+        gpu.setChecked(settings.gpu)
+        self.fields["gpu"] = gpu
+        form.addRow("Ускорение", gpu)
         hint = QLabel(
             "Режим каналов подходит только для записи, где каждый из двух участников записан "
             "в свой канал. Автоматические имена — условные; их можно исправить перед сводкой.\n"
-            "Контроль RSS останавливает обработку на 90% бюджета. Это не жёсткая квота ОС."
+            "Контроль RSS останавливает обработку на 90% бюджета. Это не жёсткая квота ОС.\n"
+            "GPU заметно быстрее и меньше греет ноутбук при том же качестве, но память Metal "
+            "не попадает в этот подсчёт: на длинных записях бюджет перестаёт быть точной оценкой."
         )
         hint.setWordWrap(True)
         form.addRow(hint)
@@ -221,6 +227,8 @@ class SettingsDialog(QDialog):
                 values[key] = (
                     field.currentData()
                     if isinstance(field, QComboBox)
+                    else field.isChecked()
+                    if isinstance(field, QCheckBox)
                     else field.value()
                     if isinstance(field, (QSpinBox, QDoubleSpinBox))
                     else field.text()
@@ -541,7 +549,7 @@ class Window(QMainWindow):
                 if not self.store.checkpoint(self.mid, "source", 0):
                     original = Settings(**asdict(self.settings))
                 else:
-                    for key in ["memory_gb", "threads", "whisper_model"]:
+                    for key in ["memory_gb", "threads", "whisper_model", "gpu"]:
                         setattr(original, key, getattr(self.settings, key))
             else:
                 for key in [
