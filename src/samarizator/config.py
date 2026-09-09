@@ -40,7 +40,7 @@ class Settings:
             raise ValueError("Некорректные параметры CPU или длины фрагмента.")
         if self.diarization not in {"local", "channels", "manual"}:
             raise ValueError("Неизвестный режим собеседников.")
-        if not 4000 <= self.input_chars <= 48000 or not 512 <= self.max_output_tokens <= 32000:
+        if not 4000 <= self.input_chars <= 48000 or not 512 <= self.max_output_tokens <= 64000:
             raise ValueError("Некорректный размер контекста.")
         if self.speakers != -1 and not 1 <= self.speakers <= 20:
             raise ValueError("Число собеседников: -1 (авто) или 1–20.")

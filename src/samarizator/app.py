@@ -184,7 +184,7 @@ class SettingsDialog(QDialog):
         api.addRow("API-ключ → macOS Keychain", self.key)
         for key, label, lo, hi in [
             ("input_chars", "Символов текста на запрос", 4000, 48000),
-            ("max_output_tokens", "Лимит токенов ответа", 512, 32000),
+            ("max_output_tokens", "Лимит токенов ответа", 512, 64000),
         ]:
             spin = QSpinBox()
             spin.setRange(lo, hi)
