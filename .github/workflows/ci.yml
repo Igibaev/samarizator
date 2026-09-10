@@ -29,6 +29,6 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           brew install whisper-cpp
-          uv run --frozen --extra diarization python -m samarizator.setup_models
-          say -v Samantha -o /tmp/samarizator-smoke.aiff 'The project deadline is Friday. Alice will prepare the report. We need to review the budget before the next meeting. The project deadline is Friday. Alice will prepare the report.'
+          uv run --frozen --extra diarization python -m samarizator.setup_models --quality
+          say -v Samantha -o /tmp/samarizator-smoke.aiff 'The project deadline is Friday. Alice will prepare the report. We need to review the budget before the next meeting. The project deadline is Friday. Alice will prepare the report. The team will meet on Monday to discuss the results. We agreed to postpone the release until the tests pass. Bob is responsible for checking the requirements. We have two open questions about the budget and the timeline. Please keep the original recording for review. The next meeting is scheduled for Wednesday.'
           uv run --frozen --extra diarization python scripts/smoke_audio.py /tmp/samarizator-smoke.aiff

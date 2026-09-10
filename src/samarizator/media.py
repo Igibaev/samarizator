@@ -105,13 +105,35 @@ def parse_whisper(payload, offset, lower, upper, turns=(), channel=None):
             speaker, uncertain = assign_speaker(start, end, turns)
         # Explicitly flag chunk seams for review; alignment is not sample exact.
         seam = (lower > 0 and start < lower + 1) or end > upper - 1
+        reasons = []
+        if uncertain:
+            reasons.append("говорящий")
+        if seam:
+            reasons.append("граница фрагмента")
+        # Token scores are decoder signals, not calibrated word accuracy probabilities.
+        scores = [
+            t["p"]
+            for t in row.get("tokens", [])
+            if isinstance(t.get("p"), (int, float))
+            and t.get("text", "").strip()
+            and not t["text"].startswith("[_")
+        ]
+        if scores and (sum(scores) / len(scores) < 0.55 or sum(p < 0.2 for p in scores) >= 2):
+            reasons.append("низкая уверенность Whisper")
         output.append(
-            dict(start=max(0, start), end=end, text=text, speaker=speaker, uncertain=bool(uncertain or seam))
+            dict(
+                start=max(0, start),
+                end=end,
+                text=text,
+                speaker=speaker,
+                uncertain=bool(reasons),
+                review=", ".join(reasons),
+            )
         )
     return output
 
 
-def whisper(wav, model, language, threads, work, gpu=False):
+def whisper(wav, model, language, threads, work, gpu=False, *, vad_model="", glossary="", beam_size=5):
     binary = shutil.which("whisper-cli")
     if not binary:
         raise ValueError("whisper-cli не найден. Запустите ./start.sh для установки.")
@@ -122,6 +144,23 @@ def whisper(wav, model, language, threads, work, gpu=False):
     if not gpu:
         # Metal allocations stay outside the RSS the watchdog can see.
         args.append("-ng")
-    args += ["-oj", "-of", str(prefix), "-ml", "80", "-sow"]
+    args += ["-ojf", "-of", str(prefix), "-ml", "80", "-sow", "-bs", str(beam_size)]
+    if glossary.strip():
+        # Hints only; do not carry unreviewed ASR text into the next chunk.
+        args += ["--prompt", glossary.strip()[:800]]
+    if vad_model:
+        args += [
+            "--vad",
+            "--vad-model",
+            str(vad_model),
+            "--vad-threshold",
+            "0.4",
+            "--vad-min-speech-duration-ms",
+            "150",
+            "--vad-min-silence-duration-ms",
+            "500",
+            "--vad-speech-pad-ms",
+            "250",
+        ]
     run_command(args, work / "whisper.log")
     return json.loads(result.read_text())

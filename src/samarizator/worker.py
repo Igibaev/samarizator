@@ -1,11 +1,11 @@
 import json
-import math
 import os
 import shutil
 import sys
 import tempfile
 from pathlib import Path
 
+from .audio_quality import diagnose, plan_chunks
 from .config import Settings, data_dir
 from .media import extract, fingerprint, parse_whisper, probe, whisper
 from .process import run_command
@@ -24,6 +24,8 @@ def transcribe(store, mid, settings, work):
     settings.validate()
     if not Path(settings.whisper_model).is_file():
         raise ValueError("Модель Whisper не найдена. Запустите ./start.sh или выберите .bin в настройках.")
+    if settings.vad and not Path(settings.vad_model).is_file():
+        raise ValueError("Модель VAD не найдена. Запустите ./start.sh --quality или отключите VAD.")
     if Path(settings.whisper_model).stat().st_size * 2.5 + 600 * 1024**2 > settings.memory_gb * 1024**3 * 0.8:
         raise ValueError(
             "Выбранная модель слишком велика для бюджета. Выберите small-q5_1/base или увеличьте бюджет."
@@ -77,24 +79,38 @@ def transcribe(store, mid, settings, work):
             turns = json.loads(target.read_text())
             store.save_checkpoint(mid, "diarization", 0, turns)
             wav.unlink()
-    count = math.ceil(duration / settings.chunk_seconds)
-    for index in range(count):
+    plan = store.checkpoint(mid, "asr-plan", 0)
+    if plan is None:
+        status(store, mid, "Подбор границ фрагментов по паузам…")
+        plan = plan_chunks(source, duration, settings.chunk_seconds, work, settings.pause_boundaries)
+        store.save_checkpoint(mid, "asr-plan", 0, plan)
+    count = len(plan)
+    for index, (lower, upper) in enumerate(plan):
         if store.checkpoint(mid, "asr", index):
             continue
-        lower = index * settings.chunk_seconds
-        upper = min(duration, lower + settings.chunk_seconds)
         start = max(0, lower - 2)
         length = min(duration, upper + 2) - start
         status(store, mid, f"Whisper: фрагмент {index + 1}/{count}")
         rows = []
+        diagnostics = []
         for channel in [0, 1] if settings.diarization == "channels" else [None]:
             wav = work / "chunk.wav"
             extract(source, wav, work, start, length, channel)
+            diagnostics.append(dict(channel=channel, **diagnose(wav)))
             result = whisper(
-                wav, settings.whisper_model, settings.language, settings.threads, work, settings.gpu
+                wav,
+                settings.whisper_model,
+                settings.language,
+                settings.threads,
+                work,
+                settings.gpu,
+                vad_model=settings.vad_model if settings.vad else "",
+                glossary=settings.glossary,
+                beam_size=settings.beam_size,
             )
             rows += parse_whisper(result, start, lower, upper, turns or [], channel)
             wav.unlink()
+        store.save_checkpoint(mid, "audio-quality", index, diagnostics)
         store.save_chunk(mid, index, sorted(rows, key=lambda r: r["start"]))
     if not store.segments(mid, limit=1):
         raise ValueError("Whisper не обнаружил речь. Проверьте аудиодорожку и язык.")

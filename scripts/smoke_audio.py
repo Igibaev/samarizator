@@ -23,6 +23,12 @@ def main():
         assert rows, "No speech recognized"
         assert any(r["speaker"] != "Не определён" for r in rows), "No diarization result"
         assert store.checkpoint(mid, "asr_complete", 0)
+        assert settings.vad and settings.pause_boundaries, (
+            "Quality profile must be enabled in this smoke test"
+        )
+        assert len(store.checkpoint(mid, "asr-plan", 0)) > 1, "Need audio across a chunk boundary"
+        assert store.checkpoint(mid, "audio-quality", 0)
+        assert all(0 <= r["start"] < r["end"] <= store.meeting(mid)["duration"] + 1 for r in rows)
         print(
             f"Real audio smoke passed: {len(rows)} segments; speakers: {sorted({r['speaker'] for r in rows})}"
         )

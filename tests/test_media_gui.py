@@ -1,3 +1,4 @@
+import json
 import shutil
 import subprocess
 import wave
@@ -59,6 +60,16 @@ def test_gui_constructs_and_shows_recording(tmp_path, monkeypatch):
     w.refresh_list()
     assert w.table.rowCount() == 1
     assert w.list.count() == 1
+    sid = w.store.segments(mid)[0]["id"]
+    item = dict(kind="point", text="Точная сумма 17 млн", evidence=[sid], owner=None, due=None)
+    brief = dict(overview="Короткий итог", items=[], topics=[])
+    detailed = dict(overview="Детали обсуждения", items=[item], topics=["Бюджет"])
+    w.store.update(mid, summary=json.dumps(dict(**brief, brief=brief, detailed=detailed)))
+    w.load_detail()
+    assert "Короткий итог" in w.summary.toPlainText()
+    assert "17 млн" not in w.summary.toPlainText()
+    assert "17 млн" in w.detailed_summary.toPlainText()
+    assert "00:00:00" in w.detailed_summary.toPlainText()
     from PySide6.QtWidgets import QMessageBox
 
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
@@ -70,6 +81,11 @@ def test_gui_constructs_and_shows_recording(tmp_path, monkeypatch):
         w.store.meeting(mid)
     dialog = SettingsDialog(w.settings)
     assert dialog.fields["memory_gb"].value() == 4
+    old_model = dialog.fields["whisper_model"].text()
+    dialog.quality_profile()
+    assert dialog.fields["memory_gb"].value() == 16
+    assert dialog.fields["vad"].isChecked()
+    assert dialog.fields["whisper_model"].text() == old_model
     dialog.fields["base_url"].setText("https://typed-by-hand.example/v1")
     dialog.pick_provider(dialog.provider.findData("https://openrouter.ai/api/v1"))
     assert dialog.fields["base_url"].text() == "https://openrouter.ai/api/v1"

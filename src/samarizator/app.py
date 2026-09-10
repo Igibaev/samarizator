@@ -35,9 +35,10 @@ from PySide6.QtWidgets import (
 )
 
 from .config import Settings, data_dir, set_api_key
-from .knowledge import stamp
+from .knowledge import stamp, summary_text
 from .process import supervise
 from .store import Store
+from .summary import summary_views
 
 PROVIDERS = [
     ("Указать вручную", ""),
@@ -155,11 +156,45 @@ class SettingsDialog(QDialog):
             "Режим каналов подходит только для записи, где каждый из двух участников записан "
             "в свой канал. Автоматические имена — условные; их можно исправить перед сводкой.\n"
             "Контроль RSS останавливает обработку на 90% бюджета. Это не жёсткая квота ОС.\n"
-            "GPU заметно быстрее и меньше греет ноутбук при том же качестве, но память Metal "
+            "GPU может ускорить распознавание, но память Metal "
             "не попадает в этот подсчёт: на длинных записях бюджет перестаёт быть точной оценкой."
         )
         hint.setWordWrap(True)
         form.addRow(hint)
+        quality = QWidget()
+        qform = QFormLayout(quality)
+        tabs.addTab(quality, "Качество и термины")
+        profile = QPushButton("Применить профиль M4 Pro · 48 ГБ")
+        profile.clicked.connect(self.quality_profile)
+        qform.addRow(profile)
+        for key, label in [
+            ("pause_boundaries", "Сдвигать границы фрагментов к паузам"),
+            ("vad", "Локальный VAD · выделение речи"),
+        ]:
+            field = QCheckBox(label)
+            field.setChecked(getattr(settings, key))
+            self.fields[key] = field
+            qform.addRow(field)
+        for key, label in [("vad_model", "Модель VAD (.bin)"), ("glossary", "Термины, имена, аббревиатуры")]:
+            field = QLineEdit(getattr(settings, key))
+            self.fields[key] = field
+            qform.addRow(label, field)
+        self.fields["glossary"].setMaxLength(800)
+        self.fields["glossary"].setPlaceholderText("Samarizator, Иванов, EBITDA, названия ваших проектов")
+        beam = QSpinBox()
+        beam.setRange(1, 8)
+        beam.setValue(settings.beam_size)
+        self.fields["beam_size"] = beam
+        qform.addRow("Ширина поиска Whisper", beam)
+        hint = QLabel(
+            "Профиль: 16 ГиБ, 8 потоков CPU, фрагменты около 90 секунд, VAD и границы по паузам. "
+            "Выбранная модель и корпоративный API сохраняются. Для загрузки VAD: ./start.sh --quality.\n\n"
+            "Словарь — короткий список ожидаемых слов, а не инструкция. "
+            "Он помогает с написанием терминов, но может смещать распознавание. "
+            "Если VAD пропускает тихую речь, сравните запись с отключённым VAD."
+        )
+        hint.setWordWrap(True)
+        qform.addRow(hint)
         corporate = QWidget()
         api = QFormLayout(corporate)
         tabs.addTab(corporate, "Облачная модель · сводки")
@@ -206,6 +241,15 @@ class SettingsDialog(QDialog):
         buttons.accepted.connect(self.save)
         buttons.rejected.connect(self.reject)
         outer.addWidget(buttons)
+
+    def quality_profile(self):
+        profile = self.settings.quality_profile()
+        for key in ["memory_gb", "threads", "chunk_seconds", "beam_size"]:
+            self.fields[key].setValue(getattr(profile, key))
+        for key in ["gpu", "pause_boundaries", "vad"]:
+            self.fields[key].setChecked(getattr(profile, key))
+        if not self.fields["vad_model"].text().strip():
+            self.fields["vad_model"].setText(profile.vad_model)
 
     def pick_provider(self, index):
         if url := self.provider.itemData(index):
@@ -353,7 +397,12 @@ class Window(QMainWindow):
         self.tabs.addTab(transcript, "Расшифровка и собеседники")
         self.summary = QTextBrowser()
         self.summary.setOpenExternalLinks(False)
-        self.tabs.addTab(self.summary, "Сводка")
+        self.tabs.addTab(self.summary, "Кратко · тезисы")
+        self.detailed_summary = QTextBrowser()
+        self.detailed_summary.setOpenExternalLinks(False)
+        self.tabs.addTab(self.detailed_summary, "Подробная сводка")
+        self.audio_report = QTextBrowser()
+        self.tabs.addTab(self.audio_report, "Качество записи")
         bottom = QHBoxLayout()
         source = QPushButton("Открыть исходную запись")
         source.clicked.connect(self.open_source)
@@ -435,6 +484,8 @@ class Window(QMainWindow):
         self.table.setRowCount(0)
         self.visible_rows = []
         self.summary.setPlainText("")
+        self.detailed_summary.clear()
+        self.audio_report.clear()
         self.controls()
 
     def delete_meeting(self, mid=None):
@@ -475,30 +526,30 @@ class Window(QMainWindow):
         self.load_rows()
         if meeting["summary"]:
             result = json.loads(meeting["summary"])
-            labels = dict(point="ТЕМЫ", decision="РЕШЕНИЯ", action="ЗАДАЧИ", risk="РИСКИ", question="ВОПРОСЫ")
-            lines = [result["overview"], ""]
-            for kind, label in labels.items():
-                lines += [label]
-                for item in result["items"]:
-                    if item["kind"] == kind:
-                        lines += [
-                            "• "
-                            + item["text"]
-                            + (f" — {item['owner']}" if item.get("owner") else "")
-                            + (f" · {item['due']}" if item.get("due") else "")
-                            + "  [фрагменты: "
-                            + ", ".join(map(str, item["evidence"]))
-                            + "]"
-                        ]
-                lines += [""]
-            lines += ["Подробный реестр и ссылки с таймкодами — в заметке Obsidian."]
-            self.summary.setPlainText("\n".join(lines))
+            brief, detailed = summary_views(result)
+            refs = {r["id"]: stamp(r["start"]) for r in self.store.iter_segments(self.mid)}
+            self.summary.setPlainText(summary_text(brief, refs))
+            self.detailed_summary.setPlainText(summary_text(detailed, refs))
         else:
             self.summary.setPlainText(
                 "После распознавания проверьте текст и говорящих. Затем нажмите «Создать сводку».\n\n"
                 "Будет отправлен только текст на выбранный API модели. "
                 "Результат автоматически сохранится в базе знаний."
             )
+            self.detailed_summary.setPlainText(self.summary.toPlainText())
+        report = []
+        plan = self.store.checkpoint(self.mid, "asr-plan", 0) or []
+        for i, (start, end) in enumerate(plan):
+            for d in self.store.checkpoint(self.mid, "audio-quality", i) or []:
+                channel = f" · канал {d['channel'] + 1}" if d["channel"] is not None else ""
+                report.append(
+                    f"{stamp(start)}–{stamp(end)}{channel}: RMS {d['rms_dbfs']} dBFS; "
+                    + (", ".join(d["warnings"]) or "нет предупреждений об уровне сигнала")
+                )
+        self.audio_report.setPlainText(
+            "Диагностика уровня звука. Это не оценка точности текста и не измерение шума.\n\n"
+            + ("\n".join(report) or "Диагностика появится для новой обработки записи.")
+        )
         self.controls()
 
     def load_rows(self):
@@ -507,7 +558,12 @@ class Window(QMainWindow):
         self.visible_rows = rows
         for i, row in enumerate(rows):
             for col, value in enumerate(
-                [stamp(row["start"]), row["speaker"], row["text"], "Проверить" if row["uncertain"] else ""]
+                [
+                    stamp(row["start"]),
+                    row["speaker"],
+                    row["text"],
+                    (row.get("review") or "Проверить") if row["uncertain"] else "",
+                ]
             ):
                 self.table.setItem(i, col, QTableWidgetItem(value))
         self.table.resizeRowsToContents()
@@ -549,7 +605,7 @@ class Window(QMainWindow):
                 if not self.store.checkpoint(self.mid, "source", 0):
                     original = Settings(**asdict(self.settings))
                 else:
-                    for key in ["memory_gb", "threads", "whisper_model", "gpu"]:
+                    for key in ["memory_gb", "threads", "gpu"]:
                         setattr(original, key, getattr(self.settings, key))
             else:
                 for key in [

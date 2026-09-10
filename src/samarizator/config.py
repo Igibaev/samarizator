@@ -28,12 +28,35 @@ class Settings:
     vault: str = ""
     input_chars: int = 12000
     max_output_tokens: int = 3000
+    pause_boundaries: bool = False
+    vad: bool = False
+    vad_model: str = ""
+    glossary: str = ""
+    beam_size: int = 5
+
+    def quality_profile(self):
+        """Opt-in profile. Preserve the user's ASR model and corporate API configuration."""
+        from dataclasses import replace
+
+        return replace(
+            self,
+            memory_gb=16,
+            threads=8,
+            chunk_seconds=90,
+            gpu=False,
+            pause_boundaries=True,
+            vad=True,
+            beam_size=5,
+            vad_model=self.vad_model or str(data_dir() / "models/ggml-silero-v6.2.0.bin"),
+        )
 
     def chat_url(self):
         base = self.base_url.strip().rstrip("/")
         return base if base.endswith("/chat/completions") else base + "/chat/completions"
 
     def validate(self, api=False):
+        if not 1 <= self.beam_size <= 8 or len(self.glossary) > 800:
+            raise ValueError("Beam size: 1–8; словарь терминов: не более 800 символов.")
         if not 2 <= self.memory_gb <= 64:
             raise ValueError("Бюджет памяти должен быть от 2 до 64 ГиБ.")
         if not 1 <= self.threads <= 16 or not 30 <= self.chunk_seconds <= 300:

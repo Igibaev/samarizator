@@ -1,5 +1,6 @@
 """Download public model weights only; never upload audio or read corporate keys."""
 
+import argparse
 import hashlib
 import json
 import os
@@ -9,7 +10,7 @@ import urllib.request
 
 import truststore
 
-from .config import data_dir
+from .config import Settings, data_dir
 
 BASE = "https://github.com/k2-fsa/sherpa-onnx/releases/download/"
 MODELS = {
@@ -19,6 +20,10 @@ MODELS = {
     "embedding.onnx": BASE
     + "speaker-recongition-models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx",
 }
+QUALITY_MODELS = {
+    "ggml-silero-v6.2.0.bin": "https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v6.2.0.bin",
+}
+LARGE_MODEL = "ggml-large-v3.bin"
 
 
 def digest(path):
@@ -47,11 +52,22 @@ def download(url, path):
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--quality", action="store_true", help="VAD и профиль M4 Pro / 48 ГБ; текущая модель сохранится"
+    )
+    parser.add_argument("--large-v3", action="store_true", help="Скачать и выбрать full large-v3 (~3.1 GB)")
+    args = parser.parse_args()
     folder = data_dir() / "models"
     folder.mkdir(exist_ok=True)
     strict = os.environ.get("SAMARIZATOR_STRICT") == "1"
-    for name, url in MODELS.items():
-        if strict and name != "ggml-small-q5_1.bin":
+    models = dict(MODELS)
+    if args.quality and not strict:
+        models.update(QUALITY_MODELS)
+    if args.large_v3:
+        models[LARGE_MODEL] = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/" + LARGE_MODEL
+    for name, url in models.items():
+        if strict and name not in {"ggml-small-q5_1.bin", LARGE_MODEL}:
             continue
         if name.startswith("segmentation") and (folder / "segmentation.onnx").exists():
             continue
@@ -75,6 +91,18 @@ def main():
         if p.suffix in {".bin", ".onnx"}
     }
     (folder / "download-manifest.json").write_text(json.dumps(manifest, indent=2))
+    if args.quality or args.large_v3:
+        settings = Settings.load()
+        if args.quality:
+            settings = settings.quality_profile()
+            if strict:
+                settings.vad = False
+                settings.diarization = "manual"
+        if args.large_v3:
+            settings.whisper_model = str(folder / LARGE_MODEL)
+            settings.memory_gb = max(16, settings.memory_gb)
+        settings.save()
+        print("Настройки обновлены. Существующие записи сохраняют параметры продолжения.")
     print("Модели готовы. Во время распознавания интернет не используется.")
 
 

@@ -23,8 +23,10 @@ def rss_tree(pid):
     for p in procs:
         try:
             total += p.memory_info().rss
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
+        except psutil.NoSuchProcess:
             pass
+        except psutil.AccessDenied:
+            raise RuntimeError("Нет доступа к измерению памяти обработчика. Обработка остановлена.") from None
     return total
 
 
@@ -66,6 +68,8 @@ def supervise(args, budget_gb, root_pid=None, callback=None, cancelled=None):
     try:
         while True:
             rss = rss_tree(root_pid)
+            if rss <= 0:
+                raise RuntimeError("Не удалось измерить память приложения. Обработка остановлена.")
             if callback:
                 callback(rss)
             if rss >= limit:

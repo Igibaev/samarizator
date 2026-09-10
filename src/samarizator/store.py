@@ -28,6 +28,9 @@ class Store:
                     meeting TEXT, phase TEXT, part INTEGER, data TEXT,
                     PRIMARY KEY(meeting, phase, part));
             """)
+            columns = {row[1] for row in db.execute("PRAGMA table_info(segments)")}
+            if "review" not in columns:
+                db.execute("ALTER TABLE segments ADD COLUMN review TEXT NOT NULL DEFAULT ''")
         self.path.chmod(0o600)
 
     @contextmanager
@@ -122,9 +125,17 @@ class Store:
             ).fetchone():
                 return
             db.executemany(
-                "INSERT INTO segments(meeting,start,end,speaker,text,uncertain) VALUES(?,?,?,?,?,?)",
+                "INSERT INTO segments(meeting,start,end,speaker,text,uncertain,review) VALUES(?,?,?,?,?,?,?)",
                 [
-                    (mid, s["start"], s["end"], s["speaker"], s["text"], s.get("uncertain", 0))
+                    (
+                        mid,
+                        s["start"],
+                        s["end"],
+                        s["speaker"],
+                        s["text"],
+                        s.get("uncertain", 0),
+                        s.get("review", ""),
+                    )
                     for s in segments
                 ],
             )
@@ -140,7 +151,7 @@ class Store:
     def edit_segment(self, mid, sid, speaker, text):
         with self.connect() as db:
             db.execute(
-                "UPDATE segments SET speaker=?,text=?,uncertain=0 WHERE meeting=? AND id=?",
+                "UPDATE segments SET speaker=?,text=?,uncertain=0,review='' WHERE meeting=? AND id=?",
                 (speaker.strip() or "Не определён", text.strip(), mid, sid),
             )
             db.execute("DELETE FROM checkpoints WHERE meeting=? AND phase LIKE 'summary%'", (mid,))
