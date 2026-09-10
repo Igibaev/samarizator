@@ -96,12 +96,13 @@ class Store:
                 (*values.values(), mid),
             )
 
-    def segments(self, mid, offset=0, limit=500):
+    def segments(self, mid, offset=0, limit=500, uncertain_only=False):
+        clause = "meeting=? AND uncertain=1" if uncertain_only else "meeting=?"
         with self.connect() as db:
             return [
                 dict(r)
                 for r in db.execute(
-                    "SELECT * FROM segments WHERE meeting=? ORDER BY start,id LIMIT ? OFFSET ?",
+                    f"SELECT * FROM segments WHERE {clause} ORDER BY start,id LIMIT ? OFFSET ?",
                     (mid, limit, offset),
                 )
             ]

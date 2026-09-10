@@ -55,11 +55,23 @@ def test_gui_constructs_and_shows_recording(tmp_path, monkeypatch):
     source = tmp_path / "demo.wav"
     source.write_bytes(b"demo")
     mid = w.store.create(source, w.settings)
-    w.store.save_chunk(mid, 0, [dict(start=0, end=1, speaker="A", text="Тест", uncertain=True)])
+    w.store.save_chunk(
+        mid,
+        0,
+        [
+            dict(start=0, end=1, speaker="A", text="Тест", uncertain=True),
+            dict(start=1, end=2, speaker="A", text="Ясно", uncertain=False),
+        ],
+    )
     w.mid = mid
     w.refresh_list()
-    assert w.table.rowCount() == 1
+    assert w.table.rowCount() == 2
     assert w.list.count() == 1
+    w.uncertain_only.setChecked(True)
+    assert w.table.rowCount() == 1
+    assert w.table.item(0, 2).text() == "Тест"
+    w.uncertain_only.setChecked(False)
+    assert w.table.rowCount() == 2
     sid = w.store.segments(mid)[0]["id"]
     item = dict(kind="point", text="Точная сумма 17 млн", evidence=[sid], owner=None, due=None)
     brief = dict(overview="Короткий итог", items=[], topics=[])

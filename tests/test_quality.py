@@ -83,6 +83,24 @@ def test_decoder_receives_vad_and_literal_glossary(tmp_path, monkeypatch):
     assert calls[0][calls[0].index("--prompt") + 1] == "EBITDA, Иванов"
 
 
+def test_segments_uncertain_only_filters_and_paginates_flagged_rows(meeting):
+    store, mid, settings = meeting
+    store.save_chunk(
+        mid,
+        0,
+        [
+            dict(start=0, end=1, speaker="A", text="clear one", uncertain=0, review=""),
+            dict(start=1, end=2, speaker="A", text="flagged one", uncertain=1, review="говорящий"),
+            dict(start=2, end=3, speaker="A", text="clear two", uncertain=0, review=""),
+            dict(start=3, end=4, speaker="A", text="flagged two", uncertain=1, review="говорящий"),
+        ],
+    )
+    flagged = store.segments(mid, uncertain_only=True)
+    assert [r["text"] for r in flagged] == ["flagged one", "flagged two"]
+    assert store.segments(mid, offset=1, limit=1, uncertain_only=True)[0]["text"] == "flagged two"
+    assert len(store.segments(mid)) == 4  # unfiltered call is unaffected
+
+
 def test_dedup_seam_trims_exact_repeats_and_leaves_the_rest_untouched():
     trimmed, overlap = dedup_seam("The report is due Friday.", "due Friday afternoon")
     assert overlap == 2 and trimmed == "afternoon"

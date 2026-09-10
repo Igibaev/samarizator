@@ -369,6 +369,13 @@ class Window(QMainWindow):
         body.addWidget(self.tabs, 1)
         transcript = QWidget()
         tbox = QVBoxLayout(transcript)
+        self.uncertain_only = QCheckBox("Только требующие проверки")
+        self.uncertain_only.setToolTip(
+            "Показывать только реплики, отмеченные для проверки: неясный говорящий, "
+            "граница фрагмента, низкая уверенность Whisper, обрезанный дубль на стыке."
+        )
+        self.uncertain_only.stateChanged.connect(self.toggle_uncertain_filter)
+        tbox.addWidget(self.uncertain_only)
         self.table = QTableWidget(0, 4)
         self.table.setHorizontalHeaderLabels(["Время", "Собеседник", "Текст", "Проверка"])
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -569,7 +576,9 @@ class Window(QMainWindow):
         self.controls()
 
     def load_rows(self):
-        rows = self.store.segments(self.mid, self.page * 200, 200)
+        rows = self.store.segments(
+            self.mid, self.page * 200, 200, uncertain_only=self.uncertain_only.isChecked()
+        )
         self.table.setRowCount(len(rows))
         self.visible_rows = rows
         for i, row in enumerate(rows):
@@ -597,9 +606,16 @@ class Window(QMainWindow):
         if not self.mid:
             return
         new = max(0, self.page + delta)
-        if new == 0 or self.store.segments(self.mid, new * 200, 1):
+        only = self.uncertain_only.isChecked()
+        if new == 0 or self.store.segments(self.mid, new * 200, 1, uncertain_only=only):
             self.page = new
             self.load_rows()
+
+    def toggle_uncertain_filter(self):
+        if not self.mid:
+            return
+        self.page = 0
+        self.load_rows()
 
     def selected_segment(self):
         index = self.table.currentRow()
