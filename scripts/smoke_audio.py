@@ -9,6 +9,13 @@ from samarizator.store import Store
 from samarizator.worker import transcribe
 
 
+class SmokeStore(Store):
+    def update(self, mid, **values):
+        super().update(mid, **values)
+        if values.get("error"):
+            print(values["error"], flush=True)
+
+
 def main():
     settings = Settings.load()
     settings.language = "en"
@@ -16,7 +23,7 @@ def main():
     settings.speakers = 1
     settings.chunk_seconds = 30
     with tempfile.TemporaryDirectory() as folder:
-        store = Store(Path(folder) / "smoke.sqlite3")
+        store = SmokeStore(Path(folder) / "smoke.sqlite3")
         mid = store.create(sys.argv[1], settings)
         transcribe(store, mid, settings, Path(folder))
         rows = store.segments(mid)
