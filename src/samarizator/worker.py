@@ -118,6 +118,44 @@ def transcribe(store, mid, settings, work):
     store.update(mid, status="review", error=None)
 
 
+def retry_uncertain(store, mid, settings, work, limit=20, pad=2.0):
+    """Second ASR pass, with edge context, for segments already flagged for review.
+
+    Only stores the alternate text (Store.save_retry); the transcript is not
+    changed until the user explicitly accepts it (Store.accept_retry). Bounded
+    to `limit` segments per call so a large backlog cannot run unattended.
+    """
+    meeting = store.meeting(mid)
+    source = Path(meeting["source"])
+    duration = meeting["duration"]
+    if not Path(settings.whisper_model).is_file():
+        raise ValueError("Модель Whisper не найдена. Запустите ./start.sh или выберите .bin в настройках.")
+    targets = [r for r in store.iter_segments(mid) if r["uncertain"] and not r["retry_text"]][:limit]
+    for index, row in enumerate(targets):
+        status(store, mid, f"Повторный проход: реплика {index + 1}/{len(targets)}")
+        start = max(0, row["start"] - pad)
+        length = min(duration, row["end"] + pad) - start
+        wav = work / f"retry-{row['id']}.wav"
+        extract(source, wav, work, start, length)
+        result = whisper(
+            wav,
+            settings.whisper_model,
+            settings.language,
+            settings.threads,
+            work,
+            settings.gpu,
+            vad_model=settings.vad_model if settings.vad else "",
+            glossary=settings.glossary,
+            beam_size=settings.beam_size,
+        )
+        wav.unlink()
+        # Filtered by the segment's original bounds, same convention as the padded
+        # chunk extraction above: context helps the decoder, it does not widen the text.
+        segs = parse_whisper(result, start, row["start"], row["end"])
+        store.save_retry(mid, row["id"], " ".join(s["text"] for s in segs).strip())
+    store.update(mid, status="review", error=None)
+
+
 def main():
     phase, mid = sys.argv[1:3]
     store = Store()
@@ -129,6 +167,8 @@ def main():
         with tempfile.TemporaryDirectory(dir=work_root, prefix=mid + "-") as temp:
             if phase == "transcribe":
                 transcribe(store, mid, settings, Path(temp))
+            elif phase == "retry":
+                retry_uncertain(store, mid, settings, Path(temp))
             elif phase == "summary":
                 from .knowledge import export
                 from .summary import summarize

@@ -31,6 +31,8 @@ class Store:
             columns = {row[1] for row in db.execute("PRAGMA table_info(segments)")}
             if "review" not in columns:
                 db.execute("ALTER TABLE segments ADD COLUMN review TEXT NOT NULL DEFAULT ''")
+            if "retry_text" not in columns:
+                db.execute("ALTER TABLE segments ADD COLUMN retry_text TEXT NOT NULL DEFAULT ''")
         self.path.chmod(0o600)
 
     @contextmanager
@@ -151,8 +153,31 @@ class Store:
     def edit_segment(self, mid, sid, speaker, text):
         with self.connect() as db:
             db.execute(
-                "UPDATE segments SET speaker=?,text=?,uncertain=0,review='' WHERE meeting=? AND id=?",
+                "UPDATE segments SET speaker=?,text=?,uncertain=0,review='',retry_text='' "
+                "WHERE meeting=? AND id=?",
                 (speaker.strip() or "Не определён", text.strip(), mid, sid),
+            )
+            db.execute("DELETE FROM checkpoints WHERE meeting=? AND phase LIKE 'summary%'", (mid,))
+            db.execute("UPDATE meetings SET summary=NULL,status='review' WHERE id=?", (mid,))
+
+    def save_retry(self, mid, sid, text):
+        with self.connect() as db:
+            db.execute(
+                "UPDATE segments SET retry_text=? WHERE meeting=? AND id=?", (text, mid, sid)
+            )
+
+    def accept_retry(self, mid, sid):
+        """Replace a segment's text with its retry only on explicit user action."""
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT retry_text FROM segments WHERE meeting=? AND id=?", (mid, sid)
+            ).fetchone()
+            if not row or not row["retry_text"]:
+                raise ValueError("Нет повторного варианта для этой реплики.")
+            db.execute(
+                "UPDATE segments SET text=?,retry_text='',uncertain=0,review='' "
+                "WHERE meeting=? AND id=?",
+                (row["retry_text"], mid, sid),
             )
             db.execute("DELETE FROM checkpoints WHERE meeting=? AND phase LIKE 'summary%'", (mid,))
             db.execute("UPDATE meetings SET summary=NULL,status='review' WHERE id=?", (mid,))

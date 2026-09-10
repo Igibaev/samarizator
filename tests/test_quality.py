@@ -10,7 +10,7 @@ from samarizator.config import Settings
 from samarizator.knowledge import export
 from samarizator.media import parse_whisper, whisper
 from samarizator.summary import summarize, validate_summary
-from samarizator.worker import transcribe
+from samarizator.worker import retry_uncertain, transcribe
 
 
 def pcm(path, seconds=12, pause=None, amplitude=5000):
@@ -107,6 +107,45 @@ def test_resume_uses_saved_pause_plan_and_never_duplicates(meeting, tmp_path, mo
     assert len(rows) == 2 and len(calls) == 1
     assert rows[1]["start"] == 28.5
     assert store.checkpoint(mid, "audio-quality", 1)
+
+
+def test_retry_pass_only_touches_flagged_segments_and_needs_acceptance(meeting, tmp_path, monkeypatch):
+    store, mid, settings = meeting
+    model = tmp_path / "model.bin"
+    model.write_bytes(b"model")
+    settings.whisper_model = str(model)
+    store.update(mid, duration=30)
+    store.save_chunk(
+        mid,
+        0,
+        [
+            dict(start=0, end=2, speaker="A", text="clear", uncertain=0, review=""),
+            dict(start=5, end=7, speaker="A", text="unsure", uncertain=1, review="низкая уверенность Whisper"),
+        ],
+    )
+    rows = store.segments(mid)
+    clear_id, flagged_id = rows[0]["id"], rows[1]["id"]
+    monkeypatch.setattr("samarizator.worker.extract", lambda source, target, *a: pcm(target, seconds=1))
+    calls = []
+
+    def asr(*a, **kw):
+        calls.append(1)
+        return dict(transcription=[dict(offsets={"from": 2000, "to": 4000}, text="corrected")])
+
+    monkeypatch.setattr("samarizator.worker.whisper", asr)
+    retry_uncertain(store, mid, settings, tmp_path)
+    assert len(calls) == 1  # the clean segment is never re-sent to Whisper
+    rows = {r["id"]: r for r in store.segments(mid)}
+    assert rows[clear_id]["text"] == "clear" and not rows[clear_id]["retry_text"]
+    assert rows[flagged_id]["text"] == "unsure"  # original text untouched until accepted
+    assert rows[flagged_id]["retry_text"] == "corrected"
+
+    with pytest.raises(ValueError):
+        store.accept_retry(mid, clear_id)  # nothing to accept there
+    store.accept_retry(mid, flagged_id)
+    accepted = {r["id"]: r for r in store.segments(mid)}[flagged_id]
+    assert accepted["text"] == "corrected"
+    assert accepted["retry_text"] == "" and not accepted["uncertain"]
 
 
 def test_detailed_summary_preserves_facts_dropped_from_brief_and_cancelled_tasks(meeting):

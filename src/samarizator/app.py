@@ -55,6 +55,7 @@ STATUS = {
     "new": "Новая",
     "transcribing": "Распознавание",
     "review": "Готова к проверке",
+    "retrying": "Повторный проход по сомнительным репликам",
     "summarizing": "Создание сводки",
     "done": "Готово",
     "error": "Ошибка",
@@ -350,11 +351,18 @@ class Window(QMainWindow):
         actions = QHBoxLayout()
         self.transcribe = QPushButton("1. Распознать / продолжить")
         self.transcribe.clicked.connect(lambda: self.start("transcribe"))
+        self.retry = QPushButton("Повторить сомнительные реплики")
+        self.retry.setToolTip(
+            "Второй проход Whisper только по репликам, отмеченным для проверки, "
+            "с запасом аудио по краям. Ничего не заменяет автоматически — "
+            "вариант нужно принять вручную ниже."
+        )
+        self.retry.clicked.connect(lambda: self.start("retry"))
         self.summarize = QPushButton("2. Создать сводку")
         self.summarize.clicked.connect(lambda: self.start("summary"))
         self.cancel = QPushButton("Остановить")
         self.cancel.clicked.connect(self.cancel_job)
-        for button in [self.transcribe, self.summarize, self.cancel]:
+        for button in [self.transcribe, self.retry, self.summarize, self.cancel]:
             actions.addWidget(button)
         body.addLayout(actions)
         self.tabs = QTabWidget()
@@ -394,6 +402,14 @@ class Window(QMainWindow):
         tbox.addLayout(edit)
         self.rename_all = QCheckBox("Применить имя ко всем репликам этого собеседника")
         tbox.addWidget(self.rename_all)
+        retry_row = QHBoxLayout()
+        self.retry_label = QLabel()
+        self.retry_label.setWordWrap(True)
+        self.accept_retry_button = QPushButton("Принять повторный вариант")
+        self.accept_retry_button.clicked.connect(self.accept_retry)
+        retry_row.addWidget(self.retry_label, 1)
+        retry_row.addWidget(self.accept_retry_button)
+        tbox.addLayout(retry_row)
         self.tabs.addTab(transcript, "Расшифровка и собеседники")
         self.summary = QTextBrowser()
         self.summary.setOpenExternalLinks(False)
@@ -562,12 +578,20 @@ class Window(QMainWindow):
                     stamp(row["start"]),
                     row["speaker"],
                     row["text"],
-                    (row.get("review") or "Проверить") if row["uncertain"] else "",
+                    self.review_label(row),
                 ]
             ):
                 self.table.setItem(i, col, QTableWidgetItem(value))
         self.table.resizeRowsToContents()
         self.page_label.setText(f"Страница {self.page + 1} · до 200 реплик")
+
+    def review_label(self, row):
+        if not row["uncertain"]:
+            return ""
+        label = row.get("review") or "Проверить"
+        if row.get("retry_text"):
+            label += "; есть повторный вариант"
+        return label
 
     def turn_page(self, delta):
         if not self.mid:
@@ -583,6 +607,12 @@ class Window(QMainWindow):
             row = self.visible_rows[index]
             self.speaker.setText(row["speaker"])
             self.text.setText(row["text"])
+            self.retry_label.setText(
+                f"Повторный вариант: {row['retry_text']}" if row.get("retry_text") else ""
+            )
+        else:
+            self.retry_label.setText("")
+        self.controls()
 
     def edit_segment(self):
         index = self.table.currentRow()
@@ -592,6 +622,16 @@ class Window(QMainWindow):
         if self.rename_all.isChecked():
             self.store.rename_speaker(self.mid, row["speaker"], self.speaker.text())
         self.store.edit_segment(self.mid, row["id"], self.speaker.text(), self.text.text())
+        self.load_detail()
+
+    def accept_retry(self):
+        index = self.table.currentRow()
+        if self.job or not self.mid or not 0 <= index < len(self.visible_rows):
+            return
+        row = self.visible_rows[index]
+        if not row.get("retry_text"):
+            return
+        self.store.accept_retry(self.mid, row["id"])
         self.load_detail()
 
     def start(self, phase):
@@ -607,6 +647,13 @@ class Window(QMainWindow):
                 else:
                     for key in ["memory_gb", "threads", "gpu"]:
                         setattr(original, key, getattr(self.settings, key))
+            elif phase == "retry":
+                if not self.store.checkpoint(self.mid, "asr_complete", 0):
+                    raise ValueError("Сначала завершите распознавание всей записи.")
+                # Same rule as resuming transcription: the ASR model/VAD/beam stay
+                # exactly as recorded, only memory/threads/GPU follow current settings.
+                for key in ["memory_gb", "threads", "gpu"]:
+                    setattr(original, key, getattr(self.settings, key))
             else:
                 for key in [
                     "base_url",
@@ -624,7 +671,7 @@ class Window(QMainWindow):
             self.store.update(
                 self.mid,
                 settings=json.dumps(asdict(original)),
-                status="transcribing" if phase == "transcribe" else "summarizing",
+                status={"transcribe": "transcribing", "retry": "retrying"}.get(phase, "summarizing"),
                 error=None,
             )
             self.active_id = self.mid
@@ -677,9 +724,20 @@ class Window(QMainWindow):
         ready = self.mid is not None
         self.settings_button.setEnabled(not busy)
         self.transcribe.setEnabled(ready and not busy)
+        self.retry.setEnabled(
+            ready and not busy and bool(self.store.checkpoint(self.mid, "asr_complete", 0))
+        )
         self.summarize.setEnabled(ready and not busy)
         self.cancel.setEnabled(busy)
         self.save_segment.setEnabled(ready and not busy)
+        index = self.table.currentRow()
+        has_retry = (
+            ready
+            and hasattr(self, "visible_rows")
+            and 0 <= index < len(self.visible_rows)
+            and bool(self.visible_rows[index].get("retry_text"))
+        )
+        self.accept_retry_button.setEnabled(has_retry and not busy)
         self.obsidian.setEnabled(
             ready
             and bool(self.store.meeting(self.mid)["note"])
