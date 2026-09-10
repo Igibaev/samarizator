@@ -120,10 +120,16 @@ def export(store, mid, settings):
         sections.append(
             (
                 "Итог по решениям",
-                dict(overview="Финальный статус с учётом более поздних правок и отмен.", items=resolved),
-                True,
+                dict(
+                    overview=detailed.get("resolution_warning")
+                    or "Финальный статус с учётом более поздних правок и отмен.",
+                    items=resolved,
+                ),
+                not bool(detailed.get("resolution_warning")),
             )
         )
+    if detailed.get("resolution_warning") and not detailed.get("resolved"):
+        lines += ["## Проверка решений", "", plain(detailed["resolution_warning"]), ""]
     for title, view, tasks in sections:
         lines += [f"## {title}", "", plain(view["overview"]), ""]
         if title == "Подробная сводка":

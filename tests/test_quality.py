@@ -8,7 +8,7 @@ import pytest
 from samarizator.audio_quality import diagnose, nearest_pause, plan_chunks
 from samarizator.config import Settings
 from samarizator.knowledge import export
-from samarizator.media import dedup_seam, parse_whisper, whisper
+from samarizator.media import dedup_seam, fingerprint, parse_whisper, whisper
 from samarizator.summary import reconcile_decisions, summarize, validate_summary
 from samarizator.worker import retry_uncertain, transcribe
 
@@ -110,7 +110,7 @@ def test_dedup_seam_trims_exact_repeats_and_leaves_the_rest_untouched():
     assert overlap == 3 and trimmed == ""
 
 
-def test_seam_dedup_trims_repeated_words_between_chunks(meeting, tmp_path, monkeypatch):
+def test_seam_preserves_equal_words_far_apart(meeting, tmp_path, monkeypatch):
     store, mid, settings = meeting
     model = tmp_path / "model.bin"
     model.write_bytes(b"model")
@@ -119,7 +119,7 @@ def test_seam_dedup_trims_repeated_words_between_chunks(meeting, tmp_path, monke
     store.save_checkpoint(mid, "asr-plan", 0, [[0, 28], [28, 60]])
     monkeypatch.setattr("samarizator.worker.probe", lambda *a: (60, 1))
     monkeypatch.setattr("samarizator.worker.plan_chunks", lambda *a: pytest.fail("must reuse plan"))
-    monkeypatch.setattr("samarizator.worker.extract", lambda source, target, *a: pcm(target, seconds=1))
+    monkeypatch.setattr("samarizator.worker.extract", lambda source, target, *a, **kw: pcm(target, seconds=1))
     calls = []
 
     def asr(*a, **kw):
@@ -136,8 +136,8 @@ def test_seam_dedup_trims_repeated_words_between_chunks(meeting, tmp_path, monke
     monkeypatch.setattr("samarizator.worker.whisper", asr)
     transcribe(store, mid, settings, tmp_path)
     rows = store.segments(mid)
-    assert [r["text"] for r in rows] == ["The report is due Friday.", "afternoon we will meet."]
-    assert rows[1]["uncertain"] and "стык" in rows[1]["review"]
+    assert [r["text"] for r in rows] == ["The report is due Friday.", "Friday afternoon we will meet."]
+    assert "возможный повтор" not in rows[1]["review"]
 
 
 def test_resume_uses_saved_pause_plan_and_never_duplicates(meeting, tmp_path, monkeypatch):
@@ -150,7 +150,7 @@ def test_resume_uses_saved_pause_plan_and_never_duplicates(meeting, tmp_path, mo
     store.save_chunk(mid, 0, [dict(start=2, end=4, speaker="A", text="first")])
     monkeypatch.setattr("samarizator.worker.probe", lambda *a: (60, 1))
     monkeypatch.setattr("samarizator.worker.plan_chunks", lambda *a: pytest.fail("must reuse plan"))
-    monkeypatch.setattr("samarizator.worker.extract", lambda source, target, *a: pcm(target, seconds=1))
+    monkeypatch.setattr("samarizator.worker.extract", lambda source, target, *a, **kw: pcm(target, seconds=1))
     calls = []
 
     def asr(*a, **kw):
@@ -172,17 +172,20 @@ def test_retry_pass_only_touches_flagged_segments_and_needs_acceptance(meeting, 
     model.write_bytes(b"model")
     settings.whisper_model = str(model)
     store.update(mid, duration=30)
+    store.save_checkpoint(mid, "source", 0, fingerprint(store.meeting(mid)["source"]))
     store.save_chunk(
         mid,
         0,
         [
             dict(start=0, end=2, speaker="A", text="clear", uncertain=0, review=""),
-            dict(start=5, end=7, speaker="A", text="unsure", uncertain=1, review="низкая уверенность Whisper"),
+            dict(
+                start=5, end=7, speaker="A", text="unsure", uncertain=1, review="низкая уверенность Whisper"
+            ),
         ],
     )
     rows = store.segments(mid)
     clear_id, flagged_id = rows[0]["id"], rows[1]["id"]
-    monkeypatch.setattr("samarizator.worker.extract", lambda source, target, *a: pcm(target, seconds=1))
+    monkeypatch.setattr("samarizator.worker.extract", lambda source, target, *a, **kw: pcm(target, seconds=1))
     calls = []
 
     def asr(*a, **kw):
@@ -202,7 +205,10 @@ def test_retry_pass_only_touches_flagged_segments_and_needs_acceptance(meeting, 
     store.accept_retry(mid, flagged_id)
     accepted = {r["id"]: r for r in store.segments(mid)}[flagged_id]
     assert accepted["text"] == "corrected"
-    assert accepted["retry_text"] == "" and not accepted["uncertain"]
+    assert accepted["retry_text"] == "" and accepted["retry_done"]
+    assert accepted["review"] == "низкая уверенность Whisper"
+    store.undo_retry(mid, flagged_id)
+    assert store.segments(mid)[1]["text"] == "unsure"
 
 
 def test_reconcile_decisions_only_sends_decisions_and_actions_to_the_model():

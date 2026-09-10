@@ -191,7 +191,7 @@ def _size_groups(items, max_chars):
     return groups
 
 
-def reconcile_decisions(client, ledger, input_chars, progress=lambda *_: None):
+def reconcile_decisions(client, ledger, input_chars, progress=lambda *_: None, on_warning=lambda *_: None):
     """Resolve superseded decisions/tasks in the full ledger into a final-status list.
 
     Never edits or shortens the ledger itself -- this is an additional, bounded
@@ -208,17 +208,20 @@ def reconcile_decisions(client, ledger, input_chars, progress=lambda *_: None):
         for i, group in enumerate(groups):
             allowed = {ref for item in group for ref in item["evidence"]}
             result = client.complete(RECONCILE_PROMPT + json.dumps(group, ensure_ascii=False), allowed)
+            if {ref for item in result["items"] for ref in item["evidence"]} != allowed:
+                raise ValueError("Согласование потеряло ссылки на часть исходных решений.")
             reduced.extend(result["items"])
             progress(f"Согласование решений: уровень {level + 1}, блок {i + 1}/{len(groups)}")
         if len(groups) == 1:
             return reduced
         if len(json.dumps(reduced)) >= len(json.dumps(current)):
-            raise ValueError(
-                "Согласование решений не сокращает список. Реестр сохранён без изменений; "
-                "увеличьте размер входного блока."
+            on_warning(
+                "Решения согласованы внутри блоков. Между блоками возможны повторы и пересмотры; проверьте полный реестр."
             )
+            return reduced
         current = reduced
-    raise ValueError("Не удалось согласовать решения за 4 уровня. Полный реестр сохранён без согласования.")
+    on_warning("Достигнут предел согласования. Показаны промежуточные результаты; проверьте полный реестр.")
+    return current
 
 
 def blocks(segments, max_chars):
@@ -296,15 +299,40 @@ def summarize(store, mid, settings, progress=lambda *_: None, client=None):
             + str(settings.max_output_tokens)
             + SYSTEM
             + RECONCILE_PROMPT
+            + "safe-resolution-v2"
+            + str(settings.input_chars)
             + json.dumps(ledger, ensure_ascii=False)
         ).encode()
     ).hexdigest()
     cached_resolve = store.checkpoint(mid, "summary-resolve", 0)
+    resolve_warnings = []
     if cached_resolve and cached_resolve.get("digest") == resolve_digest:
         resolved = cached_resolve["result"]
+        resolve_warnings = cached_resolve.get("warnings", [])
     else:
-        resolved = reconcile_decisions(client, ledger, settings.input_chars, progress)
-        store.save_checkpoint(mid, "summary-resolve", 0, dict(digest=resolve_digest, result=resolved))
+        try:
+            resolved = reconcile_decisions(
+                client, ledger, settings.input_chars, progress, resolve_warnings.append
+            )
+        except (ValueError, RuntimeError, httpx.HTTPError):
+            # Optional enrichment must never discard the two primary summaries.
+            resolved = []
+            resolve_warnings.append(
+                "Дополнительное согласование не удалось. Краткая сводка и полный реестр сохранены; итоговый статус решений проверьте по записи."
+            )
+        else:
+            store.save_checkpoint(
+                mid,
+                "summary-resolve",
+                0,
+                dict(digest=resolve_digest, result=resolved, warnings=resolve_warnings),
+            )
+
+    def package(brief):
+        result = package_summary(brief, ledger, maps, resolved)
+        result["detailed"]["resolution_warning"] = " ".join(resolve_warnings)
+        return result
+
     # A reduction unit is an item, not a whole map: every request remains bounded.
     current = ledger
     for level in range(8):
@@ -321,9 +349,7 @@ def summarize(store, mid, settings, progress=lambda *_: None, client=None):
         if group:
             units.append(group)
         if not units:
-            return package_summary(
-                dict(overview=maps[0]["overview"], items=[], topics=[]), ledger, maps, resolved
-            )
+            return package(dict(overview=maps[0]["overview"], items=[], topics=[]))
         reduced = []
         last = None
         for i, group in enumerate(units):
@@ -350,7 +376,7 @@ def summarize(store, mid, settings, progress=lambda *_: None, client=None):
                 raise ValueError(
                     "Модель вернула более 9 тезисов. Повторите сводку; подробные блоки сохранены."
                 )
-            return package_summary(last, ledger, maps, resolved)
+            return package(last)
         if len(json.dumps(reduced)) >= len(json.dumps(current)):
             raise ValueError(
                 "Модель не сокращает сводку. Промежуточные блоки сохранены; "

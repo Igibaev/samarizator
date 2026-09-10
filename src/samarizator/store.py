@@ -33,6 +33,14 @@ class Store:
                 db.execute("ALTER TABLE segments ADD COLUMN review TEXT NOT NULL DEFAULT ''")
             if "retry_text" not in columns:
                 db.execute("ALTER TABLE segments ADD COLUMN retry_text TEXT NOT NULL DEFAULT ''")
+            if "retry_done" not in columns:
+                db.execute("ALTER TABLE segments ADD COLUMN retry_done INTEGER NOT NULL DEFAULT 0")
+            if "source_channel" not in columns:
+                db.execute("ALTER TABLE segments ADD COLUMN source_channel INTEGER")
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS segment_history ("
+                "id INTEGER PRIMARY KEY, meeting TEXT, segment INTEGER, snapshot TEXT NOT NULL)"
+            )
         self.path.chmod(0o600)
 
     @contextmanager
@@ -135,7 +143,7 @@ class Store:
             ).fetchone():
                 return
             db.executemany(
-                "INSERT INTO segments(meeting,start,end,speaker,text,uncertain,review) VALUES(?,?,?,?,?,?,?)",
+                "INSERT INTO segments(meeting,start,end,speaker,text,uncertain,review,source_channel) VALUES(?,?,?,?,?,?,?,?)",
                 [
                     (
                         mid,
@@ -145,6 +153,7 @@ class Store:
                         s["text"],
                         s.get("uncertain", 0),
                         s.get("review", ""),
+                        s.get("source_channel"),
                     )
                     for s in segments
                 ],
@@ -161,7 +170,7 @@ class Store:
     def edit_segment(self, mid, sid, speaker, text):
         with self.connect() as db:
             db.execute(
-                "UPDATE segments SET speaker=?,text=?,uncertain=0,review='',retry_text='' "
+                "UPDATE segments SET speaker=?,text=?,uncertain=0,review='',retry_text='',retry_done=0 "
                 "WHERE meeting=? AND id=?",
                 (speaker.strip() or "Не определён", text.strip(), mid, sid),
             )
@@ -170,23 +179,47 @@ class Store:
 
     def save_retry(self, mid, sid, text):
         with self.connect() as db:
-            db.execute(
-                "UPDATE segments SET retry_text=? WHERE meeting=? AND id=?", (text, mid, sid)
-            )
+            db.execute("UPDATE segments SET retry_text=? WHERE meeting=? AND id=?", (text, mid, sid))
 
-    def accept_retry(self, mid, sid):
+    def accept_retry(self, mid, sid, expected_text=None):
         """Replace a segment's text with its retry only on explicit user action."""
         with self.connect() as db:
-            row = db.execute(
-                "SELECT retry_text FROM segments WHERE meeting=? AND id=?", (mid, sid)
-            ).fetchone()
+            row = db.execute("SELECT * FROM segments WHERE meeting=? AND id=?", (mid, sid)).fetchone()
             if not row or not row["retry_text"]:
                 raise ValueError("Нет повторного варианта для этой реплики.")
+            if expected_text is not None and row["retry_text"] != expected_text:
+                raise ValueError("Повторный вариант изменился. Выберите реплику заново.")
             db.execute(
-                "UPDATE segments SET text=?,retry_text='',uncertain=0,review='' "
-                "WHERE meeting=? AND id=?",
+                "INSERT INTO segment_history(meeting,segment,snapshot) VALUES(?,?,?)",
+                (mid, sid, json.dumps(dict(row), ensure_ascii=False)),
+            )
+            # Accepting words does not confirm speaker identity or audio alignment.
+            db.execute(
+                "UPDATE segments SET text=?,retry_text='',retry_done=1 WHERE meeting=? AND id=?",
                 (row["retry_text"], mid, sid),
             )
+            db.execute("DELETE FROM checkpoints WHERE meeting=? AND phase LIKE 'summary%'", (mid,))
+            db.execute("UPDATE meetings SET summary=NULL,status='review' WHERE id=?", (mid,))
+
+    def undo_retry(self, mid, sid):
+        with self.connect() as db:
+            history = db.execute(
+                "SELECT * FROM segment_history WHERE meeting=? AND segment=? ORDER BY id DESC LIMIT 1",
+                (mid, sid),
+            ).fetchone()
+            if not history:
+                raise ValueError("Нет принятого варианта для отмены.")
+            old = json.loads(history["snapshot"])
+            current = db.execute("SELECT text FROM segments WHERE meeting=? AND id=?", (mid, sid)).fetchone()
+            if not current or current["text"] != old["retry_text"]:
+                raise ValueError(
+                    "После принятия текст был изменён вручную. Автоматическая отмена недоступна."
+                )
+            db.execute(
+                "UPDATE segments SET text=?,retry_text=?,uncertain=?,review=?,retry_done=0 WHERE meeting=? AND id=?",
+                (old["text"], old["retry_text"], old["uncertain"], old["review"], mid, sid),
+            )
+            db.execute("DELETE FROM segment_history WHERE id=?", (history["id"],))
             db.execute("DELETE FROM checkpoints WHERE meeting=? AND phase LIKE 'summary%'", (mid,))
             db.execute("UPDATE meetings SET summary=NULL,status='review' WHERE id=?", (mid,))
 
@@ -194,11 +227,12 @@ class Store:
         with self.connect() as db:
             db.execute(
                 "UPDATE meetings SET status='interrupted',error='Предыдущий запуск прерван; можно продолжить.' "
-                "WHERE status IN ('transcribing','summarizing')"
+                "WHERE status IN ('transcribing','summarizing','retrying')"
             )
 
     def delete(self, mid):
         with self.connect() as db:
+            db.execute("DELETE FROM segment_history WHERE meeting=?", (mid,))
             db.execute("DELETE FROM segments WHERE meeting=?", (mid,))
             db.execute("DELETE FROM checkpoints WHERE meeting=?", (mid,))
             db.execute("DELETE FROM meetings WHERE id=?", (mid,))

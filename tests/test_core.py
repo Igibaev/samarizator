@@ -191,7 +191,10 @@ def test_ledger_preserves_late_topics_and_cached_maps(meeting):
         def complete(self, prompt, allowed):
             self.calls += 1
             sid = max(allowed)
-            return result(sid, "Пункт " + str(sid))
+            obj = result(sid, "Пункт " + str(sid))
+            if "ИТОГОВЫЙ список" in prompt:
+                obj["items"][0]["evidence"] = sorted(allowed)
+            return obj
 
     fake = Fake()
     summary = summarize(store, mid, settings, client=fake)

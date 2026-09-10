@@ -129,6 +129,7 @@ def parse_whisper(payload, offset, lower, upper, turns=(), channel=None):
                 end=end,
                 text=text,
                 speaker=speaker,
+                source_channel=channel,
                 uncertain=bool(reasons),
                 review=", ".join(reasons),
             )

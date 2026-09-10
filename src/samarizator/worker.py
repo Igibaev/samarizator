@@ -111,17 +111,24 @@ def transcribe(store, mid, settings, work):
             rows += parse_whisper(result, start, lower, upper, turns or [], channel)
             wav.unlink()
         rows = sorted(rows, key=lambda r: r["start"])
-        # Two independent channels are simultaneous speakers, not sequential audio
-        # decoded twice; a seam match between them would be coincidence, not a repeat.
+        # Text equality cannot prove that two utterances are the same audio.
+        # Preserve every word; only flag plausible overlap for human review.
         if index > 0 and rows and settings.diarization != "channels":
             previous = store.last_segment(mid)
-            if previous:
-                trimmed, overlap = dedup_seam(previous["text"], rows[0]["text"])
-                if overlap and trimmed:
-                    reasons = [r for r in [rows[0]["review"], "дублирующиеся слова на стыке удалены"] if r]
-                    rows[0] = dict(rows[0], text=trimmed, uncertain=True, review=", ".join(reasons))
-                elif overlap:
-                    rows = rows[1:]
+            first = rows[0]
+            if (
+                previous
+                and previous["speaker"] == first["speaker"]
+                and previous["end"] > first["start"]
+                and first["start"] < lower + 2
+                and previous["end"] > lower - 2
+            ):
+                _, overlap = dedup_seam(previous["text"], first["text"])
+                if overlap:
+                    reasons = [
+                        r for r in [first["review"], "возможный повтор на стыке — сверить по аудио"] if r
+                    ]
+                    rows[0] = dict(first, uncertain=True, review=", ".join(reasons))
         store.save_checkpoint(mid, "audio-quality", index, diagnostics)
         store.save_chunk(mid, index, rows)
     if not store.segments(mid, limit=1):
@@ -140,15 +147,36 @@ def retry_uncertain(store, mid, settings, work, limit=20, pad=2.0):
     meeting = store.meeting(mid)
     source = Path(meeting["source"])
     duration = meeting["duration"]
+    settings.validate()
+    if not source.is_file():
+        raise ValueError("Исходный файл не найден. Верните его по прежнему пути.")
+    expected = store.checkpoint(mid, "source", 0)
+    if not expected or fingerprint(source) != expected:
+        raise ValueError(
+            "Исходный файл изменился или его контрольная сумма не сохранена. Импортируйте запись заново."
+        )
     if not Path(settings.whisper_model).is_file():
-        raise ValueError("Модель Whisper не найдена. Запустите ./start.sh или выберите .bin в настройках.")
-    targets = [r for r in store.iter_segments(mid) if r["uncertain"] and not r["retry_text"]][:limit]
+        raise ValueError("Модель Whisper не найдена. Выберите .bin в настройках.")
+    if settings.vad and not Path(settings.vad_model).is_file():
+        raise ValueError("Модель VAD не найдена.")
+    if Path(settings.whisper_model).stat().st_size * 2.5 + 600 * 1024**2 > settings.memory_gb * 1024**3 * 0.8:
+        raise ValueError("Выбранная модель слишком велика для бюджета памяти.")
+    targets = []
+    for row in store.iter_segments(mid):
+        if row["uncertain"] and not row["retry_text"] and not row["retry_done"]:
+            targets.append(row)
+            if len(targets) >= limit:
+                break
+    if settings.diarization == "channels" and any(r.get("source_channel") not in (0, 1) for r in targets):
+        raise ValueError(
+            "У старой записи не сохранён исходный аудиоканал. Импортируйте её заново для второго прохода."
+        )
     for index, row in enumerate(targets):
         status(store, mid, f"Повторный проход: реплика {index + 1}/{len(targets)}")
         start = max(0, row["start"] - pad)
         length = min(duration, row["end"] + pad) - start
         wav = work / f"retry-{row['id']}.wav"
-        extract(source, wav, work, start, length)
+        extract(source, wav, work, start, length, channel=row.get("source_channel"))
         result = whisper(
             wav,
             settings.whisper_model,

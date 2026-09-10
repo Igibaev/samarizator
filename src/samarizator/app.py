@@ -376,7 +376,7 @@ class Window(QMainWindow):
         self.uncertain_only = QCheckBox("Только требующие проверки")
         self.uncertain_only.setToolTip(
             "Показывать только реплики, отмеченные для проверки: неясный говорящий, "
-            "граница фрагмента, низкая уверенность Whisper, обрезанный дубль на стыке."
+            "граница фрагмента, низкая уверенность Whisper, возможный повтор на стыке."
         )
         self.uncertain_only.stateChanged.connect(self.toggle_uncertain_filter)
         tbox.addWidget(self.uncertain_only)
@@ -434,6 +434,9 @@ class Window(QMainWindow):
         self.accept_retry_button.clicked.connect(self.accept_retry)
         retry_row.addWidget(self.retry_label, 1)
         retry_row.addWidget(self.accept_retry_button)
+        self.undo_retry_button = QPushButton("Отменить принятие")
+        self.undo_retry_button.clicked.connect(self.undo_retry)
+        retry_row.addWidget(self.undo_retry_button)
         tbox.addLayout(retry_row)
         self.tabs.addTab(transcript, "Расшифровка и собеседники")
         self.summary = QTextBrowser()
@@ -584,13 +587,18 @@ class Window(QMainWindow):
             if resolved:
                 self.resolved_summary.setPlainText(
                     summary_text(
-                        dict(overview="Финальный статус с учётом более поздних правок и отмен.", items=resolved),
+                        dict(
+                            overview=detailed.get("resolution_warning")
+                            or "Финальный статус с учётом более поздних правок и отмен.",
+                            items=resolved,
+                        ),
                         refs,
                     )
                 )
             else:
                 self.resolved_summary.setPlainText(
-                    "В записи нет решений или задач для согласования, либо сводка создана "
+                    detailed.get("resolution_warning")
+                    or "В записи нет решений или задач для согласования, либо сводка создана "
                     "до появления этого раздела — пересоздайте сводку, чтобы получить его."
                 )
         else:
@@ -620,8 +628,12 @@ class Window(QMainWindow):
         rows = self.store.segments(
             self.mid, self.page * 200, 200, uncertain_only=self.uncertain_only.isChecked()
         )
-        self.table.setRowCount(len(rows))
+        # A new page/meeting invalidates the old selection and displayed proposal.
+        self.table.blockSignals(True)
+        self.table.clearSelection()
+        self.table.setCurrentCell(-1, -1)
         self.visible_rows = rows
+        self.table.setRowCount(len(rows))
         for i, row in enumerate(rows):
             for col, value in enumerate(
                 [
@@ -632,6 +644,8 @@ class Window(QMainWindow):
                 ]
             ):
                 self.table.setItem(i, col, QTableWidgetItem(value))
+        self.table.blockSignals(False)
+        self.selected_segment()
         self.table.resizeRowsToContents()
         self.page_label.setText(f"Страница {self.page + 1} · до 200 реплик")
 
@@ -668,6 +682,8 @@ class Window(QMainWindow):
                 f"Повторный вариант: {row['retry_text']}" if row.get("retry_text") else ""
             )
         else:
+            self.speaker.clear()
+            self.text.clear()
             self.retry_label.setText("")
         self.controls()
 
@@ -688,7 +704,20 @@ class Window(QMainWindow):
         row = self.visible_rows[index]
         if not row.get("retry_text"):
             return
-        self.store.accept_retry(self.mid, row["id"])
+        try:
+            self.store.accept_retry(self.mid, row["id"], expected_text=row["retry_text"])
+        except ValueError as exc:
+            QMessageBox.warning(self, "Повторный вариант", str(exc))
+        self.load_detail()
+
+    def undo_retry(self):
+        index = self.table.currentRow()
+        if self.job or not self.mid or not 0 <= index < len(self.visible_rows):
+            return
+        try:
+            self.store.undo_retry(self.mid, self.visible_rows[index]["id"])
+        except ValueError as exc:
+            QMessageBox.information(self, "Отмена принятия", str(exc))
         self.load_detail()
 
     def play_segment(self):
@@ -817,9 +846,7 @@ class Window(QMainWindow):
         ready = self.mid is not None
         self.settings_button.setEnabled(not busy)
         self.transcribe.setEnabled(ready and not busy)
-        self.retry.setEnabled(
-            ready and not busy and bool(self.store.checkpoint(self.mid, "asr_complete", 0))
-        )
+        self.retry.setEnabled(ready and not busy and bool(self.store.checkpoint(self.mid, "asr_complete", 0)))
         self.summarize.setEnabled(ready and not busy)
         self.cancel.setEnabled(busy)
         self.save_segment.setEnabled(ready and not busy)
@@ -832,6 +859,7 @@ class Window(QMainWindow):
         )
         self.accept_retry_button.setEnabled(has_retry and not busy)
         has_row = ready and hasattr(self, "visible_rows") and 0 <= index < len(self.visible_rows)
+        self.undo_retry_button.setEnabled(bool(has_row) and not busy)
         self.play_button.setEnabled(has_row)
         self.stop_button.setEnabled(bool(self.player_proc) and self.player_proc.poll() is None)
         self.obsidian.setEnabled(
