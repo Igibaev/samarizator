@@ -163,6 +163,6 @@ uv run --frozen --extra diarization --extra dev pytest -q
 uv run --frozen --extra dev ruff check src tests
 ```
 
-Для Linux headless задайте `QT_QPA_PLATFORM=offscreen`. CI запускает проверки на Linux и macOS; отдельный macOS smoke-test использует настоящий FFmpeg, Whisper и локальную диаризацию. API сводок в тестах заменён контролируемым HTTP-транспортом — реальные ключи CI не нужны.
+Для Linux headless задайте `QT_QPA_PLATFORM=offscreen`. GitHub Actions в проекте не используется — тесты и Ruff запускаются локально перед коммитом/PR. Отдельный `scripts/smoke_audio.py` — ручной smoke-test на Mac с настоящим FFmpeg, Whisper и локальной диаризацией, см. `docs/quality.md`. API сводок в тестах заменён контролируемым HTTP-транспортом — реальные ключи не нужны.
 
 [Архитектура](docs/architecture.md) · [Устранение проблем](docs/troubleshooting.md) · [Отчёт проверок](docs/validation.md) · [Зависимости и модели](docs/models.md)
