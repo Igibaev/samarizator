@@ -103,14 +103,18 @@ def test_gui_constructs_and_shows_recording(tmp_path, monkeypatch):
     assert w.player_proc is None and w.playback_label.text() == ""
     sid = w.store.segments(mid)[0]["id"]
     item = dict(kind="point", text="Точная сумма 17 млн", evidence=[sid], owner=None, due=None)
+    resolved_item = dict(
+        kind="decision", text="Бюджет утверждён (итог)", evidence=[sid], owner=None, due=None, status="agreed"
+    )
     brief = dict(overview="Короткий итог", items=[], topics=[])
-    detailed = dict(overview="Детали обсуждения", items=[item], topics=["Бюджет"])
+    detailed = dict(overview="Детали обсуждения", items=[item], topics=["Бюджет"], resolved=[resolved_item])
     w.store.update(mid, summary=json.dumps(dict(**brief, brief=brief, detailed=detailed)))
     w.load_detail()
     assert "Короткий итог" in w.summary.toPlainText()
     assert "17 млн" not in w.summary.toPlainText()
     assert "17 млн" in w.detailed_summary.toPlainText()
     assert "00:00:00" in w.detailed_summary.toPlainText()
+    assert "Бюджет утверждён (итог)" in w.resolved_summary.toPlainText()
     from PySide6.QtWidgets import QMessageBox
 
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)

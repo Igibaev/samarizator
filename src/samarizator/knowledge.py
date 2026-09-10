@@ -115,16 +115,23 @@ def export(store, mid, settings):
         prefix = "- [ ]" if tasks and item["kind"] == "action" and item.get("status") == "agreed" else "-"
         return f"{prefix} {plain(item['text'])}{state}{owner}{due} {links}"
 
-    for title, view in [("Кратко · тезисы", brief), ("Подробная сводка", detailed)]:
+    sections = [("Кратко · тезисы", brief, True), ("Подробная сводка", detailed, False)]
+    if resolved := detailed.get("resolved"):
+        sections.append(
+            (
+                "Итог по решениям",
+                dict(overview="Финальный статус с учётом более поздних правок и отмен.", items=resolved),
+                True,
+            )
+        )
+    for title, view, tasks in sections:
         lines += [f"## {title}", "", plain(view["overview"]), ""]
-        if view is detailed:
+        if title == "Подробная сводка":
             lines += ["Сохранены пункты всех блоков; возможны повторы и последующие изменения решений.", ""]
         for kind, label in LABELS.items():
             items = [item for item in view["items"] if item["kind"] == kind]
             if items:
-                lines += (
-                    [f"### {label}", ""] + [item_line(item, tasks=view is brief) for item in items] + [""]
-                )
+                lines += [f"### {label}", ""] + [item_line(item, tasks=tasks) for item in items] + [""]
     lines += ["", f"[[Transcripts/{suffix}|Полная расшифровка с собеседниками]]", ""]
     atomic_text(note, "\n".join(lines))
     hashes = {

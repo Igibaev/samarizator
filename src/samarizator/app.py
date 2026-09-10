@@ -441,6 +441,13 @@ class Window(QMainWindow):
         self.detailed_summary = QTextBrowser()
         self.detailed_summary.setOpenExternalLinks(False)
         self.tabs.addTab(self.detailed_summary, "Подробная сводка")
+        self.resolved_summary = QTextBrowser()
+        self.resolved_summary.setOpenExternalLinks(False)
+        self.resolved_summary.setToolTip(
+            "Итоговый статус решений и задач с учётом более поздних правок и отмен, отдельно "
+            "от полной истории в «Подробной сводке» — там ничего не удаляется и не заменяется."
+        )
+        self.tabs.addTab(self.resolved_summary, "Итог по решениям")
         self.audio_report = QTextBrowser()
         self.tabs.addTab(self.audio_report, "Качество записи")
         bottom = QHBoxLayout()
@@ -525,6 +532,7 @@ class Window(QMainWindow):
         self.visible_rows = []
         self.summary.setPlainText("")
         self.detailed_summary.clear()
+        self.resolved_summary.clear()
         self.audio_report.clear()
         self.controls()
 
@@ -571,6 +579,19 @@ class Window(QMainWindow):
             refs = {r["id"]: stamp(r["start"]) for r in self.store.iter_segments(self.mid)}
             self.summary.setPlainText(summary_text(brief, refs))
             self.detailed_summary.setPlainText(summary_text(detailed, refs))
+            resolved = detailed.get("resolved") or []
+            if resolved:
+                self.resolved_summary.setPlainText(
+                    summary_text(
+                        dict(overview="Финальный статус с учётом более поздних правок и отмен.", items=resolved),
+                        refs,
+                    )
+                )
+            else:
+                self.resolved_summary.setPlainText(
+                    "В записи нет решений или задач для согласования, либо сводка создана "
+                    "до появления этого раздела — пересоздайте сводку, чтобы получить его."
+                )
         else:
             self.summary.setPlainText(
                 "После распознавания проверьте текст и говорящих. Затем нажмите «Создать сводку».\n\n"
@@ -578,6 +599,7 @@ class Window(QMainWindow):
                 "Результат автоматически сохранится в базе знаний."
             )
             self.detailed_summary.setPlainText(self.summary.toPlainText())
+            self.resolved_summary.setPlainText(self.summary.toPlainText())
         report = []
         plan = self.store.checkpoint(self.mid, "asr-plan", 0) or []
         for i, (start, end) in enumerate(plan):

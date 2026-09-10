@@ -29,6 +29,15 @@ status: предложение / согласовано / отменено / о�
 для пометки «проверить по записи», а не для восстановления фактов по догадке.
 Не заменяй конкретику общими формулировками."""
 
+RECONCILE_PROMPT = """Вот пункты "решение" и "задача" из полного реестра встречи, в хронологическом
+порядке. Часть из них отменяет или пересматривает более раннюю запись по той же теме.
+Верни ИТОГОВЫЙ список: один пункт на каждое отдельное решение или задачу, с его последним
+известным статусом (agreed/cancelled/disputed/proposed/unspecified). evidence итогового пункта
+должен включать ID всех сегментов из истории этого решения, а не только последнего сообщения —
+так можно проверить всю цепочку по расшифровке. Не добавляй решений, которых нет в списке,
+не меняй их суть. Пункт без более позднего пересмотра переноси как есть, без изменений.
+Если итоговый статус не ясен из данных — unspecified, не угадывай его.\n"""
+
 MAP_PROMPT = """Подготовь подробную содержательную сводку этого фрагмента встречи.
 overview: связное объяснение обсуждения, до 1000 символов.
 items: все существенные мысли, решения, задачи, аргументы, ограничения, риски,
@@ -54,12 +63,15 @@ def summary_views(summary):
     return brief, detailed
 
 
-def package_summary(brief, ledger, maps):
+def package_summary(brief, ledger, maps, resolved):
     # Detailed facts bypass lossy reduction entirely, including topics mentioned only once.
     detailed = dict(
         overview="\n\n".join(f"Часть {i + 1}. {m['overview']}" for i, m in enumerate(maps)),
         items=ledger,
         topics=sorted({topic for m in maps for topic in m["topics"]}),
+        # Final status after reconciling later revisions/cancellations; the ledger above
+        # is never edited or shortened because of this -- it stays the full history.
+        resolved=resolved,
     )
     return dict(**brief, brief=brief, detailed=detailed, ledger=ledger, blocks=len(maps), version=2)
 
@@ -163,6 +175,52 @@ class ChatClient:
         raise RuntimeError("API модели недоступен.")
 
 
+def _size_groups(items, max_chars):
+    groups, group, size = [], [], 2
+    for item in items:
+        length = len(json.dumps(item, ensure_ascii=False)) + 2
+        if length + 2 > max_chars:
+            raise ValueError("Один пункт реестра решений превышает размер блока. Увеличьте входной лимит.")
+        if group and size + length > max_chars:
+            groups.append(group)
+            group, size = [], 2
+        group.append(item)
+        size += length
+    if group:
+        groups.append(group)
+    return groups
+
+
+def reconcile_decisions(client, ledger, input_chars, progress=lambda *_: None):
+    """Resolve superseded decisions/tasks in the full ledger into a final-status list.
+
+    Never edits or shortens the ledger itself -- this is an additional, bounded
+    pass over just the "decision"/"action" items, same size-bounded reduction
+    style as the brief summary, capped so it cannot loop forever on a model
+    that won't converge.
+    """
+    current = [item for item in ledger if item["kind"] in {"decision", "action"}]
+    if not current:
+        return []
+    for level in range(4):
+        groups = _size_groups(current, input_chars)
+        reduced = []
+        for i, group in enumerate(groups):
+            allowed = {ref for item in group for ref in item["evidence"]}
+            result = client.complete(RECONCILE_PROMPT + json.dumps(group, ensure_ascii=False), allowed)
+            reduced.extend(result["items"])
+            progress(f"Согласование решений: уровень {level + 1}, блок {i + 1}/{len(groups)}")
+        if len(groups) == 1:
+            return reduced
+        if len(json.dumps(reduced)) >= len(json.dumps(current)):
+            raise ValueError(
+                "Согласование решений не сокращает список. Реестр сохранён без изменений; "
+                "увеличьте размер входного блока."
+            )
+        current = reduced
+    raise ValueError("Не удалось согласовать решения за 4 уровня. Полный реестр сохранён без согласования.")
+
+
 def blocks(segments, max_chars):
     block, size = [], 0
     for row in segments:
@@ -231,6 +289,22 @@ def summarize(store, mid, settings, progress=lambda *_: None, client=None):
             if signature not in seen:
                 ledger.append(item)
                 seen.add(signature)
+    resolve_digest = hashlib.sha256(
+        (
+            settings.chat_url()
+            + settings.model
+            + str(settings.max_output_tokens)
+            + SYSTEM
+            + RECONCILE_PROMPT
+            + json.dumps(ledger, ensure_ascii=False)
+        ).encode()
+    ).hexdigest()
+    cached_resolve = store.checkpoint(mid, "summary-resolve", 0)
+    if cached_resolve and cached_resolve.get("digest") == resolve_digest:
+        resolved = cached_resolve["result"]
+    else:
+        resolved = reconcile_decisions(client, ledger, settings.input_chars, progress)
+        store.save_checkpoint(mid, "summary-resolve", 0, dict(digest=resolve_digest, result=resolved))
     # A reduction unit is an item, not a whole map: every request remains bounded.
     current = ledger
     for level in range(8):
@@ -247,7 +321,9 @@ def summarize(store, mid, settings, progress=lambda *_: None, client=None):
         if group:
             units.append(group)
         if not units:
-            return package_summary(dict(overview=maps[0]["overview"], items=[], topics=[]), ledger, maps)
+            return package_summary(
+                dict(overview=maps[0]["overview"], items=[], topics=[]), ledger, maps, resolved
+            )
         reduced = []
         last = None
         for i, group in enumerate(units):
@@ -274,7 +350,7 @@ def summarize(store, mid, settings, progress=lambda *_: None, client=None):
                 raise ValueError(
                     "Модель вернула более 9 тезисов. Повторите сводку; подробные блоки сохранены."
                 )
-            return package_summary(last, ledger, maps)
+            return package_summary(last, ledger, maps, resolved)
         if len(json.dumps(reduced)) >= len(json.dumps(current)):
             raise ValueError(
                 "Модель не сокращает сводку. Промежуточные блоки сохранены; "

@@ -9,7 +9,7 @@ from samarizator.audio_quality import diagnose, nearest_pause, plan_chunks
 from samarizator.config import Settings
 from samarizator.knowledge import export
 from samarizator.media import dedup_seam, parse_whisper, whisper
-from samarizator.summary import summarize, validate_summary
+from samarizator.summary import reconcile_decisions, summarize, validate_summary
 from samarizator.worker import retry_uncertain, transcribe
 
 
@@ -203,6 +203,79 @@ def test_retry_pass_only_touches_flagged_segments_and_needs_acceptance(meeting, 
     accepted = {r["id"]: r for r in store.segments(mid)}[flagged_id]
     assert accepted["text"] == "corrected"
     assert accepted["retry_text"] == "" and not accepted["uncertain"]
+
+
+def test_reconcile_decisions_only_sends_decisions_and_actions_to_the_model():
+    ledger = [
+        dict(kind="point", text="Бюджет обсуждён", evidence=[1], owner=None, due=None, status="unspecified"),
+        dict(kind="decision", text="Релиз в пятницу", evidence=[2], owner=None, due=None, status="agreed"),
+    ]
+
+    class Fake:
+        def __init__(self):
+            self.prompts = []
+
+        def complete(self, prompt, allowed):
+            self.prompts.append((prompt, allowed))
+            return dict(overview="", topics=[], items=[ledger[1]])
+
+    fake = Fake()
+    resolved = reconcile_decisions(fake, ledger, 4000)
+    assert len(fake.prompts) == 1
+    assert fake.prompts[0][1] == {2}  # the "point" item's evidence never reaches the model
+    assert resolved == [ledger[1]]
+
+
+def test_reconcile_decisions_skips_the_model_with_nothing_to_reconcile():
+    class Fake:
+        def complete(self, *a):
+            pytest.fail("must not call the model when there are no decisions/actions")
+
+    ledger = [dict(kind="point", text="x", evidence=[1], owner=None, due=None, status="unspecified")]
+    assert reconcile_decisions(Fake(), ledger, 4000) == []
+
+
+def test_summarize_reconciles_decisions_without_touching_the_full_ledger(meeting):
+    store, mid, settings = meeting
+    store.save_chunk(
+        mid,
+        0,
+        [
+            dict(start=0, end=1, speaker="A", text="Решили выпустить в пятницу."),
+            dict(start=1, end=2, speaker="A", text="Выпуск отменили."),
+        ],
+    )
+    ids = [r["id"] for r in store.segments(mid)]
+    agreed = dict(
+        kind="decision", text="Выпуск в пятницу", evidence=[ids[0]], owner=None, due=None, status="agreed"
+    )
+    cancelled = dict(
+        kind="decision", text="Выпуск отменён", evidence=[ids[1]], owner=None, due=None, status="cancelled"
+    )
+    final = dict(
+        kind="decision",
+        text="Выпуск отменён (итог)",
+        evidence=ids,
+        owner=None,
+        due=None,
+        status="cancelled",
+    )
+
+    class Fake:
+        def complete(self, prompt, allowed):
+            if "ИТОГОВЫЙ список" in prompt:  # the reconciliation pass
+                return dict(overview="", topics=[], items=[final])
+            return dict(overview="Итог", topics=[], items=[agreed, cancelled])  # map and brief reduce
+
+    result = summarize(store, mid, settings, client=Fake())
+    assert result["detailed"]["items"] == [agreed, cancelled]  # full history is never shortened
+    assert result["detailed"]["resolved"] == [final]
+
+    store.update(mid, summary=json.dumps(result))
+    content = export(store, mid, settings).read_text()
+    assert "## Итог по решениям" in content
+    assert "Выпуск отменён (итог)" in content
+    assert "Выпуск в пятницу" in content  # the superseded entry is still in "Подробная сводка"
 
 
 def test_detailed_summary_preserves_facts_dropped_from_brief_and_cancelled_tasks(meeting):
