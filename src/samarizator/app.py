@@ -5,6 +5,7 @@ import subprocess
 import sys
 import threading
 from dataclasses import asdict
+from pathlib import Path
 from urllib.parse import quote
 
 from PySide6.QtCore import QLockFile, Qt, QThread, QTimer, QUrl, Signal
@@ -845,8 +846,37 @@ class Window(QMainWindow):
             QDesktopServices.openUrl(QUrl.fromLocalFile(self.store.meeting(self.mid)["source"]))
 
     def open_obsidian(self):
-        if self.mid and (note := self.store.meeting(self.mid)["note"]):
-            QDesktopServices.openUrl(QUrl("obsidian://open?path=" + quote(note, safe="")))
+        if not self.mid or not (note := self.store.meeting(self.mid)["note"]):
+            return
+        # obsidian://open?path=<absolute path> only resolves if that exact path matches a
+        # vault Obsidian already knows about. On macOS that absolute path very often does not
+        # match: iCloud Drive's "Desktop & Documents Folders" sync turns ~/Documents into a
+        # symlink, so Path.resolve() (used both here and when the note was exported) yields
+        # .../Library/Mobile Documents/com~apple~CloudDocs/..., not the ~/Documents path the
+        # user picked and Obsidian registered the vault under. vault=<name>&file=<relative
+        # path> sidesteps this: Obsidian just needs a vault already open under that name, and
+        # resolves the file relative to it the same way it resolves a wikilink.
+        vault_root = Path(self.settings.vault).expanduser().resolve()
+        try:
+            relative = Path(note).resolve().relative_to(vault_root)
+        except ValueError:
+            QMessageBox.warning(
+                self,
+                "Не удалось открыть в Obsidian",
+                "Путь заметки не совпадает с текущим хранилищем в настройках. "
+                "Нажмите «Экспортировать снова», затем повторите попытку.",
+            )
+            return
+        file_param = relative.with_suffix("").as_posix()
+        url = f"obsidian://open?vault={quote(vault_root.name, safe='')}&file={quote(file_param, safe='')}"
+        if not QDesktopServices.openUrl(QUrl(url)):
+            QMessageBox.warning(
+                self,
+                "Не удалось открыть в Obsidian",
+                "Проверьте, что Obsidian установлен и хранилище хотя бы раз было открыто "
+                f"внутри самого приложения Obsidian (Файл → Открыть хранилище → «{vault_root.name}»). "
+                "Без этого шага ссылка obsidian:// не находит хранилище, даже если папка есть на диске.",
+            )
 
     def closeEvent(self, event):
         if self.job:
