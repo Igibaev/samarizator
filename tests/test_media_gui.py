@@ -72,6 +72,35 @@ def test_gui_constructs_and_shows_recording(tmp_path, monkeypatch):
     assert w.table.item(0, 2).text() == "Тест"
     w.uncertain_only.setChecked(False)
     assert w.table.rowCount() == 2
+    from PySide6.QtWidgets import QMessageBox
+
+    w.table.setCurrentCell(0, 0)
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
+    monkeypatch.setattr("samarizator.app.shutil.which", lambda name: None)
+    w.play_segment()
+    assert w.player_proc is None  # no ffplay found, nothing started
+
+    class FakeProc:
+        def __init__(self):
+            self.stopped = False
+
+        def poll(self):
+            return None if not self.stopped else 0
+
+        def terminate(self):
+            self.stopped = True
+
+    popen_calls = []
+    monkeypatch.setattr("samarizator.app.shutil.which", lambda name: "/usr/bin/ffplay")
+    monkeypatch.setattr(
+        "samarizator.app.subprocess.Popen", lambda args, **kw: popen_calls.append(args) or FakeProc()
+    )
+    w.play_segment()
+    assert popen_calls and popen_calls[0][0] == "/usr/bin/ffplay"
+    assert "-ss" in popen_calls[0] and "-t" in popen_calls[0]
+    assert w.player_proc is not None and w.playback_label.text()
+    w.stop_playback()
+    assert w.player_proc is None and w.playback_label.text() == ""
     sid = w.store.segments(mid)[0]["id"]
     item = dict(kind="point", text="Точная сумма 17 млн", evidence=[sid], owner=None, due=None)
     brief = dict(overview="Короткий итог", items=[], topics=[])

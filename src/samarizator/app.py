@@ -1,5 +1,7 @@
 import json
 import os
+import shutil
+import subprocess
 import sys
 import threading
 from dataclasses import asdict
@@ -309,6 +311,7 @@ class Window(QMainWindow):
         self.active_id = None
         self.mid = None
         self.page = 0
+        self.player_proc = None
         self.setWindowTitle("Samarizator — из разговора в знание")
         self.resize(1200, 800)
         root = QWidget()
@@ -396,6 +399,20 @@ class Window(QMainWindow):
         for widget in [prev, self.page_label, nxt]:
             nav.addWidget(widget)
         tbox.addLayout(nav)
+        playback = QHBoxLayout()
+        self.play_button = QPushButton("▶ Прослушать реплику")
+        self.play_button.setToolTip(
+            "Открывает исходную запись в ffplay на выбранной реплике, с запасом по 2 с с каждой "
+            "стороны. Нужен ffplay (обычно ставится вместе с ffmpeg)."
+        )
+        self.play_button.clicked.connect(self.play_segment)
+        self.stop_button = QPushButton("■ Стоп")
+        self.stop_button.clicked.connect(self.stop_playback)
+        self.playback_label = QLabel()
+        playback.addWidget(self.play_button)
+        playback.addWidget(self.stop_button)
+        playback.addWidget(self.playback_label, 1)
+        tbox.addLayout(playback)
         edit = QHBoxLayout()
         self.speaker = QLineEdit()
         self.speaker.setPlaceholderText("Имя говорящего")
@@ -533,6 +550,7 @@ class Window(QMainWindow):
 
     def select(self, item, previous=None):
         if item:
+            self.stop_playback()
             self.mid = item.data(Qt.ItemDataRole.UserRole)
             self.page = 0
             self.load_detail()
@@ -650,6 +668,38 @@ class Window(QMainWindow):
         self.store.accept_retry(self.mid, row["id"])
         self.load_detail()
 
+    def play_segment(self):
+        index = self.table.currentRow()
+        if not self.mid or not 0 <= index < len(self.visible_rows):
+            return
+        player = shutil.which("ffplay")
+        if not player:
+            QMessageBox.information(
+                self,
+                "Прослушивание недоступно",
+                "ffplay не найден. Обычно он ставится вместе с ffmpeg (brew install ffmpeg). "
+                "Пока можно открыть всю запись кнопкой «Открыть исходную запись» ниже.",
+            )
+            return
+        row = self.visible_rows[index]
+        source = self.store.meeting(self.mid)["source"]
+        pad = 2.0
+        start = max(0, row["start"] - pad)
+        duration = row["end"] - row["start"] + 2 * pad
+        self.stop_playback()
+        self.player_proc = subprocess.Popen(
+            [player, "-autoexit", "-ss", str(start), "-t", str(duration), source],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        self.playback_label.setText(f"Играет {stamp(start)}–{stamp(start + duration)}…")
+
+    def stop_playback(self):
+        if self.player_proc and self.player_proc.poll() is None:
+            self.player_proc.terminate()
+        self.player_proc = None
+        self.playback_label.setText("")
+
     def start(self, phase):
         if self.job or not self.mid:
             return
@@ -734,6 +784,10 @@ class Window(QMainWindow):
         if self.active_id:
             meeting = self.store.meeting(self.active_id)
             self.progress.setText(meeting["error"] or "Подготовка…")
+        if self.player_proc and self.player_proc.poll() is not None:
+            self.player_proc = None
+            self.playback_label.setText("")
+            self.controls()
 
     def controls(self):
         busy = self.job is not None
@@ -754,6 +808,9 @@ class Window(QMainWindow):
             and bool(self.visible_rows[index].get("retry_text"))
         )
         self.accept_retry_button.setEnabled(has_retry and not busy)
+        has_row = ready and hasattr(self, "visible_rows") and 0 <= index < len(self.visible_rows)
+        self.play_button.setEnabled(has_row)
+        self.stop_button.setEnabled(bool(self.player_proc) and self.player_proc.poll() is None)
         self.obsidian.setEnabled(
             ready
             and bool(self.store.meeting(self.mid)["note"])
@@ -775,6 +832,7 @@ class Window(QMainWindow):
             if not self.job.wait(5000):
                 event.ignore()
                 return
+        self.stop_playback()
         event.accept()
 
 
