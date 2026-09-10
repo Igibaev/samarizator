@@ -223,11 +223,45 @@ class Store:
             db.execute("DELETE FROM checkpoints WHERE meeting=? AND phase LIKE 'summary%'", (mid,))
             db.execute("UPDATE meetings SET summary=NULL,status='review' WHERE id=?", (mid,))
 
+    def assign_unknown_speakers(self, mid, turns):
+        from .media import assign_speaker
+
+        changed = 0
+        with self.connect() as db:
+            for row in db.execute(
+                "SELECT * FROM segments WHERE meeting=? AND speaker='Не определён'", (mid,)
+            ):
+                speaker, uncertain = assign_speaker(row["start"], row["end"], turns)
+                if speaker == "Не определён":
+                    continue
+                reasons = [
+                    r.strip() for r in row["review"].split(",") if r.strip() and r.strip() != "говорящий"
+                ]
+                if uncertain:
+                    reasons.append("говорящий")
+                elif row["uncertain"] and not row["review"]:
+                    reasons.append("проверить текст / границу")  # preserve legacy unspecified warning
+                db.execute(
+                    "UPDATE segments SET speaker=?,uncertain=?,review=? WHERE id=?",
+                    (speaker, bool(reasons), ", ".join(reasons), row["id"]),
+                )
+                changed += 1
+            if changed:
+                db.execute("DELETE FROM checkpoints WHERE meeting=? AND phase LIKE 'summary%'", (mid,))
+                db.execute("UPDATE meetings SET summary=NULL,status='review' WHERE id=?", (mid,))
+        return changed
+
+    def unknown_speakers(self, mid):
+        with self.connect() as db:
+            return db.execute(
+                "SELECT count(*) FROM segments WHERE meeting=? AND speaker='Не определён'", (mid,)
+            ).fetchone()[0]
+
     def recover(self):
         with self.connect() as db:
             db.execute(
                 "UPDATE meetings SET status='interrupted',error='Предыдущий запуск прерван; можно продолжить.' "
-                "WHERE status IN ('transcribing','summarizing','retrying')"
+                "WHERE status IN ('transcribing','summarizing','retrying','speakers')"
             )
 
     def delete(self, mid):

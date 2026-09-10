@@ -76,6 +76,28 @@ def package_summary(brief, ledger, maps, resolved):
     return dict(**brief, brief=brief, detailed=detailed, ledger=ledger, blocks=len(maps), version=2)
 
 
+class SummaryTooLong(ValueError):
+    """The provider explicitly reports a truncated completion."""
+
+
+class SummaryFormatError(ValueError):
+    """A completion arrived, but cannot be used as evidence-backed JSON."""
+
+
+def checked_complete(client, prompt, allowed):
+    for attempt in range(3):
+        try:
+            return client.complete(prompt, allowed)
+        except SummaryFormatError:
+            if attempt == 2:
+                raise
+            prompt = (
+                prompt
+                + "\nОтвет не прошёл проверку. Верни только JSON указанной структуры; evidence — только целые ID из входных данных. Не добавляй пояснений вне JSON."
+            )
+    raise AssertionError("unreachable")
+
+
 def validate_summary(obj, allowed):
     if not isinstance(obj, dict) or not isinstance(obj.get("overview"), str):
         raise ValueError("Модель вернула неверную структуру сводки.")
@@ -156,17 +178,33 @@ class ChatClient:
                                 raise ValueError("Ответ модели слишком большой.")
                     body = json.loads(raw)
                     choice = body["choices"][0]
-                    if choice.get("finish_reason") not in {"stop", None}:
-                        raise ValueError(
+                    if choice.get("finish_reason") == "length":
+                        raise SummaryTooLong(
                             "Модель обрезала ответ. Уменьшите входной блок или увеличьте лимит ответа."
                         )
-                    content = choice["message"]["content"].strip()
-                    if content.startswith("```") and content.endswith("```"):
-                        content = "\n".join(content.splitlines()[1:-1])
-                    return validate_summary(json.loads(content), allowed)
+                    if choice.get("finish_reason") not in {"stop", None}:
+                        raise ValueError(
+                            "API не завершил сводку: проверьте ограничения корпоративной модели."
+                        )
+                    try:
+                        content = choice["message"]["content"]
+                        if not isinstance(content, str):
+                            raise ValueError("Модель вернула нетекстовый ответ.")
+                        content = content.strip()
+                        if content.startswith("```") and content.endswith("```"):
+                            content = "\n".join(content.splitlines()[1:-1])
+                        return validate_summary(json.loads(content), allowed)
+                    except (ValueError, TypeError) as exc:
+                        if isinstance(exc, json.JSONDecodeError):
+                            raise SummaryFormatError(
+                                "Модель вернула некорректный JSON. Повторите создание сводки."
+                            ) from None
+                        raise SummaryFormatError(str(exc)) from None
                 except httpx.HTTPError:
                     if attempt == 2:
-                        raise ValueError("Нет соединения с API модели. Проверьте base URL и сеть.") from None
+                        raise ValueError(
+                            "Нет соединения с API модели. Проверьте base URL, VPN и доверие корпоративному сертификату."
+                        ) from None
                     time.sleep(2**attempt)
                 except (KeyError, IndexError, TypeError, json.JSONDecodeError):
                     raise ValueError(
@@ -207,7 +245,9 @@ def reconcile_decisions(client, ledger, input_chars, progress=lambda *_: None, o
         reduced = []
         for i, group in enumerate(groups):
             allowed = {ref for item in group for ref in item["evidence"]}
-            result = client.complete(RECONCILE_PROMPT + json.dumps(group, ensure_ascii=False), allowed)
+            result = checked_complete(
+                client, RECONCILE_PROMPT + json.dumps(group, ensure_ascii=False), allowed
+            )
             if {ref for item in result["items"] for ref in item["evidence"]} != allowed:
                 raise ValueError("Согласование потеряло ссылки на часть исходных решений.")
             reduced.extend(result["items"])
@@ -259,21 +299,46 @@ def blocks(segments, max_chars):
 def summarize(store, mid, settings, progress=lambda *_: None, client=None):
     client = client or ChatClient(settings)
     maps = []
-    for index, block in enumerate(blocks(store.iter_segments(mid), settings.input_chars)):
+
+    def map_block(block, index, node=1, depth=0):
         prompt = MAP_PROMPT + "\n".join(line for _, line in block)
         digest = hashlib.sha256(
             (
                 settings.chat_url() + settings.model + str(settings.max_output_tokens) + SYSTEM + prompt
             ).encode()
         ).hexdigest()
-        cached = store.checkpoint(mid, "summary-map", index)
+        phase, part = ("summary-map", index) if node == 1 else ("summary-map-split", index * 100 + node)
+        cached = store.checkpoint(mid, phase, part)
         allowed = {sid for sid, _ in block}
         if cached and cached.get("digest") == digest:
-            result = validate_summary(cached["result"], allowed)
-        else:
-            result = client.complete(prompt, allowed)
-            store.save_checkpoint(mid, "summary-map", index, dict(digest=digest, result=result))
-        maps.append(result)
+            return [validate_summary(r, allowed) for r in cached.get("parts", [cached.get("result")])]
+        try:
+            results = [checked_complete(client, prompt, allowed)]
+        except SummaryTooLong:
+            if depth >= 3:
+                raise ValueError(
+                    "Модель обрезала ответ даже для малого блока. Увеличьте лимит токенов ответа в настройках."
+                ) from None
+            if len(block) > 1:
+                halves = [block[: len(block) // 2], block[len(block) // 2 :]]
+            else:
+                row = json.loads(block[0][1])
+                text = row["text"]
+                if len(text) < 400:
+                    raise
+                halves = [
+                    [(row["id"], json.dumps(dict(row, text=piece), ensure_ascii=False))]
+                    for piece in [text[: len(text) // 2], text[len(text) // 2 :]]
+                ]
+            progress(f"Ответ обрезан: делю блок {index + 1} на меньшие части…")
+            results = []
+            for child, half in enumerate(halves):
+                results.extend(map_block(half, index, node * 2 + child, depth + 1))
+        store.save_checkpoint(mid, phase, part, dict(digest=digest, parts=results))
+        return results
+
+    for index, block in enumerate(blocks(store.iter_segments(mid), settings.input_chars)):
+        maps.extend(map_block(block, index))
         progress(f"Сводка: обработан блок {index + 1}")
     if not maps:
         raise ValueError("Нет распознанной речи для сводки.")
@@ -368,7 +433,7 @@ def summarize(store, mid, settings, progress=lambda *_: None, client=None):
                 + json.dumps(group, ensure_ascii=False)
             )
             allowed = {ref for item in group for ref in item["evidence"]}
-            last = client.complete(prompt, allowed)
+            last = checked_complete(client, prompt, allowed)
             reduced.extend(last["items"])
             progress(f"Объединение: уровень {level + 1}, блок {i + 1}/{len(units)}")
         if len(units) == 1:

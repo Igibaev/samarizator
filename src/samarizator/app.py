@@ -58,6 +58,7 @@ STATUS = {
     "new": "Новая",
     "transcribing": "Распознавание",
     "review": "Готова к проверке",
+    "speakers": "Определение собеседников",
     "retrying": "Повторный проход по сомнительным репликам",
     "summarizing": "Создание сводки",
     "done": "Готово",
@@ -313,7 +314,10 @@ class Window(QMainWindow):
         self.mid = None
         self.page = 0
         self.player_proc = None
-        self.setWindowTitle("Samarizator — из разговора в знание")
+        from .build import build_label
+
+        self.build_label = build_label()
+        self.setWindowTitle("Samarizator · " + self.build_label)
         self.resize(1200, 800)
         root = QWidget()
         self.setCentralWidget(root)
@@ -322,7 +326,7 @@ class Window(QMainWindow):
         title = QLabel("Samarizator")
         title.setObjectName("brand")
         top.addWidget(title)
-        top.addWidget(QLabel("Локальное аудио  ·  Облачные сводки  ·  Obsidian"))
+        top.addWidget(QLabel("Локальное аудио  ·  Кратко + подробно  ·  " + self.build_label))
         top.addStretch()
         self.settings_button = QPushButton("Настройки")
         self.settings_button.clicked.connect(self.configure)
@@ -352,6 +356,11 @@ class Window(QMainWindow):
         self.info = QLabel("1. Распознайте локально → 2. Проверьте собеседников → 3. Создайте сводку")
         self.info.setWordWrap(True)
         body.addWidget(self.info)
+        self.error_detail = QLabel()
+        self.error_detail.setWordWrap(True)
+        self.error_detail.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.error_detail.setStyleSheet("color: #a52d27;")
+        body.addWidget(self.error_detail)
         actions = QHBoxLayout()
         self.transcribe = QPushButton("1. Распознать / продолжить")
         self.transcribe.clicked.connect(lambda: self.start("transcribe"))
@@ -369,6 +378,24 @@ class Window(QMainWindow):
         for button in [self.transcribe, self.retry, self.summarize, self.cancel]:
             actions.addWidget(button)
         body.addLayout(actions)
+        maintenance = QHBoxLayout()
+        self.rerun_button = QPushButton("Распознать заново")
+        self.rerun_button.setToolTip(
+            "Новая запись с текущей моделью и настройками. Старый результат сохранится для сравнения."
+        )
+        self.rerun_button.clicked.connect(self.rerun_transcription)
+        self.speakers_button = QPushButton("Определить неизвестных собеседников")
+        self.speakers_button.setToolTip(
+            "Локальное определение говорящих без повторного распознавания текста. Ручные имена сохраняются."
+        )
+        self.speakers_button.clicked.connect(lambda: self.start("speakers"))
+        self.copy_error_button = QPushButton("Скопировать ошибку")
+        self.copy_error_button.clicked.connect(
+            lambda: QApplication.clipboard().setText(self.error_detail.text())
+        )
+        for button in [self.rerun_button, self.speakers_button, self.copy_error_button]:
+            maintenance.addWidget(button)
+        body.addLayout(maintenance)
         self.tabs = QTabWidget()
         body.addWidget(self.tabs, 1)
         transcript = QWidget()
@@ -532,6 +559,7 @@ class Window(QMainWindow):
     def clear_detail(self):
         self.heading.setText("Добавьте запись встречи, лекции или интервью")
         self.info.setText("1. Распознайте локально → 2. Проверьте собеседников → 3. Создайте сводку")
+        self.error_detail.clear()
         self.table.setRowCount(0)
         self.visible_rows = []
         self.summary.setPlainText("")
@@ -575,6 +603,21 @@ class Window(QMainWindow):
         self.info.setText(
             f"{STATUS.get(meeting['status'], meeting['status'])} · {stamp(meeting['duration'])} · "
             "Собеседники определяются в пределах этой записи; проверьте имена и спорные места."
+        )
+        mode = Settings.from_dict(json.loads(meeting["settings"])).diarization
+        unknown = self.store.unknown_speakers(self.mid)
+        if unknown:
+            description = {
+                "manual": "ручной режим",
+                "local": "локальная модель",
+                "channels": "отдельные каналы",
+            }.get(mode, mode)
+            self.info.setText(self.info.text() + f" Не определены {unknown} реплик; {description}.")
+        self.error_detail.setText(
+            "Причина: " + meeting["error"]
+            if meeting["error"]
+            and meeting["status"] not in {"transcribing", "summarizing", "retrying", "speakers"}
+            else ""
         )
         self.load_rows()
         if meeting["summary"]:
@@ -752,6 +795,20 @@ class Window(QMainWindow):
         self.player_proc = None
         self.playback_label.setText("")
 
+    def rerun_transcription(self):
+        if self.job or not self.mid:
+            return
+        old = self.store.meeting(self.mid)
+        try:
+            new_id = self.store.create(old["source"], self.settings)
+        except (OSError, ValueError):
+            QMessageBox.warning(self, "Запись недоступна", "Исходный файл перемещён. Добавьте его заново.")
+            return
+        self.store.update(new_id, title=old["title"] + " · заново")
+        self.mid, self.page = new_id, 0
+        self.refresh_list()
+        self.start("transcribe")
+
     def start(self, phase):
         if self.job or not self.mid:
             return
@@ -765,6 +822,22 @@ class Window(QMainWindow):
                 else:
                     for key in ["memory_gb", "threads", "gpu"]:
                         setattr(original, key, getattr(self.settings, key))
+            elif phase == "speakers":
+                if not self.store.checkpoint(self.mid, "asr_complete", 0):
+                    raise ValueError("Сначала завершите распознавание записи.")
+                for key in [
+                    "diarization",
+                    "segmentation_model",
+                    "embedding_model",
+                    "speakers",
+                    "memory_gb",
+                    "threads",
+                ]:
+                    setattr(original, key, getattr(self.settings, key))
+                if original.diarization != "local" or os.environ.get("SAMARIZATOR_STRICT") == "1":
+                    raise ValueError(
+                        "В настройках включите автоматическое локальное разделение собеседников. Режим SAMARIZATOR_STRICT не поддерживает дополнительные модели."
+                    )
             elif phase == "retry":
                 if not self.store.checkpoint(self.mid, "asr_complete", 0):
                     raise ValueError("Сначала завершите распознавание всей записи.")
@@ -789,7 +862,9 @@ class Window(QMainWindow):
             self.store.update(
                 self.mid,
                 settings=json.dumps(asdict(original)),
-                status={"transcribe": "transcribing", "retry": "retrying"}.get(phase, "summarizing"),
+                status={"transcribe": "transcribing", "retry": "retrying", "speakers": "speakers"}.get(
+                    phase, "summarizing"
+                ),
                 error=None,
             )
             self.active_id = self.mid
@@ -820,6 +895,8 @@ class Window(QMainWindow):
 
     def job_finished(self):
         meeting = self.store.meeting(self.active_id)
+        if self.job.phase == "summary" and meeting["summary"] and self.mid == self.active_id:
+            self.tabs.setCurrentWidget(self.summary)
         self.progress.setText(meeting["error"] or "Готово. Результат сохранён.")
         self.job.deleteLater()
         self.job = None
@@ -845,9 +922,16 @@ class Window(QMainWindow):
         busy = self.job is not None
         ready = self.mid is not None
         self.settings_button.setEnabled(not busy)
-        self.transcribe.setEnabled(ready and not busy)
+        complete = ready and bool(self.store.checkpoint(self.mid, "asr_complete", 0))
+        self.transcribe.setText("Распознавание завершено" if complete else "1. Распознать / продолжить")
+        self.transcribe.setEnabled(ready and not busy and not complete)
+        self.rerun_button.setEnabled(ready and not busy)
+        self.speakers_button.setEnabled(
+            bool(complete) and not busy and bool(self.store.unknown_speakers(self.mid))
+        )
+        self.copy_error_button.setEnabled(bool(self.error_detail.text()))
         self.retry.setEnabled(ready and not busy and bool(self.store.checkpoint(self.mid, "asr_complete", 0)))
-        self.summarize.setEnabled(ready and not busy)
+        self.summarize.setEnabled(bool(complete) and not busy)
         self.cancel.setEnabled(busy)
         self.save_segment.setEnabled(ready and not busy)
         index = self.table.currentRow()
