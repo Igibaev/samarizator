@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .audio_quality import diagnose, plan_chunks
 from .config import Settings, data_dir
-from .media import extract, fingerprint, parse_whisper, probe, whisper
+from .media import dedup_seam, extract, fingerprint, parse_whisper, probe, whisper
 from .process import run_command
 from .store import Store
 
@@ -110,8 +110,20 @@ def transcribe(store, mid, settings, work):
             )
             rows += parse_whisper(result, start, lower, upper, turns or [], channel)
             wav.unlink()
+        rows = sorted(rows, key=lambda r: r["start"])
+        # Two independent channels are simultaneous speakers, not sequential audio
+        # decoded twice; a seam match between them would be coincidence, not a repeat.
+        if index > 0 and rows and settings.diarization != "channels":
+            previous = store.last_segment(mid)
+            if previous:
+                trimmed, overlap = dedup_seam(previous["text"], rows[0]["text"])
+                if overlap and trimmed:
+                    reasons = [r for r in [rows[0]["review"], "дублирующиеся слова на стыке удалены"] if r]
+                    rows[0] = dict(rows[0], text=trimmed, uncertain=True, review=", ".join(reasons))
+                elif overlap:
+                    rows = rows[1:]
         store.save_checkpoint(mid, "audio-quality", index, diagnostics)
-        store.save_chunk(mid, index, sorted(rows, key=lambda r: r["start"]))
+        store.save_chunk(mid, index, rows)
     if not store.segments(mid, limit=1):
         raise ValueError("Whisper не обнаружил речь. Проверьте аудиодорожку и язык.")
     store.save_checkpoint(mid, "asr_complete", 0, True)

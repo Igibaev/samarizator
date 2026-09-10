@@ -8,7 +8,7 @@ import pytest
 from samarizator.audio_quality import diagnose, nearest_pause, plan_chunks
 from samarizator.config import Settings
 from samarizator.knowledge import export
-from samarizator.media import parse_whisper, whisper
+from samarizator.media import dedup_seam, parse_whisper, whisper
 from samarizator.summary import summarize, validate_summary
 from samarizator.worker import retry_uncertain, transcribe
 
@@ -81,6 +81,45 @@ def test_decoder_receives_vad_and_literal_glossary(tmp_path, monkeypatch):
     whisper("audio.wav", "asr.bin", "ru", 8, tmp_path, vad_model="vad.bin", glossary="EBITDA, Иванов")
     assert "-ojf" in calls[0] and "--vad" in calls[0]
     assert calls[0][calls[0].index("--prompt") + 1] == "EBITDA, Иванов"
+
+
+def test_dedup_seam_trims_exact_repeats_and_leaves_the_rest_untouched():
+    trimmed, overlap = dedup_seam("The report is due Friday.", "due Friday afternoon")
+    assert overlap == 2 and trimmed == "afternoon"
+    trimmed, overlap = dedup_seam("Alice will prepare it.", "Bob is responsible.")
+    assert overlap == 0 and trimmed == "Bob is responsible."
+    trimmed, overlap = dedup_seam("Same words here", "same words here")
+    assert overlap == 3 and trimmed == ""
+
+
+def test_seam_dedup_trims_repeated_words_between_chunks(meeting, tmp_path, monkeypatch):
+    store, mid, settings = meeting
+    model = tmp_path / "model.bin"
+    model.write_bytes(b"model")
+    settings.whisper_model = str(model)
+    settings.pause_boundaries = True
+    store.save_checkpoint(mid, "asr-plan", 0, [[0, 28], [28, 60]])
+    monkeypatch.setattr("samarizator.worker.probe", lambda *a: (60, 1))
+    monkeypatch.setattr("samarizator.worker.plan_chunks", lambda *a: pytest.fail("must reuse plan"))
+    monkeypatch.setattr("samarizator.worker.extract", lambda source, target, *a: pcm(target, seconds=1))
+    calls = []
+
+    def asr(*a, **kw):
+        calls.append(1)
+        if len(calls) == 1:
+            return dict(
+                transcription=[dict(offsets={"from": 0, "to": 3000}, text="The report is due Friday.")]
+            )
+        # Overlapping padded audio decoded independently produced the same lead-in words.
+        return dict(
+            transcription=[dict(offsets={"from": 2000, "to": 5000}, text="Friday afternoon we will meet.")]
+        )
+
+    monkeypatch.setattr("samarizator.worker.whisper", asr)
+    transcribe(store, mid, settings, tmp_path)
+    rows = store.segments(mid)
+    assert [r["text"] for r in rows] == ["The report is due Friday.", "afternoon we will meet."]
+    assert rows[1]["uncertain"] and "стык" in rows[1]["review"]
 
 
 def test_resume_uses_saved_pause_plan_and_never_duplicates(meeting, tmp_path, monkeypatch):

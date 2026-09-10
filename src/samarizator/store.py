@@ -112,6 +112,13 @@ class Store:
             yield from rows
             offset += len(rows)
 
+    def last_segment(self, mid):
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT * FROM segments WHERE meeting=? ORDER BY start DESC, id DESC LIMIT 1", (mid,)
+            ).fetchone()
+            return dict(row) if row else None
+
     def checkpoint(self, mid, phase, part):
         with self.connect() as db:
             row = db.execute(

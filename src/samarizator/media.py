@@ -1,10 +1,13 @@
 import hashlib
 import json
 import math
+import re
 import shutil
 from pathlib import Path
 
 from .process import run_command
+
+_TOKEN = re.compile(r"\S+")
 
 
 def fingerprint(path):
@@ -131,6 +134,31 @@ def parse_whisper(payload, offset, lower, upper, turns=(), channel=None):
             )
         )
     return output
+
+
+def dedup_seam(prev_text, text, max_words=12):
+    """Trim a leading run of words in `text` that exactly repeats the tail of
+    `prev_text`, for two adjacent chunks whose padded audio overlapped at a seam.
+
+    Comparison is case/punctuation-insensitive; only an exact matching run is
+    removed, never guessed or reworded. Returns (trimmed_text, words_removed);
+    an empty trimmed_text means the whole segment was a repeat of the previous
+    chunk's tail and should be dropped, not kept as an empty row.
+    """
+    prev_tokens = _TOKEN.findall(prev_text)[-max_words:]
+    matches = list(_TOKEN.finditer(text))
+    norm = [re.sub(r"^\W+|\W+$", "", m.group()).lower() for m in matches[:max_words]]
+    prev_norm = [re.sub(r"^\W+|\W+$", "", t).lower() for t in prev_tokens]
+    overlap = 0
+    for n in range(min(len(prev_norm), len(norm)), 0, -1):
+        if prev_norm[-n:] == norm[:n] and all(prev_norm[-n:]):
+            overlap = n
+            break
+    if not overlap:
+        return text, 0
+    if overlap == len(matches):
+        return "", overlap
+    return text[matches[overlap].start() :].lstrip(), overlap
 
 
 def whisper(wav, model, language, threads, work, gpu=False, *, vad_model="", glossary="", beam_size=5):
