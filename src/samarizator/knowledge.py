@@ -130,6 +130,9 @@ def export(store, mid, settings):
         lines += ["## Проверка решений", "", plain(detailed["resolution_warning"]), ""]
     for title, view, tasks in sections:
         lines += [f"## {title}", "", plain(view["overview"]), ""]
+        for field in ("quality_warning", "generation_warning"):
+            if view.get(field):
+                lines += [f"> {plain(view[field])}", ""]
         if title == "Подробная сводка":
             lines += ["Сохранены пункты всех блоков; возможны повторы и последующие изменения решений.", ""]
         for kind, label in LABELS.items():

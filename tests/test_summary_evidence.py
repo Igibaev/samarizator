@@ -75,7 +75,9 @@ def test_evidence_hover_reads_current_source_and_escapes_html(evidence_window, m
     assert browser.evidence_tooltip("samarizator-evidence:999999") == ""
 
 
-def test_click_plays_exact_interval_from_each_summary_and_stops_previous(evidence_window, monkeypatch):
+def test_single_icon_plays_all_sources_from_each_summary_and_stops_previous(
+    evidence_window, monkeypatch
+):
     from PySide6.QtCore import Qt
     from PySide6.QtTest import QTest
 
@@ -107,8 +109,8 @@ def test_click_plays_exact_interval_from_each_summary_and_stops_previous(evidenc
         assert w.stop_button.isVisible() and w.stop_button.isEnabled()
     assert len(calls) == 3
     for args in calls:
-        assert args[args.index("-ss") + 1] == str(row["start"])
-        assert args[args.index("-t") + 1] == "1.5"
+        assert args[args.index("-ss") + 1] == str(row["start"] - 1)
+        assert args[args.index("-t") + 1] == "3.5"
         assert args[-1] == str(source) and "-nodisp" in args
     assert processes[0].stopped and processes[1].stopped and not processes[2].stopped
     w.stop_button.click()

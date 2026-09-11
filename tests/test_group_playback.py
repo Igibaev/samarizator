@@ -50,7 +50,9 @@ def test_group_click_advances_queue_and_stop_cancels_all(evidence_window, monkey
 
     monkeypatch.setattr("samarizator.app.shutil.which", lambda _: "/usr/bin/ffplay")
     monkeypatch.setattr("samarizator.app.subprocess.Popen", launch)
-    cursor = browser.document().find("Прослушать всё")
+    assert browser.toPlainText().count("▶") == 1
+    assert "00:00:" not in browser.toPlainText()
+    cursor = browser.document().find("▶")
     cursor.setPosition(cursor.selectionStart() + 1)
     QTest.mouseClick(browser.viewport(), Qt.MouseButton.LeftButton, pos=browser.cursorRect(cursor).center())
     assert len(calls) == 1 and len(w.playback_queue) == 1

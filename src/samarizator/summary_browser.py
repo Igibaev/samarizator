@@ -15,10 +15,18 @@ def html_text(value):
 
 def summary_html(view, refs):
     parts = [
-        '<p style="color:#59716a;font-size:small">Наведите на время, чтобы прочитать реплику; '
-        "нажмите, чтобы прослушать фрагмент.</p>",
+        '<p style="color:#59716a;font-size:small">Наведите на значок воспроизведения, '
+        "чтобы увидеть исходный текст; нажмите, чтобы прослушать все связанные фрагменты.</p>",
         f"<p>{html_text(view['overview'])}</p>",
     ]
+    for field in ("quality_warning", "generation_warning"):
+        if not view.get(field):
+            continue
+        parts.append(
+            '<p style="color:#8a5a00;font-size:small">'
+            + html_text(view[field])
+            + "</p>"
+        )
     for kind, label in LABELS.items():
         items = [(index, item) for index, item in enumerate(view["items"]) if item["kind"] == kind]
         if not items:
@@ -33,22 +41,15 @@ def summary_html(view, refs):
                 text += " — " + html_text(item["owner"])
             if item.get("due"):
                 text += " · " + html_text(item["due"])
-            badges = []
-            if len(set(item["evidence"]) & refs.keys()) > 1:
-                badges.append(
-                    f'<a href="samarizator-group:{index}" style="text-decoration:none;color:#005f50">'
-                    '<span style="background-color:#c4e2d6;font-size:small">'
-                    "&nbsp;▶&nbsp;Прослушать всё&nbsp;</span></a>"
+            has_sources = any(sid in refs for sid in item["evidence"])
+            play = ""
+            if has_sources:
+                play = (
+                    f'&nbsp; <a href="samarizator-group:{index}" '
+                    'style="text-decoration:none;color:#005f50">'
+                    '<span style="background-color:#c4e2d6;font-size:small">&nbsp;▶&nbsp;</span></a>'
                 )
-            for sid in dict.fromkeys(item["evidence"]):
-                if sid not in refs:
-                    continue
-                badges.append(
-                    f'<a href="samarizator-evidence:{sid}" style="text-decoration:none;'
-                    'color:#005f50"><span style="background-color:#dceee7;font-size:small">'
-                    f"&nbsp;▶&nbsp;{html_text(refs[sid])}&nbsp;</span></a>"
-                )
-            parts.append(f"<li><p>{text}&nbsp; {' &nbsp; '.join(badges)}</p></li>")
+            parts.append(f"<li><p>{text}{play}</p></li>")
         parts.append("</ul>")
     return "".join(parts)
 
@@ -106,11 +107,22 @@ class SummaryBrowser(QTextBrowser):
         return self.groups.get(int(match[1]), []) if match and self.meeting_id else []
 
     def evidence_tooltip(self, link):
-        if self.group_ids(link):
+        group = self.group_ids(link)
+        if group:
+            rows = [self.lookup(self.meeting_id, sid) for sid in group]
+            rows = [row for row in rows if row]
+            if not rows:
+                return ""
+            excerpts = "".join(
+                f"<p><b>{stamp(row['start'])}–{stamp(row['end'])}</b><br>"
+                f"{html_text(row['text'])}</p>"
+                for row in rows
+            )
             return (
-                "Прослушать все источники этого тезиса по времени записи. "
-                "Реплики с промежутками до 5 секунд объединяются, "
-                "остальные звучат по очереди. По краям добавляется секунда контекста."
+                "<p><b>Источники тезиса</b></p>"
+                + excerpts
+                + "<p>Нажмите ▶, чтобы прослушать их по порядку. "
+                "Близкие фрагменты объединяются.</p>"
             )
         sid = self.evidence_id(link)
         row = self.lookup(self.meeting_id, sid) if sid is not None else None

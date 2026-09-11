@@ -113,7 +113,8 @@ def test_gui_constructs_and_shows_recording(tmp_path, monkeypatch):
     assert "Короткий итог" in w.summary.toPlainText()
     assert "17 млн" not in w.summary.toPlainText()
     assert "17 млн" in w.detailed_summary.toPlainText()
-    assert "00:00:00" in w.detailed_summary.toPlainText()
+    assert "▶" in w.detailed_summary.toPlainText()
+    assert "00:00:00" not in w.detailed_summary.toPlainText()
     assert "Бюджет утверждён (итог)" in w.resolved_summary.toPlainText()
     from PySide6.QtWidgets import QMessageBox
 
