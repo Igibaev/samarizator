@@ -71,26 +71,6 @@ def extract(source, target, work, start=0, duration=None, channel=None):
     run_command(args, work / "ffmpeg.log")
 
 
-def assign_speaker(start, end, turns):
-    scores = {}
-    for turn in turns:
-        if turn["start"] >= end:
-            break
-        overlap = max(0, min(end, turn["end"]) - max(start, turn["start"]))
-        if overlap:
-            speaker = turn["speaker"]
-            scores[speaker] = scores.get(speaker, 0) + overlap
-    if not scores:
-        return "Не определён", True
-    ordered = sorted(scores.items(), key=lambda s: s[1], reverse=True)
-    uncertain = ordered[0][1] < (end - start) * 0.5 or (
-        len(ordered) > 1 and ordered[1][1] > ordered[0][1] * 0.3
-    )
-    if len(ordered) > 1 and ordered[1][1] > ordered[0][1] * 0.7:
-        return " / ".join(s[0] for s in ordered[:2]), True
-    return ordered[0][0], uncertain
-
-
 def parse_whisper(payload, offset, lower, upper, turns=(), channel=None):
     """Select overlap by segment midpoint. Boundaries are reviewable, never silently truncated."""
     output = []
@@ -102,15 +82,9 @@ def parse_whisper(payload, offset, lower, upper, turns=(), channel=None):
         text = row["text"].strip()
         if not text or end <= start or not lower <= (start + end) / 2 < upper:
             continue
-        if channel is not None:
-            speaker, uncertain = f"Канал {channel + 1}", False
-        else:
-            speaker, uncertain = assign_speaker(start, end, turns)
         # Explicitly flag chunk seams for review; alignment is not sample exact.
         seam = (lower > 0 and start < lower + 1) or end > upper - 1
         reasons = []
-        if uncertain:
-            reasons.append("говорящий")
         if seam:
             reasons.append("граница фрагмента")
         # Token scores are decoder signals, not calibrated word accuracy probabilities.
@@ -128,7 +102,7 @@ def parse_whisper(payload, offset, lower, upper, turns=(), channel=None):
                 start=max(0, start),
                 end=end,
                 text=text,
-                speaker=speaker,
+                speaker="Речь",
                 source_channel=channel,
                 uncertain=bool(reasons),
                 review=", ".join(reasons),

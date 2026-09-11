@@ -275,7 +275,6 @@ def blocks(segments, max_chars):
                     dict(
                         id=row["id"],
                         start=round(row["start"], 2),
-                        speaker=row["speaker"],
                         uncertain=bool(row["uncertain"]),
                         text=row["text"][position : position + width],
                     ),
@@ -284,7 +283,7 @@ def blocks(segments, max_chars):
                 if len(line) + 1 <= max_chars:
                     break
                 if width == 1:
-                    raise ValueError("Имя собеседника слишком длинное для размера блока.")
+                    raise ValueError("Реплика слишком велика для размера блока.")
                 width = max(1, width // 2)
             if block and size + len(line) + 1 > max_chars:
                 yield block

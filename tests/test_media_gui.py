@@ -69,7 +69,7 @@ def test_gui_constructs_and_shows_recording(tmp_path, monkeypatch):
     assert w.list.count() == 1
     w.uncertain_only.setChecked(True)
     assert w.table.rowCount() == 1
-    assert w.table.item(0, 2).text() == "Тест"
+    assert w.table.item(0, 1).text() == "Тест"
     w.uncertain_only.setChecked(False)
     assert w.table.rowCount() == 2
     from PySide6.QtWidgets import QMessageBox
@@ -125,6 +125,10 @@ def test_gui_constructs_and_shows_recording(tmp_path, monkeypatch):
     with pytest.raises(ValueError):
         w.store.meeting(mid)
     dialog = SettingsDialog(w.settings)
+    assert w.table.columnCount() == 3
+    assert w.table.horizontalHeaderItem(1).text() == "Текст"
+    assert not hasattr(w, "speakers_button")
+    assert not {"diarization", "speakers", "segmentation_model", "embedding_model"} & dialog.fields.keys()
     assert dialog.fields["memory_gb"].value() == 4
     old_model = dialog.fields["whisper_model"].text()
     dialog.quality_profile()
@@ -189,17 +193,3 @@ def test_open_obsidian_uses_vault_name_and_relative_file(tmp_path, monkeypatch):
 
     w.timer.stop()
     w.close()
-
-
-def test_sherpa_configuration_api():
-    sherpa = pytest.importorskip("sherpa_onnx")
-    config = sherpa.OfflineSpeakerDiarizationConfig(
-        segmentation=sherpa.OfflineSpeakerSegmentationModelConfig(
-            pyannote=sherpa.OfflineSpeakerSegmentationPyannoteModelConfig(model="/missing"),
-            num_threads=2,
-            provider="cpu",
-        ),
-        embedding=sherpa.SpeakerEmbeddingExtractorConfig(model="/missing", num_threads=2, provider="cpu"),
-        clustering=sherpa.FastClusteringConfig(num_clusters=-1, threshold=0.5),
-    )
-    assert config.clustering.num_clusters == -1

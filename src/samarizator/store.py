@@ -37,6 +37,13 @@ class Store:
                 db.execute("ALTER TABLE segments ADD COLUMN retry_done INTEGER NOT NULL DEFAULT 0")
             if "source_channel" not in columns:
                 db.execute("ALTER TABLE segments ADD COLUMN source_channel INTEGER")
+            # Remove obsolete speaker-only review flags while preserving every transcript row.
+            for row in db.execute("SELECT id,review,uncertain FROM segments WHERE review LIKE '%говорящий%'"):
+                reasons = [r.strip() for r in row["review"].split(",") if r.strip() != "говорящий"]
+                db.execute(
+                    "UPDATE segments SET review=?,uncertain=? WHERE id=?",
+                    (", ".join(reasons), bool(reasons), row["id"]),
+                )
             db.execute(
                 "CREATE TABLE IF NOT EXISTS segment_history ("
                 "id INTEGER PRIMARY KEY, meeting TEXT, segment INTEGER, snapshot TEXT NOT NULL)"
@@ -172,12 +179,12 @@ class Store:
                 (mid, phase, part, json.dumps(data, ensure_ascii=False)),
             )
 
-    def edit_segment(self, mid, sid, speaker, text):
+    def edit_segment(self, mid, sid, text):
         with self.connect() as db:
             db.execute(
-                "UPDATE segments SET speaker=?,text=?,uncertain=0,review='',retry_text='',retry_done=0 "
+                "UPDATE segments SET text=?,uncertain=0,review='',retry_text='',retry_done=0 "
                 "WHERE meeting=? AND id=?",
-                (speaker.strip() or "Не определён", text.strip(), mid, sid),
+                (text.strip(), mid, sid),
             )
             db.execute("DELETE FROM checkpoints WHERE meeting=? AND phase LIKE 'summary%'", (mid,))
             db.execute("UPDATE meetings SET summary=NULL,status='review' WHERE id=?", (mid,))
@@ -198,7 +205,7 @@ class Store:
                 "INSERT INTO segment_history(meeting,segment,snapshot) VALUES(?,?,?)",
                 (mid, sid, json.dumps(dict(row), ensure_ascii=False)),
             )
-            # Accepting words does not confirm speaker identity or audio alignment.
+            # Accepting words does not confirm audio alignment.
             db.execute(
                 "UPDATE segments SET text=?,retry_text='',retry_done=1 WHERE meeting=? AND id=?",
                 (row["retry_text"], mid, sid),
@@ -228,40 +235,6 @@ class Store:
             db.execute("DELETE FROM checkpoints WHERE meeting=? AND phase LIKE 'summary%'", (mid,))
             db.execute("UPDATE meetings SET summary=NULL,status='review' WHERE id=?", (mid,))
 
-    def assign_unknown_speakers(self, mid, turns):
-        from .media import assign_speaker
-
-        changed = 0
-        with self.connect() as db:
-            for row in db.execute(
-                "SELECT * FROM segments WHERE meeting=? AND speaker='Не определён'", (mid,)
-            ):
-                speaker, uncertain = assign_speaker(row["start"], row["end"], turns)
-                if speaker == "Не определён":
-                    continue
-                reasons = [
-                    r.strip() for r in row["review"].split(",") if r.strip() and r.strip() != "говорящий"
-                ]
-                if uncertain:
-                    reasons.append("говорящий")
-                elif row["uncertain"] and not row["review"]:
-                    reasons.append("проверить текст / границу")  # preserve legacy unspecified warning
-                db.execute(
-                    "UPDATE segments SET speaker=?,uncertain=?,review=? WHERE id=?",
-                    (speaker, bool(reasons), ", ".join(reasons), row["id"]),
-                )
-                changed += 1
-            if changed:
-                db.execute("DELETE FROM checkpoints WHERE meeting=? AND phase LIKE 'summary%'", (mid,))
-                db.execute("UPDATE meetings SET summary=NULL,status='review' WHERE id=?", (mid,))
-        return changed
-
-    def unknown_speakers(self, mid):
-        with self.connect() as db:
-            return db.execute(
-                "SELECT count(*) FROM segments WHERE meeting=? AND speaker='Не определён'", (mid,)
-            ).fetchone()[0]
-
     def recover(self):
         with self.connect() as db:
             db.execute(
@@ -275,12 +248,3 @@ class Store:
             db.execute("DELETE FROM segments WHERE meeting=?", (mid,))
             db.execute("DELETE FROM checkpoints WHERE meeting=?", (mid,))
             db.execute("DELETE FROM meetings WHERE id=?", (mid,))
-
-    def rename_speaker(self, mid, old, new):
-        with self.connect() as db:
-            db.execute(
-                "UPDATE segments SET speaker=? WHERE meeting=? AND speaker=?",
-                (new.strip() or "Не определён", mid, old),
-            )
-            db.execute("DELETE FROM checkpoints WHERE meeting=? AND phase LIKE 'summary%'", (mid,))
-            db.execute("UPDATE meetings SET summary=NULL,status='review' WHERE id=?", (mid,))

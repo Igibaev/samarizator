@@ -20,11 +20,7 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
   command -v whisper-cli >/dev/null 2>&1 || packages+=(whisper-cpp)
   if [[ ${#packages[@]} -gt 0 ]]; then brew install "${packages[@]}"; fi
 fi
-if [[ "${SAMARIZATOR_STRICT:-0}" == "1" ]]; then
-  uv sync --frozen --python 3.12
-else
-  uv sync --frozen --python 3.12 --extra diarization
-fi
+uv sync --frozen --python 3.12
 if [[ "${SAMARIZATOR_SKIP_DOWNLOAD:-0}" != "1" ]]; then
   .venv/bin/python -m samarizator.setup_models "$@"
 elif [[ $# -gt 0 ]]; then

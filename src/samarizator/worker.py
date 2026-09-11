@@ -8,57 +8,11 @@ from pathlib import Path
 from .audio_quality import diagnose, plan_chunks
 from .config import Settings, data_dir
 from .media import dedup_seam, extract, fingerprint, parse_whisper, probe, whisper
-from .process import run_command
 from .store import Store
 
 
 def status(store, mid, message):
     store.update(mid, error=message)
-
-
-def speaker_turns(store, mid, settings, source, duration, work, force=False):
-    turns = None if force else store.checkpoint(mid, "diarization", 0)
-    if turns is None:
-        for path in [settings.segmentation_model, settings.embedding_model]:
-            if not Path(path).is_file():
-                raise ValueError(
-                    "Модели собеседников не найдены. Запустите ./start.sh "
-                    "или выберите режим отдельных каналов / ручной."
-                )
-        # ONNX clustering covers the complete recording, keeping IDs stable across ASR chunks.
-        # Conservative input/copy estimate; runtime watchdog remains authoritative.
-        if duration * 16000 * 4 * 4 + 800 * 1024**2 > settings.memory_gb * 1024**3 * 0.8:
-            raise ValueError(
-                "Для автоматического определения собеседников этой длинной записи "
-                "нужен больший бюджет. Увеличьте память или выберите ручной режим."
-            )
-        status(store, mid, "Локальное определение собеседников…")
-        wav = work / "diarization.wav"
-        extract(source, wav, work)
-        target = work / "turns.json"
-        run_command(
-            [
-                sys.executable,
-                "-m",
-                "samarizator.diarize",
-                str(wav),
-                settings.segmentation_model,
-                settings.embedding_model,
-                str(settings.speakers),
-                str(settings.threads),
-                str(target),
-            ],
-            work / "diarization.log",
-            timeout=24 * 3600,
-        )
-        turns = json.loads(target.read_text())
-        store.save_checkpoint(mid, "diarization", 0, turns)
-        wav.unlink()
-    if not turns:
-        raise ValueError(
-            "Локальная модель не обнаружила собеседников. Проверьте аудиодорожку и модели голоса."
-        )
-    return turns
 
 
 def transcribe(store, mid, settings, work):
@@ -83,11 +37,6 @@ def transcribe(store, mid, settings, work):
     store.save_checkpoint(mid, "source", 0, digest)
     duration, channels = probe(source, work)
     store.update(mid, duration=duration, channels=channels)
-    if settings.diarization == "channels" and channels != 2:
-        raise ValueError("Режиму отдельных каналов нужна стереозапись: один участник слева, другой справа.")
-    turns = []
-    if settings.diarization == "local":
-        turns = speaker_turns(store, mid, settings, source, duration, work)
     plan = store.checkpoint(mid, "asr-plan", 0)
     if plan is None:
         status(store, mid, "Подбор границ фрагментов по паузам…")
@@ -102,32 +51,30 @@ def transcribe(store, mid, settings, work):
         status(store, mid, f"Whisper: фрагмент {index + 1}/{count}")
         rows = []
         diagnostics = []
-        for channel in [0, 1] if settings.diarization == "channels" else [None]:
-            wav = work / "chunk.wav"
-            extract(source, wav, work, start, length, channel)
-            diagnostics.append(dict(channel=channel, **diagnose(wav)))
-            result = whisper(
-                wav,
-                settings.whisper_model,
-                settings.language,
-                settings.threads,
-                work,
-                settings.gpu,
-                vad_model=settings.vad_model if settings.vad else "",
-                glossary=settings.glossary,
-                beam_size=settings.beam_size,
-            )
-            rows += parse_whisper(result, start, lower, upper, turns or [], channel)
-            wav.unlink()
+        wav = work / "chunk.wav"
+        extract(source, wav, work, start, length)
+        diagnostics.append(dict(channel=None, **diagnose(wav)))
+        result = whisper(
+            wav,
+            settings.whisper_model,
+            settings.language,
+            settings.threads,
+            work,
+            settings.gpu,
+            vad_model=settings.vad_model if settings.vad else "",
+            glossary=settings.glossary,
+            beam_size=settings.beam_size,
+        )
+        rows += parse_whisper(result, start, lower, upper)
+        wav.unlink()
         rows = sorted(rows, key=lambda r: r["start"])
         # Text equality cannot prove that two utterances are the same audio.
         # Preserve every word; only flag plausible overlap for human review.
-        if index > 0 and rows and settings.diarization != "channels":
+        if index > 0 and rows:
             previous = store.last_segment(mid)
             first = rows[0]
             if (
                 previous
-                and previous["speaker"] == first["speaker"]
                 and previous["end"] > first["start"]
                 and first["start"] < lower + 2
                 and previous["end"] > lower - 2
@@ -176,7 +123,7 @@ def retry_uncertain(store, mid, settings, work, limit=20, pad=2.0):
             targets.append(row)
             if len(targets) >= limit:
                 break
-    if settings.diarization == "channels" and any(r.get("source_channel") not in (0, 1) for r in targets):
+    if any(r.get("source_channel") not in (None, 0, 1) for r in targets):
         raise ValueError(
             "У старой записи не сохранён исходный аудиоканал. Импортируйте её заново для второго прохода."
         )
@@ -205,27 +152,6 @@ def retry_uncertain(store, mid, settings, work, limit=20, pad=2.0):
     store.update(mid, status="review", error=None)
 
 
-def repair_speakers(store, mid, settings, work):
-    settings.validate()
-    if settings.diarization != "local":
-        raise ValueError(
-            "В настройках выберите автоматическое локальное разделение собеседников. Для двух раздельных каналов импортируйте запись заново."
-        )
-    meeting = store.meeting(mid)
-    source = Path(meeting["source"])
-    if not source.is_file() or fingerprint(source) != store.checkpoint(mid, "source", 0):
-        raise ValueError("Исходный файл изменился или недоступен. Импортируйте запись заново.")
-    turns = speaker_turns(store, mid, settings, source, meeting["duration"], work, force=True)
-    changed = store.assign_unknown_speakers(mid, turns)
-    store.update(
-        mid,
-        status="review",
-        error=None
-        if changed
-        else "Не удалось сопоставить неопределённые реплики с голосами. Проверьте аудио и таймкоды.",
-    )
-
-
 def main():
     phase, mid = sys.argv[1:3]
     store = Store()
@@ -237,8 +163,6 @@ def main():
         with tempfile.TemporaryDirectory(dir=work_root, prefix=mid + "-") as temp:
             if phase == "transcribe":
                 transcribe(store, mid, settings, Path(temp))
-            elif phase == "speakers":
-                repair_speakers(store, mid, settings, Path(temp))
             elif phase == "retry":
                 retry_uncertain(store, mid, settings, Path(temp))
             elif phase == "summary":

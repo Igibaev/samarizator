@@ -59,7 +59,7 @@ def test_truncated_block_splits_and_reuses_successful_subblocks(meeting):
     assert client.maps == 3
 
 
-def test_repair_speakers_keeps_text_manual_names_and_non_speaker_warnings(meeting):
+def test_old_speaker_flags_are_migrated_without_changing_text(meeting):
     store, mid, _ = meeting
     store.save_chunk(
         mid,
@@ -73,14 +73,23 @@ def test_repair_speakers_keeps_text_manual_names_and_non_speaker_warnings(meetin
                 uncertain=1,
                 review="говорящий, граница фрагмента",
             ),
-            dict(start=2, end=3, speaker="Иван", text="Manually named", uncertain=0),
+            dict(
+                start=2,
+                end=3,
+                speaker="Иван",
+                text="Speaker-only warning",
+                uncertain=1,
+                review="говорящий",
+            ),
         ],
     )
-    assert store.assign_unknown_speakers(mid, [dict(start=0, end=5, speaker="Собеседник 1")]) == 1
-    rows = store.segments(mid)
-    assert rows[0]["text"] == "Original" and rows[0]["speaker"] == "Собеседник 1"
+    from samarizator.store import Store
+
+    rows = Store(store.path).segments(mid)
+    assert rows[0]["text"] == "Original"
     assert rows[0]["review"] == "граница фрагмента" and rows[0]["uncertain"]
-    assert rows[1]["speaker"] == "Иван" and rows[1]["text"] == "Manually named"
+    assert rows[1]["text"] == "Speaker-only warning"
+    assert rows[1]["review"] == "" and not rows[1]["uncertain"]
 
 
 def test_existing_error_visible_after_reopen_and_rerun_is_a_new_record(tmp_path, monkeypatch):
@@ -102,7 +111,7 @@ def test_existing_error_visible_after_reopen_and_rerun_is_a_new_record(tmp_path,
     w.load_detail()
     assert "401" in w.error_detail.text() and w.copy_error_button.isEnabled()
     assert not w.transcribe.isEnabled() and w.rerun_button.isEnabled()
-    assert "Не определены 1" in w.info.text()
+    assert "Собеседник" not in w.info.text()
     w.settings.glossary = "new terms"
     calls = []
     monkeypatch.setattr(w, "start", calls.append)

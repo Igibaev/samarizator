@@ -10,7 +10,7 @@ def evidence_intervals(rows, duration=0, max_gap=5.0, pad=1.0):
         if intervals and start - intervals[-1]["end"] <= max_gap:
             intervals[-1]["end"] = max(end, intervals[-1]["end"])
         else:
-            intervals.append(dict(start=start, end=end, speaker="Фрагмент тезиса"))
+            intervals.append(dict(start=start, end=end))
     for interval in intervals:
         interval["start"] = max(0.0, interval["start"] - pad)
         end = interval["end"] + pad

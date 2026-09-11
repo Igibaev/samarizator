@@ -68,7 +68,7 @@ def test_evidence_hover_reads_current_source_and_escapes_html(evidence_window, m
         browser.viewport(), QHelpEvent(QEvent.Type.ToolTip, pos, browser.viewport().mapToGlobal(pos))
     )
     assert len(tips) == 1
-    assert "Анна" in tips[0] and "00:10:03–00:10:04" in tips[0]
+    assert "Анна" not in tips[0] and "00:10:03–00:10:04" in tips[0]
     assert "Оригинал &lt;b&gt;17 млн&lt;/b&gt; &amp; срок" in tips[0]
     assert "<img " not in browser.toHtml()  # model output is rendered as text, never a remote image
     assert browser.evidence_tooltip("https://example.com") == ""

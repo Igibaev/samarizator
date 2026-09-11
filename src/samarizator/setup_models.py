@@ -5,20 +5,14 @@ import hashlib
 import json
 import os
 import ssl
-import tarfile
 import urllib.request
 
 import truststore
 
 from .config import Settings, data_dir
 
-BASE = "https://github.com/k2-fsa/sherpa-onnx/releases/download/"
 MODELS = {
     "ggml-small-q5_1.bin": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin",
-    "segmentation.tar.bz2": BASE
-    + "speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2",
-    "embedding.onnx": BASE
-    + "speaker-recongition-models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx",
 }
 QUALITY_MODELS = {
     "ggml-silero-v6.2.0.bin": "https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v6.2.0.bin",
@@ -67,28 +61,9 @@ def main():
     if args.large_v3:
         models[LARGE_MODEL] = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/" + LARGE_MODEL
     for name, url in models.items():
-        if strict and name not in {"ggml-small-q5_1.bin", LARGE_MODEL}:
-            continue
-        if name.startswith("segmentation") and (folder / "segmentation.onnx").exists():
-            continue
         download(url, folder / name)
-        if name.endswith(".tar.bz2"):
-            # Extract only the model bytes, never arbitrary archive paths/symlinks.
-            with tarfile.open(folder / name, "r:bz2") as archive:
-                member = next(
-                    m for m in archive.getmembers() if m.name.endswith("/model.onnx") and m.isfile()
-                )
-                stream = archive.extractfile(member)
-                temp = folder / "segmentation.onnx.part"
-                with temp.open("wb") as out:
-                    while chunk := stream.read(1024 * 1024):
-                        out.write(chunk)
-                temp.replace(folder / "segmentation.onnx")
-            (folder / name).unlink()
     manifest = {
-        p.name: dict(sha256=digest(p), bytes=p.stat().st_size)
-        for p in folder.iterdir()
-        if p.suffix in {".bin", ".onnx"}
+        p.name: dict(sha256=digest(p), bytes=p.stat().st_size) for p in folder.iterdir() if p.suffix == ".bin"
     }
     (folder / "download-manifest.json").write_text(json.dumps(manifest, indent=2))
     if args.quality or args.large_v3:
@@ -97,7 +72,6 @@ def main():
             settings = settings.quality_profile()
             if strict:
                 settings.vad = False
-                settings.diarization = "manual"
         if args.large_v3:
             settings.whisper_model = str(folder / LARGE_MODEL)
             settings.memory_gb = max(16, settings.memory_gb)

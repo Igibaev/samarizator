@@ -21,10 +21,6 @@ class Settings:
     language: str = "ru"
     gpu: bool = False
     whisper_model: str = ""
-    diarization: str = "local"
-    speakers: int = -1
-    segmentation_model: str = ""
-    embedding_model: str = ""
     vault: str = ""
     input_chars: int = 12000
     max_output_tokens: int = 3000
@@ -61,12 +57,8 @@ class Settings:
             raise ValueError("Бюджет памяти должен быть от 2 до 64 ГиБ.")
         if not 1 <= self.threads <= 16 or not 30 <= self.chunk_seconds <= 300:
             raise ValueError("Некорректные параметры CPU или длины фрагмента.")
-        if self.diarization not in {"local", "channels", "manual"}:
-            raise ValueError("Неизвестный режим собеседников.")
         if not 4000 <= self.input_chars <= 48000 or not 512 <= self.max_output_tokens <= 64000:
             raise ValueError("Некорректный размер контекста.")
-        if self.speakers != -1 and not 1 <= self.speakers <= 20:
-            raise ValueError("Число собеседников: -1 (авто) или 1–20.")
         if api:
             parsed = urlparse(self.base_url)
             if (
@@ -106,8 +98,6 @@ class Settings:
         models = data_dir() / "models"
         return cls(
             whisper_model=str(models / "ggml-small-q5_1.bin"),
-            segmentation_model=str(models / "segmentation.onnx"),
-            embedding_model=str(models / "embedding.onnx"),
             vault=str(Path.home() / "Documents/Samarizator"),
         )
 

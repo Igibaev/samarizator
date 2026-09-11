@@ -28,7 +28,6 @@ def main():
     settings = Settings.load()
     settings.language = "en"
     settings.memory_gb = 4
-    settings.speakers = 1
     settings.chunk_seconds = 30
 
     folder = Path("smoke-logs") / str(int(time.time()))
@@ -55,13 +54,12 @@ def main():
     transcribe(store, mid, settings, folder)
     rows = store.segments(mid)
     assert rows, "No speech recognized"
-    assert any(r["speaker"] != "Не определён" for r in rows), "No diarization result"
     assert store.checkpoint(mid, "asr_complete", 0)
     assert settings.vad and settings.pause_boundaries, "Quality profile must be enabled in this smoke test"
     assert len(store.checkpoint(mid, "asr-plan", 0)) > 1, "Need audio across a chunk boundary"
     assert store.checkpoint(mid, "audio-quality", 0)
     assert all(0 <= r["start"] < r["end"] <= store.meeting(mid)["duration"] + 1 for r in rows)
-    print(f"Real audio smoke passed: {len(rows)} segments; speakers: {sorted({r['speaker'] for r in rows})}")
+    print(f"Real audio smoke passed: {len(rows)} segments")
     # Keep transcript out of logs.
 
 

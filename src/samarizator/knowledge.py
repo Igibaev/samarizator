@@ -67,13 +67,11 @@ def export(store, mid, settings):
         for row in store.iter_segments(mid):
             refs[row["id"]] = stamp(row["start"])
             warning = (
-                " · проверить: " + plain(row.get("review") or "говорящего / границу")
-                if row["uncertain"]
-                else ""
+                " · проверить: " + plain(row.get("review") or "текст / границу") if row["uncertain"] else ""
             )
             f.write(
-                f"**{stamp(row['start'])} — {stamp(row['end'])} · "
-                f"{plain(row['speaker'])}{warning}**\n\n{plain(row['text'])} ^s{row['id']}\n\n"
+                f"**{stamp(row['start'])} — {stamp(row['end'])}{warning}**\n\n"
+                f"{plain(row['text'])} ^s{row['id']}\n\n"
             )
     tmp.replace(transcript)
     topics = sorted(set(brief["topics"]) | set(detailed["topics"]))
@@ -96,7 +94,7 @@ def export(store, mid, settings):
         "",
         f"# {plain(meeting['title'])}",
         "",
-        "> Сводка ИИ: проверьте важные решения, сроки и назначение говорящих по записи.",
+        "> Сводка ИИ: проверьте важные решения и сроки по исходной записи.",
         "",
         f"Длительность: {stamp(meeting['duration'])}",
         "",
@@ -138,7 +136,7 @@ def export(store, mid, settings):
             items = [item for item in view["items"] if item["kind"] == kind]
             if items:
                 lines += [f"### {label}", ""] + [item_line(item, tasks=tasks) for item in items] + [""]
-    lines += ["", f"[[Transcripts/{suffix}|Полная расшифровка с собеседниками]]", ""]
+    lines += ["", f"[[Transcripts/{suffix}|Полная расшифровка]]", ""]
     atomic_text(note, "\n".join(lines))
     hashes = {
         str(f.relative_to(vault)): hashlib.sha256(f.read_bytes()).hexdigest() for f in [note, transcript]

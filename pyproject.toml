@@ -16,7 +16,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-diarization = ["sherpa-onnx==1.13.7", "sherpa-onnx-core==1.13.7", "numpy>=2,<3", "soundfile>=0.13,<0.14"]
 dev = ["pytest>=8,<10", "ruff>=0.11,<1"]
 
 [project.scripts]

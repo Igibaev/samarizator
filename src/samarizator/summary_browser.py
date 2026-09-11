@@ -117,8 +117,7 @@ class SummaryBrowser(QTextBrowser):
         if not row:
             return ""
         return (
-            f"<p><b>{stamp(row['start'])}–{stamp(row['end'])} · "
-            f"{html_text(row['speaker'])}</b></p>"
+            f"<p><b>{stamp(row['start'])}–{stamp(row['end'])}</b></p>"
             f'<p style="white-space:pre-wrap">{html_text(row["text"])}</p>'
             "<p>Нажмите на метку, чтобы прослушать этот фрагмент.</p>"
         )

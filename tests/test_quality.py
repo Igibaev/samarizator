@@ -90,9 +90,9 @@ def test_segments_uncertain_only_filters_and_paginates_flagged_rows(meeting):
         0,
         [
             dict(start=0, end=1, speaker="A", text="clear one", uncertain=0, review=""),
-            dict(start=1, end=2, speaker="A", text="flagged one", uncertain=1, review="говорящий"),
+            dict(start=1, end=2, speaker="A", text="flagged one", uncertain=1, review="граница"),
             dict(start=2, end=3, speaker="A", text="clear two", uncertain=0, review=""),
-            dict(start=3, end=4, speaker="A", text="flagged two", uncertain=1, review="говорящий"),
+            dict(start=3, end=4, speaker="A", text="flagged two", uncertain=1, review="граница"),
         ],
     )
     flagged = store.segments(mid, uncertain_only=True)
@@ -279,6 +279,7 @@ def test_summarize_reconciles_decisions_without_touching_the_full_ledger(meeting
 
     store.update(mid, summary=json.dumps(result))
     content = export(store, mid, settings).read_text()
+    assert "Собеседник" not in content
     assert "## Итог по решениям" in content
     assert "Выпуск отменён (итог)" in content
     assert "Выпуск в пятницу" in content  # the superseded entry is still in "Подробная сводка"

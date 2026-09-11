@@ -13,7 +13,6 @@ def meeting(tmp_path, monkeypatch):
         base_url="https://company.example/v1",
         model="corporate",
         vault=str(tmp_path / "vault"),
-        diarization="manual",
     )
     store = Store()
     mid = store.create(source, settings)

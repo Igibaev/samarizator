@@ -11,8 +11,8 @@ from samarizator.summary import reconcile_decisions, summarize
 from samarizator.worker import retry_uncertain, transcribe
 
 
-@pytest.mark.parametrize("same_speaker,overlap", [(False, False), (True, False), (True, True)])
-def test_short_real_replies_are_never_deleted(meeting, tmp_path, monkeypatch, same_speaker, overlap):
+@pytest.mark.parametrize("overlap", [False, True])
+def test_short_real_replies_are_never_deleted(meeting, tmp_path, monkeypatch, overlap):
     store, mid, s = meeting
     model = tmp_path / "model.bin"
     model.write_bytes(b"model")
@@ -22,10 +22,6 @@ def test_short_real_replies_are_never_deleted(meeting, tmp_path, monkeypatch, sa
         mid,
         0,
         [dict(start=28 if overlap else 1, end=31 if overlap else 2, speaker="A", text="Да", uncertain=False)],
-    )
-    s.diarization = "local"
-    store.save_checkpoint(
-        mid, "diarization", 0, [dict(start=30, end=40, speaker="A" if same_speaker else "B")]
     )
     monkeypatch.setattr("samarizator.worker.probe", lambda *a: (60, 1))
     monkeypatch.setattr(
@@ -40,10 +36,10 @@ def test_short_real_replies_are_never_deleted(meeting, tmp_path, monkeypatch, sa
     transcribe(store, mid, s, tmp_path)
     rows = store.segments(mid)
     assert [r["text"] for r in rows] == ["Да", "Да"]
-    assert ("возможный повтор" in rows[1]["review"]) == (same_speaker and overlap)
+    assert ("возможный повтор" in rows[1]["review"]) == overlap
 
 
-def test_channel_provenance_survives_speaker_rename(meeting, tmp_path, monkeypatch):
+def test_legacy_channel_provenance_survives_for_safe_retry(meeting, tmp_path, monkeypatch):
     if not shutil.which("ffmpeg"):
         pytest.skip("ffmpeg required")
     store, mid, s = meeting
@@ -53,7 +49,7 @@ def test_channel_provenance_survives_speaker_rename(meeting, tmp_path, monkeypat
         wav.writeframes(struct.pack("<hh", 1000, 2000) * (16000 * 10))
     model = tmp_path / "model.bin"
     model.write_bytes(b"model")
-    s.whisper_model, s.diarization = str(model), "channels"
+    s.whisper_model = str(model)
     store.update(mid, duration=10, channels=2)
     store.save_checkpoint(mid, "source", 0, fingerprint(source))
     store.save_chunk(
@@ -71,7 +67,6 @@ def test_channel_provenance_survives_speaker_rename(meeting, tmp_path, monkeypat
             )
         ],
     )
-    store.rename_speaker(mid, "Канал 2", "Пётр")
 
     def decoder(wav, *a, **kw):
         with wave.open(str(wav)) as audio:
@@ -82,7 +77,7 @@ def test_channel_provenance_survives_speaker_rename(meeting, tmp_path, monkeypat
     monkeypatch.setattr("samarizator.worker.whisper", decoder)
     retry_uncertain(store, mid, s, tmp_path)
     row = store.segments(mid)[0]
-    assert row["speaker"] == "Пётр" and row["retry_text"] == "right" and row["source_channel"] == 1
+    assert row["retry_text"] == "right" and row["source_channel"] == 1
 
 
 def test_retry_rejects_changed_source_before_decode(meeting, tmp_path, monkeypatch):
@@ -96,18 +91,20 @@ def test_retry_rejects_changed_source_before_decode(meeting, tmp_path, monkeypat
 def test_accept_undo_and_stale_proposal_guard(meeting):
     store, mid, _ = meeting
     store.save_chunk(
-        mid, 0, [dict(start=1, end=2, speaker="A", text="original", uncertain=1, review="говорящий")]
+        mid,
+        0,
+        [dict(start=1, end=2, speaker="A", text="original", uncertain=1, review="граница фрагмента")],
     )
     sid = store.segments(mid)[0]["id"]
     store.save_retry(mid, sid, "proposed")
     with pytest.raises(ValueError, match="изменился"):
         store.accept_retry(mid, sid, expected_text="stale")
     store.accept_retry(mid, sid, expected_text="proposed")
-    assert store.segments(mid)[0]["review"] == "говорящий"
+    assert store.segments(mid)[0]["review"] == "граница фрагмента"
     store.undo_retry(mid, sid)
     assert store.segments(mid)[0]["text"] == "original"
     store.accept_retry(mid, sid)
-    store.edit_segment(mid, sid, "A", "manually corrected")
+    store.edit_segment(mid, sid, "manually corrected")
     with pytest.raises(ValueError, match="вручную"):
         store.undo_retry(mid, sid)
     assert store.segments(mid)[0]["text"] == "manually corrected"
