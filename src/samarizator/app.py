@@ -38,10 +38,11 @@ from PySide6.QtWidgets import (
 )
 
 from .config import Settings, data_dir, set_api_key
-from .knowledge import stamp, summary_text
+from .knowledge import stamp
 from .process import supervise
 from .store import Store
 from .summary import summary_views
+from .summary_browser import SummaryBrowser
 
 PROVIDERS = [
     ("Указать вручную", ""),
@@ -438,8 +439,6 @@ class Window(QMainWindow):
         self.stop_button.clicked.connect(self.stop_playback)
         self.playback_label = QLabel()
         playback.addWidget(self.play_button)
-        playback.addWidget(self.stop_button)
-        playback.addWidget(self.playback_label, 1)
         tbox.addLayout(playback)
         edit = QHBoxLayout()
         self.speaker = QLineEdit()
@@ -466,14 +465,11 @@ class Window(QMainWindow):
         retry_row.addWidget(self.undo_retry_button)
         tbox.addLayout(retry_row)
         self.tabs.addTab(transcript, "Расшифровка и собеседники")
-        self.summary = QTextBrowser()
-        self.summary.setOpenExternalLinks(False)
+        self.summary = SummaryBrowser(self.store.segment)
         self.tabs.addTab(self.summary, "Кратко · тезисы")
-        self.detailed_summary = QTextBrowser()
-        self.detailed_summary.setOpenExternalLinks(False)
+        self.detailed_summary = SummaryBrowser(self.store.segment)
         self.tabs.addTab(self.detailed_summary, "Подробная сводка")
-        self.resolved_summary = QTextBrowser()
-        self.resolved_summary.setOpenExternalLinks(False)
+        self.resolved_summary = SummaryBrowser(self.store.segment)
         self.resolved_summary.setToolTip(
             "Итоговый статус решений и задач с учётом более поздних правок и отмен, отдельно "
             "от полной истории в «Подробной сводке» — там ничего не удаляется и не заменяется."
@@ -481,6 +477,12 @@ class Window(QMainWindow):
         self.tabs.addTab(self.resolved_summary, "Итог по решениям")
         self.audio_report = QTextBrowser()
         self.tabs.addTab(self.audio_report, "Качество записи")
+        for browser in [self.summary, self.detailed_summary, self.resolved_summary]:
+            browser.playEvidence.connect(self.play_evidence)
+        shared_playback = QHBoxLayout()
+        shared_playback.addWidget(self.stop_button)
+        shared_playback.addWidget(self.playback_label, 1)
+        body.addLayout(shared_playback)
         bottom = QHBoxLayout()
         source = QPushButton("Открыть исходную запись")
         source.clicked.connect(self.open_source)
@@ -557,6 +559,7 @@ class Window(QMainWindow):
             self.clear_detail()
 
     def clear_detail(self):
+        self.stop_playback()
         self.heading.setText("Добавьте запись встречи, лекции или интервью")
         self.info.setText("1. Распознайте локально → 2. Проверьте собеседников → 3. Создайте сводку")
         self.error_detail.clear()
@@ -624,19 +627,18 @@ class Window(QMainWindow):
             result = json.loads(meeting["summary"])
             brief, detailed = summary_views(result)
             refs = {r["id"]: stamp(r["start"]) for r in self.store.iter_segments(self.mid)}
-            self.summary.setPlainText(summary_text(brief, refs))
-            self.detailed_summary.setPlainText(summary_text(detailed, refs))
+            self.summary.show_summary(self.mid, brief, refs)
+            self.detailed_summary.show_summary(self.mid, detailed, refs)
             resolved = detailed.get("resolved") or []
             if resolved:
-                self.resolved_summary.setPlainText(
-                    summary_text(
-                        dict(
-                            overview=detailed.get("resolution_warning")
-                            or "Финальный статус с учётом более поздних правок и отмен.",
-                            items=resolved,
-                        ),
-                        refs,
-                    )
+                self.resolved_summary.show_summary(
+                    self.mid,
+                    dict(
+                        overview=detailed.get("resolution_warning")
+                        or "Финальный статус с учётом более поздних правок и отмен.",
+                        items=resolved,
+                    ),
+                    refs,
                 )
             else:
                 self.resolved_summary.setPlainText(
@@ -767,6 +769,24 @@ class Window(QMainWindow):
         index = self.table.currentRow()
         if not self.mid or not 0 <= index < len(self.visible_rows):
             return
+        self.play_row(self.visible_rows[index], pad=2.0)
+
+    def play_evidence(self, mid, sid):
+        if mid != self.mid:
+            return
+        row = self.store.segment(mid, sid)
+        if row is None:
+            QMessageBox.information(self, "Реплика недоступна", "Исходная реплика больше не найдена.")
+            return
+        self.play_row(row, pad=0.0)
+
+    def play_row(self, row, pad=0.0):
+        source = Path(self.store.meeting(self.mid)["source"])
+        if not source.is_file():
+            QMessageBox.information(
+                self, "Запись недоступна", "Исходный аудио- или видеофайл перемещён либо удалён."
+            )
+            return
         player = shutil.which("ffplay")
         if not player:
             QMessageBox.information(
@@ -776,24 +796,28 @@ class Window(QMainWindow):
                 "Пока можно открыть всю запись кнопкой «Открыть исходную запись» ниже.",
             )
             return
-        row = self.visible_rows[index]
-        source = self.store.meeting(self.mid)["source"]
-        pad = 2.0
         start = max(0, row["start"] - pad)
-        duration = row["end"] - row["start"] + 2 * pad
+        end = row["end"] + pad
+        duration = max(0.1, end - start)
         self.stop_playback()
-        self.player_proc = subprocess.Popen(
-            [player, "-autoexit", "-ss", str(start), "-t", str(duration), source],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        self.playback_label.setText(f"Играет {stamp(start)}–{stamp(start + duration)}…")
+        try:
+            self.player_proc = subprocess.Popen(
+                [player, "-nodisp", "-autoexit", "-ss", str(start), "-t", str(duration), str(source)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError:
+            QMessageBox.information(self, "Прослушивание недоступно", "Не удалось запустить ffplay.")
+            return
+        self.playback_label.setText(f"Играет {stamp(start)}–{stamp(start + duration)} · {row['speaker']}…")
+        self.controls()
 
     def stop_playback(self):
         if self.player_proc and self.player_proc.poll() is None:
             self.player_proc.terminate()
         self.player_proc = None
         self.playback_label.setText("")
+        self.stop_button.setEnabled(False)
 
     def rerun_transcription(self):
         if self.job or not self.mid:

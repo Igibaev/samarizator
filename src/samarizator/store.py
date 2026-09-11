@@ -115,6 +115,11 @@ class Store:
                 )
             ]
 
+    def segment(self, mid, sid):
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM segments WHERE meeting=? AND id=?", (mid, sid)).fetchone()
+        return dict(row) if row else None
+
     def iter_segments(self, mid):
         offset = 0
         while rows := self.segments(mid, offset):
