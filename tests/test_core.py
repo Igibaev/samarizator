@@ -7,7 +7,7 @@ import pytest
 
 from samarizator.config import Settings
 from samarizator.knowledge import export, topic_name
-from samarizator.media import assign_speaker, parse_whisper, whisper
+from samarizator.media import parse_whisper, whisper
 from samarizator.process import BudgetExceeded, rss_tree, supervise
 from samarizator.summary import blocks, summarize, validate_summary
 
@@ -46,10 +46,10 @@ def test_edits_invalidate_summary_and_cache(meeting):
     store.save_checkpoint(mid, "summary-map", 0, {"cached": True})
     store.update(mid, summary="{}", status="done")
     sid = store.segments(mid)[0]["id"]
-    store.edit_segment(mid, sid, "Алия", "Решение отменили")
+    store.edit_segment(mid, sid, "Решение отменили")
     assert store.meeting(mid)["summary"] is None
     assert store.checkpoint(mid, "summary-map", 0) is None
-    assert store.segments(mid)[0]["speaker"] == "Алия"
+    assert store.segments(mid)[0]["text"] == "Решение отменили"
 
 
 def test_recovery_retains_transcript(meeting):
@@ -61,11 +61,9 @@ def test_recovery_retains_transcript(meeting):
     assert store.segments(mid)
 
 
-def test_rename_and_search(meeting):
+def test_search(meeting):
     store, mid, _ = meeting
     store.save_chunk(mid, 0, [segment("бюджет XZ-2026"), segment("следующая реплика", 3)])
-    store.rename_speaker(mid, "Собеседник 1", "Иван")
-    assert all(r["speaker"] == "Иван" for r in store.segments(mid))
     assert store.meetings("XZ-2026")[0]["id"] == mid
 
 
@@ -95,13 +93,6 @@ def test_gpu_setting_controls_the_no_gpu_flag(tmp_path, monkeypatch):
     assert "-ng" not in calls[1]
 
 
-def test_speaker_overlap_is_uncertain():
-    turns = [dict(start=0, end=4, speaker="A"), dict(start=0, end=4, speaker="B")]
-    assert assign_speaker(0, 4, turns) == ("A / B", True)
-    assert assign_speaker(8, 9, turns) == ("Не определён", True)
-    assert assign_speaker(0, 3, turns[:1]) == ("A", False)
-
-
 def test_whisper_offsets_channels_and_seams():
     payload = {
         "transcription": [
@@ -112,7 +103,7 @@ def test_whisper_offsets_channels_and_seams():
     rows = parse_whisper(payload, 118, 120, 240, channel=1)
     assert len(rows) == 1
     assert rows[0]["start"] == 119.5
-    assert rows[0]["speaker"] == "Канал 2"
+    assert rows[0]["speaker"] == "Речь"  # compatibility column is not displayed or summarized
     assert rows[0]["uncertain"]
 
 
@@ -123,6 +114,29 @@ def test_all_text_is_in_bounded_blocks():
     assert all(sum(len(line) + 1 for _, line in b) <= 4000 for b in batch)
     restored = "".join(json.loads(line)["text"] for b in batch for _, line in b)
     assert restored == "а" * 16000 + "конец"
+    assert all("speaker" not in json.loads(line) for b in batch for _, line in b)
+
+
+def test_legacy_speaker_settings_are_ignored():
+    settings = Settings.from_dict(
+        {
+            "diarization": "local",
+            "speakers": 4,
+            "segmentation_model": "/old/segmentation.onnx",
+            "embedding_model": "/old/embedding.onnx",
+            "language": "ru",
+        }
+    )
+    assert settings.language == "ru"
+    assert not hasattr(settings, "diarization")
+    assert not hasattr(settings, "speakers")
+
+
+def test_downloader_contains_only_whisper_models():
+    from samarizator.setup_models import MODELS, QUALITY_MODELS
+
+    assert set(MODELS) == {"ggml-small-q5_1.bin"}
+    assert set(QUALITY_MODELS) == {"ggml-silero-v6.2.0.bin"}
 
 
 def test_invalid_evidence_and_owner_rejected():
@@ -191,7 +205,10 @@ def test_ledger_preserves_late_topics_and_cached_maps(meeting):
         def complete(self, prompt, allowed):
             self.calls += 1
             sid = max(allowed)
-            return result(sid, "Пункт " + str(sid))
+            obj = result(sid, "Пункт " + str(sid))
+            if "ИТОГОВЫЙ список" in prompt:
+                obj["items"][0]["evidence"] = sorted(allowed)
+            return obj
 
     fake = Fake()
     summary = summarize(store, mid, settings, client=fake)

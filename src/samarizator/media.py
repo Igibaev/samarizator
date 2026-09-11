@@ -1,10 +1,13 @@
 import hashlib
 import json
 import math
+import re
 import shutil
 from pathlib import Path
 
 from .process import run_command
+
+_TOKEN = re.compile(r"\S+")
 
 
 def fingerprint(path):
@@ -68,26 +71,6 @@ def extract(source, target, work, start=0, duration=None, channel=None):
     run_command(args, work / "ffmpeg.log")
 
 
-def assign_speaker(start, end, turns):
-    scores = {}
-    for turn in turns:
-        if turn["start"] >= end:
-            break
-        overlap = max(0, min(end, turn["end"]) - max(start, turn["start"]))
-        if overlap:
-            speaker = turn["speaker"]
-            scores[speaker] = scores.get(speaker, 0) + overlap
-    if not scores:
-        return "Не определён", True
-    ordered = sorted(scores.items(), key=lambda s: s[1], reverse=True)
-    uncertain = ordered[0][1] < (end - start) * 0.5 or (
-        len(ordered) > 1 and ordered[1][1] > ordered[0][1] * 0.3
-    )
-    if len(ordered) > 1 and ordered[1][1] > ordered[0][1] * 0.7:
-        return " / ".join(s[0] for s in ordered[:2]), True
-    return ordered[0][0], uncertain
-
-
 def parse_whisper(payload, offset, lower, upper, turns=(), channel=None):
     """Select overlap by segment midpoint. Boundaries are reviewable, never silently truncated."""
     output = []
@@ -99,19 +82,61 @@ def parse_whisper(payload, offset, lower, upper, turns=(), channel=None):
         text = row["text"].strip()
         if not text or end <= start or not lower <= (start + end) / 2 < upper:
             continue
-        if channel is not None:
-            speaker, uncertain = f"Канал {channel + 1}", False
-        else:
-            speaker, uncertain = assign_speaker(start, end, turns)
         # Explicitly flag chunk seams for review; alignment is not sample exact.
         seam = (lower > 0 and start < lower + 1) or end > upper - 1
+        reasons = []
+        if seam:
+            reasons.append("граница фрагмента")
+        # Token scores are decoder signals, not calibrated word accuracy probabilities.
+        scores = [
+            t["p"]
+            for t in row.get("tokens", [])
+            if isinstance(t.get("p"), (int, float))
+            and t.get("text", "").strip()
+            and not t["text"].startswith("[_")
+        ]
+        if scores and (sum(scores) / len(scores) < 0.55 or sum(p < 0.2 for p in scores) >= 2):
+            reasons.append("низкая уверенность Whisper")
         output.append(
-            dict(start=max(0, start), end=end, text=text, speaker=speaker, uncertain=bool(uncertain or seam))
+            dict(
+                start=max(0, start),
+                end=end,
+                text=text,
+                speaker="Речь",
+                source_channel=channel,
+                uncertain=bool(reasons),
+                review=", ".join(reasons),
+            )
         )
     return output
 
 
-def whisper(wav, model, language, threads, work, gpu=False):
+def dedup_seam(prev_text, text, max_words=12):
+    """Trim a leading run of words in `text` that exactly repeats the tail of
+    `prev_text`, for two adjacent chunks whose padded audio overlapped at a seam.
+
+    Comparison is case/punctuation-insensitive; only an exact matching run is
+    removed, never guessed or reworded. Returns (trimmed_text, words_removed);
+    an empty trimmed_text means the whole segment was a repeat of the previous
+    chunk's tail and should be dropped, not kept as an empty row.
+    """
+    prev_tokens = _TOKEN.findall(prev_text)[-max_words:]
+    matches = list(_TOKEN.finditer(text))
+    norm = [re.sub(r"^\W+|\W+$", "", m.group()).lower() for m in matches[:max_words]]
+    prev_norm = [re.sub(r"^\W+|\W+$", "", t).lower() for t in prev_tokens]
+    overlap = 0
+    for n in range(min(len(prev_norm), len(norm)), 0, -1):
+        if prev_norm[-n:] == norm[:n] and all(prev_norm[-n:]):
+            overlap = n
+            break
+    if not overlap:
+        return text, 0
+    if overlap == len(matches):
+        return "", overlap
+    return text[matches[overlap].start() :].lstrip(), overlap
+
+
+def whisper(wav, model, language, threads, work, gpu=False, *, vad_model="", glossary="", beam_size=5):
     binary = shutil.which("whisper-cli")
     if not binary:
         raise ValueError("whisper-cli не найден. Запустите ./start.sh для установки.")
@@ -122,6 +147,23 @@ def whisper(wav, model, language, threads, work, gpu=False):
     if not gpu:
         # Metal allocations stay outside the RSS the watchdog can see.
         args.append("-ng")
-    args += ["-oj", "-of", str(prefix), "-ml", "80", "-sow"]
+    args += ["-ojf", "-of", str(prefix), "-ml", "80", "-sow", "-bs", str(beam_size)]
+    if glossary.strip():
+        # Hints only; do not carry unreviewed ASR text into the next chunk.
+        args += ["--prompt", glossary.strip()[:800]]
+    if vad_model:
+        args += [
+            "--vad",
+            "--vad-model",
+            str(vad_model),
+            "--vad-threshold",
+            "0.4",
+            "--vad-min-speech-duration-ms",
+            "150",
+            "--vad-min-silence-duration-ms",
+            "500",
+            "--vad-speech-pad-ms",
+            "250",
+        ]
     run_command(args, work / "whisper.log")
     return json.loads(result.read_text())

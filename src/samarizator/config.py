@@ -21,29 +21,44 @@ class Settings:
     language: str = "ru"
     gpu: bool = False
     whisper_model: str = ""
-    diarization: str = "local"
-    speakers: int = -1
-    segmentation_model: str = ""
-    embedding_model: str = ""
     vault: str = ""
     input_chars: int = 12000
     max_output_tokens: int = 3000
+    pause_boundaries: bool = False
+    vad: bool = False
+    vad_model: str = ""
+    glossary: str = ""
+    beam_size: int = 5
+
+    def quality_profile(self):
+        """Opt-in profile. Preserve the user's ASR model and corporate API configuration."""
+        from dataclasses import replace
+
+        return replace(
+            self,
+            memory_gb=16,
+            threads=8,
+            chunk_seconds=90,
+            gpu=False,
+            pause_boundaries=True,
+            vad=True,
+            beam_size=5,
+            vad_model=self.vad_model or str(data_dir() / "models/ggml-silero-v6.2.0.bin"),
+        )
 
     def chat_url(self):
         base = self.base_url.strip().rstrip("/")
         return base if base.endswith("/chat/completions") else base + "/chat/completions"
 
     def validate(self, api=False):
+        if not 1 <= self.beam_size <= 8 or len(self.glossary) > 800:
+            raise ValueError("Beam size: 1–8; словарь терминов: не более 800 символов.")
         if not 2 <= self.memory_gb <= 64:
             raise ValueError("Бюджет памяти должен быть от 2 до 64 ГиБ.")
         if not 1 <= self.threads <= 16 or not 30 <= self.chunk_seconds <= 300:
             raise ValueError("Некорректные параметры CPU или длины фрагмента.")
-        if self.diarization not in {"local", "channels", "manual"}:
-            raise ValueError("Неизвестный режим собеседников.")
         if not 4000 <= self.input_chars <= 48000 or not 512 <= self.max_output_tokens <= 64000:
             raise ValueError("Некорректный размер контекста.")
-        if self.speakers != -1 and not 1 <= self.speakers <= 20:
-            raise ValueError("Число собеседников: -1 (авто) или 1–20.")
         if api:
             parsed = urlparse(self.base_url)
             if (
@@ -83,8 +98,6 @@ class Settings:
         models = data_dir() / "models"
         return cls(
             whisper_model=str(models / "ggml-small-q5_1.bin"),
-            segmentation_model=str(models / "segmentation.onnx"),
-            embedding_model=str(models / "embedding.onnx"),
             vault=str(Path.home() / "Documents/Samarizator"),
         )
 

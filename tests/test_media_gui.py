@@ -1,3 +1,4 @@
+import json
 import shutil
 import subprocess
 import wave
@@ -54,11 +55,66 @@ def test_gui_constructs_and_shows_recording(tmp_path, monkeypatch):
     source = tmp_path / "demo.wav"
     source.write_bytes(b"demo")
     mid = w.store.create(source, w.settings)
-    w.store.save_chunk(mid, 0, [dict(start=0, end=1, speaker="A", text="Тест", uncertain=True)])
+    w.store.save_chunk(
+        mid,
+        0,
+        [
+            dict(start=0, end=1, speaker="A", text="Тест", uncertain=True),
+            dict(start=1, end=2, speaker="A", text="Ясно", uncertain=False),
+        ],
+    )
     w.mid = mid
     w.refresh_list()
-    assert w.table.rowCount() == 1
+    assert w.table.rowCount() == 2
     assert w.list.count() == 1
+    w.uncertain_only.setChecked(True)
+    assert w.table.rowCount() == 1
+    assert w.table.item(0, 1).text() == "Тест"
+    w.uncertain_only.setChecked(False)
+    assert w.table.rowCount() == 2
+    from PySide6.QtWidgets import QMessageBox
+
+    w.table.setCurrentCell(0, 0)
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
+    monkeypatch.setattr("samarizator.app.shutil.which", lambda name: None)
+    w.play_segment()
+    assert w.player_proc is None  # no ffplay found, nothing started
+
+    class FakeProc:
+        def __init__(self):
+            self.stopped = False
+
+        def poll(self):
+            return None if not self.stopped else 0
+
+        def terminate(self):
+            self.stopped = True
+
+    popen_calls = []
+    monkeypatch.setattr("samarizator.app.shutil.which", lambda name: "/usr/bin/ffplay")
+    monkeypatch.setattr(
+        "samarizator.app.subprocess.Popen", lambda args, **kw: popen_calls.append(args) or FakeProc()
+    )
+    w.play_segment()
+    assert popen_calls and popen_calls[0][0] == "/usr/bin/ffplay"
+    assert "-ss" in popen_calls[0] and "-t" in popen_calls[0]
+    assert w.player_proc is not None and w.playback_label.text()
+    w.stop_playback()
+    assert w.player_proc is None and w.playback_label.text() == ""
+    sid = w.store.segments(mid)[0]["id"]
+    item = dict(kind="point", text="Точная сумма 17 млн", evidence=[sid], owner=None, due=None)
+    resolved_item = dict(
+        kind="decision", text="Бюджет утверждён (итог)", evidence=[sid], owner=None, due=None, status="agreed"
+    )
+    brief = dict(overview="Короткий итог", items=[], topics=[])
+    detailed = dict(overview="Детали обсуждения", items=[item], topics=["Бюджет"], resolved=[resolved_item])
+    w.store.update(mid, summary=json.dumps(dict(**brief, brief=brief, detailed=detailed)))
+    w.load_detail()
+    assert "Короткий итог" in w.summary.toPlainText()
+    assert "17 млн" not in w.summary.toPlainText()
+    assert "17 млн" in w.detailed_summary.toPlainText()
+    assert "00:00:00" in w.detailed_summary.toPlainText()
+    assert "Бюджет утверждён (итог)" in w.resolved_summary.toPlainText()
     from PySide6.QtWidgets import QMessageBox
 
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
@@ -69,7 +125,16 @@ def test_gui_constructs_and_shows_recording(tmp_path, monkeypatch):
     with pytest.raises(ValueError):
         w.store.meeting(mid)
     dialog = SettingsDialog(w.settings)
+    assert w.table.columnCount() == 3
+    assert w.table.horizontalHeaderItem(1).text() == "Текст"
+    assert not hasattr(w, "speakers_button")
+    assert not {"diarization", "speakers", "segmentation_model", "embedding_model"} & dialog.fields.keys()
     assert dialog.fields["memory_gb"].value() == 4
+    old_model = dialog.fields["whisper_model"].text()
+    dialog.quality_profile()
+    assert dialog.fields["memory_gb"].value() == 16
+    assert dialog.fields["vad"].isChecked()
+    assert dialog.fields["whisper_model"].text() == old_model
     dialog.fields["base_url"].setText("https://typed-by-hand.example/v1")
     dialog.pick_provider(dialog.provider.findData("https://openrouter.ai/api/v1"))
     assert dialog.fields["base_url"].text() == "https://openrouter.ai/api/v1"
@@ -86,15 +151,45 @@ def test_gui_constructs_and_shows_recording(tmp_path, monkeypatch):
     app.processEvents()
 
 
-def test_sherpa_configuration_api():
-    sherpa = pytest.importorskip("sherpa_onnx")
-    config = sherpa.OfflineSpeakerDiarizationConfig(
-        segmentation=sherpa.OfflineSpeakerSegmentationModelConfig(
-            pyannote=sherpa.OfflineSpeakerSegmentationPyannoteModelConfig(model="/missing"),
-            num_threads=2,
-            provider="cpu",
-        ),
-        embedding=sherpa.SpeakerEmbeddingExtractorConfig(model="/missing", num_threads=2, provider="cpu"),
-        clustering=sherpa.FastClusteringConfig(num_clusters=-1, threshold=0.5),
-    )
-    assert config.clustering.num_clusters == -1
+def test_open_obsidian_uses_vault_name_and_relative_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    monkeypatch.setenv("SAMARIZATOR_HOME", str(tmp_path / "app"))
+    from PySide6.QtWidgets import QApplication, QMessageBox
+
+    from samarizator.app import Window
+
+    global _qt_app
+    _qt_app = QApplication.instance() or QApplication([])
+
+    w = Window()
+    source = tmp_path / "demo.wav"
+    source.write_bytes(b"demo")
+    mid = w.store.create(source, w.settings)
+    vault = tmp_path / "MyVault"
+    (vault / "Meetings").mkdir(parents=True)
+    note = vault / "Meetings" / "abc.md"
+    note.write_text("# note")
+    w.settings.vault = str(vault)
+    w.store.update(mid, note=str(note), summary="{}")
+    w.mid = mid
+
+    calls = []
+    monkeypatch.setattr("samarizator.app.QDesktopServices.openUrl", lambda url: calls.append(url) or True)
+    w.open_obsidian()
+    assert len(calls) == 1
+    text = calls[0].toString()
+    # Not an absolute path: that only resolves if it matches a vault Obsidian already knows
+    # about, which real-path resolution (symlinks, iCloud Drive) can silently break.
+    assert text.startswith("obsidian://open?vault=MyVault&file=")
+    assert "path=" not in text
+    assert "Meetings" in text and "abc" in text
+
+    warnings = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warnings.append(a))
+    w.store.update(mid, note=str(tmp_path / "elsewhere.md"))
+    calls.clear()
+    w.open_obsidian()
+    assert not calls and len(warnings) == 1  # note outside the vault warns, doesn't crash
+
+    w.timer.stop()
+    w.close()
