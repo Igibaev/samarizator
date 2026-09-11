@@ -20,11 +20,11 @@ def summary_html(view, refs):
         f"<p>{html_text(view['overview'])}</p>",
     ]
     for kind, label in LABELS.items():
-        items = [item for item in view["items"] if item["kind"] == kind]
+        items = [(index, item) for index, item in enumerate(view["items"]) if item["kind"] == kind]
         if not items:
             continue
         parts.append(f"<h3>{label}</h3><ul>")
-        for item in items:
+        for index, item in items:
             text = html_text(item["text"])
             state = STATUS_LABELS.get(item.get("status"), "")
             if state:
@@ -34,6 +34,12 @@ def summary_html(view, refs):
             if item.get("due"):
                 text += " · " + html_text(item["due"])
             badges = []
+            if len(set(item["evidence"]) & refs.keys()) > 1:
+                badges.append(
+                    f'<a href="samarizator-group:{index}" style="text-decoration:none;color:#005f50">'
+                    '<span style="background-color:#c4e2d6;font-size:small">'
+                    "&nbsp;▶&nbsp;Прослушать всё&nbsp;</span></a>"
+                )
             for sid in dict.fromkeys(item["evidence"]):
                 if sid not in refs:
                     continue
@@ -49,12 +55,14 @@ def summary_html(view, refs):
 
 class SummaryBrowser(QTextBrowser):
     playEvidence = Signal(str, int)
+    playGroup = Signal(str, object)
 
     def __init__(self, lookup, parent=None):
         super().__init__(parent)
         self.lookup = lookup
         self.meeting_id = None
         self.evidence = set()
+        self.groups = {}
         self.setOpenLinks(False)
         self.setOpenExternalLinks(False)
         self.anchorClicked.connect(self.activate_evidence)
@@ -62,12 +70,17 @@ class SummaryBrowser(QTextBrowser):
     def show_summary(self, mid, view, refs):
         self.meeting_id = mid
         self.evidence = {sid for item in view["items"] for sid in item["evidence"] if sid in refs}
+        self.groups = {
+            index: list(dict.fromkeys(sid for sid in item["evidence"] if sid in refs))
+            for index, item in enumerate(view["items"])
+        }
         QToolTip.hideText()
         self.setHtml(summary_html(view, refs))
 
     def setPlainText(self, text):
         self.meeting_id = None
         self.evidence = set()
+        self.groups = {}
         QToolTip.hideText()
         super().setPlainText(text)
 
@@ -80,11 +93,25 @@ class SummaryBrowser(QTextBrowser):
         return sid if self.meeting_id and sid in self.evidence else None
 
     def activate_evidence(self, url):
+        group = self.group_ids(url.toString())
+        if group:
+            self.playGroup.emit(self.meeting_id, group)
+            return
         sid = self.evidence_id(url.toString())
         if sid is not None:
             self.playEvidence.emit(self.meeting_id, sid)
 
+    def group_ids(self, link):
+        match = re.fullmatch(r"samarizator-group:([0-9]+)", link)
+        return self.groups.get(int(match[1]), []) if match and self.meeting_id else []
+
     def evidence_tooltip(self, link):
+        if self.group_ids(link):
+            return (
+                "Прослушать все источники этого тезиса по времени записи. "
+                "Реплики с промежутками до 5 секунд объединяются, "
+                "остальные звучат по очереди. По краям добавляется секунда контекста."
+            )
         sid = self.evidence_id(link)
         row = self.lookup(self.meeting_id, sid) if sid is not None else None
         if not row:

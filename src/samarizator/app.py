@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import sys
 import threading
+from collections import deque
 from dataclasses import asdict
 from pathlib import Path
 from urllib.parse import quote
@@ -39,6 +40,7 @@ from PySide6.QtWidgets import (
 
 from .config import Settings, data_dir, set_api_key
 from .knowledge import stamp
+from .playback import evidence_intervals
 from .process import supervise
 from .store import Store
 from .summary import summary_views
@@ -315,6 +317,9 @@ class Window(QMainWindow):
         self.mid = None
         self.page = 0
         self.player_proc = None
+        self.playback_queue = deque()
+        self.playback_total = 0
+        self.playback_mid = None
         from .build import build_label
 
         self.build_label = build_label()
@@ -479,6 +484,7 @@ class Window(QMainWindow):
         self.tabs.addTab(self.audio_report, "Качество записи")
         for browser in [self.summary, self.detailed_summary, self.resolved_summary]:
             browser.playEvidence.connect(self.play_evidence)
+            browser.playGroup.connect(self.play_evidence_group)
         shared_playback = QHBoxLayout()
         shared_playback.addWidget(self.stop_button)
         shared_playback.addWidget(self.playback_label, 1)
@@ -781,6 +787,22 @@ class Window(QMainWindow):
         self.play_row(row, pad=0.0)
 
     def play_row(self, row, pad=0.0):
+        start = max(0, row["start"] - pad)
+        self.start_playback([dict(row, start=start, end=row["end"] + pad)])
+
+    def play_evidence_group(self, mid, ids):
+        if mid != self.mid:
+            return
+        rows = [self.store.segment(mid, sid) for sid in dict.fromkeys(ids)]
+        if not rows or any(row is None for row in rows):
+            QMessageBox.information(self, "Реплика недоступна", "Одна из исходных реплик больше не найдена.")
+            return
+        intervals = evidence_intervals(rows, duration=self.store.meeting(mid)["duration"])
+        self.start_playback(intervals)
+
+    def start_playback(self, intervals):
+        if not intervals:
+            return
         source = Path(self.store.meeting(self.mid)["source"])
         if not source.is_file():
             QMessageBox.information(
@@ -796,23 +818,50 @@ class Window(QMainWindow):
                 "Пока можно открыть всю запись кнопкой «Открыть исходную запись» ниже.",
             )
             return
-        start = max(0, row["start"] - pad)
-        end = row["end"] + pad
-        duration = max(0.1, end - start)
         self.stop_playback()
+        self.playback_mid = self.mid
+        self.playback_queue = deque(intervals)
+        self.playback_total = len(intervals)
+        self.playback_source = str(source)
+        self.playback_player = player
+        self.play_next_excerpt()
+
+    def play_next_excerpt(self):
+        if not self.playback_queue or self.playback_mid != self.mid:
+            self.stop_playback()
+            return
+        row = self.playback_queue.popleft()
+        start = row["start"]
+        duration = max(0.1, row["end"] - start)
         try:
             self.player_proc = subprocess.Popen(
-                [player, "-nodisp", "-autoexit", "-ss", str(start), "-t", str(duration), str(source)],
+                [
+                    self.playback_player,
+                    "-nodisp",
+                    "-autoexit",
+                    "-ss",
+                    str(start),
+                    "-t",
+                    str(duration),
+                    self.playback_source,
+                ],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
         except OSError:
+            self.stop_playback()
             QMessageBox.information(self, "Прослушивание недоступно", "Не удалось запустить ffplay.")
             return
-        self.playback_label.setText(f"Играет {stamp(start)}–{stamp(start + duration)} · {row['speaker']}…")
+        part = self.playback_total - len(self.playback_queue)
+        position = f" · {part}/{self.playback_total}" if self.playback_total > 1 else ""
+        self.playback_label.setText(
+            f"Играет {stamp(start)}–{stamp(start + duration)} · {row['speaker']}{position}…"
+        )
         self.controls()
 
     def stop_playback(self):
+        self.playback_queue.clear()
+        self.playback_mid = None
         if self.player_proc and self.player_proc.poll() is None:
             self.player_proc.terminate()
         self.player_proc = None
@@ -938,8 +987,15 @@ class Window(QMainWindow):
             meeting = self.store.meeting(self.active_id)
             self.progress.setText(meeting["error"] or "Подготовка…")
         if self.player_proc and self.player_proc.poll() is not None:
+            code = self.player_proc.poll()
             self.player_proc = None
-            self.playback_label.setText("")
+            if code != 0:
+                self.stop_playback()
+                self.playback_label.setText("Ошибка воспроизведения. Проверьте исходный файл и аудиовыход.")
+            elif self.playback_queue:
+                self.play_next_excerpt()
+            else:
+                self.stop_playback()
             self.controls()
 
     def controls(self):
