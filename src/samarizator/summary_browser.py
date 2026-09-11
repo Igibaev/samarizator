@@ -19,10 +19,12 @@ def summary_html(view, refs):
         "чтобы увидеть исходный текст; нажмите, чтобы прослушать все связанные фрагменты.</p>",
         f"<p>{html_text(view['overview'])}</p>",
     ]
-    if view.get("generation_warning"):
+    for field in ("quality_warning", "generation_warning"):
+        if not view.get(field):
+            continue
         parts.append(
             '<p style="color:#8a5a00;font-size:small">'
-            + html_text(view["generation_warning"])
+            + html_text(view[field])
             + "</p>"
         )
     for kind, label in LABELS.items():

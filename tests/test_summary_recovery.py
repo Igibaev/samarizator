@@ -81,11 +81,17 @@ def test_truncated_block_splits_and_reuses_successful_subblocks(meeting):
             self.maps = 0
 
         def complete(self, prompt, allowed):
-            if "Подготовь подробную" in prompt:
+            from samarizator.summary_prompts import MAP_PROMPT, REVIEW_PROMPT
+
+            if prompt.startswith(REVIEW_PROMPT):
+                draft = json.loads(prompt[len(REVIEW_PROMPT):])["draft"]
+                return dict(draft, items=[dict(point, draft_ids=[i]) for i, point in enumerate(draft["items"])])
+            if prompt.startswith(MAP_PROMPT):
                 self.maps += 1
-                if len(allowed) > 2:
+                ids = {r["id"] for r in json.loads(prompt[len(MAP_PROMPT):])["source"]["segments"]}
+                if len(ids) > 2:
                     raise SummaryTooLong("обрезала")
-                return dict(overview="Подробно", items=[item(i) for i in sorted(allowed)], topics=[])
+                return dict(overview="Подробно", items=[item(i) for i in sorted(ids)], topics=[])
             return dict(overview="Кратко", items=[item(min(allowed))], topics=[])
 
     client = Client()

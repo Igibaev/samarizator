@@ -204,7 +204,15 @@ def test_ledger_preserves_late_topics_and_cached_maps(meeting):
 
         def complete(self, prompt, allowed):
             self.calls += 1
-            sid = max(allowed)
+            from samarizator.summary_prompts import MAP_PROMPT, REVIEW_PROMPT
+
+            if prompt.startswith(REVIEW_PROMPT):
+                draft = json.loads(prompt[len(REVIEW_PROMPT):])["draft"]
+                return dict(draft, items=[dict(item, draft_ids=[i]) for i, item in enumerate(draft["items"])])
+            ids = allowed
+            if prompt.startswith(MAP_PROMPT):
+                ids = {r["id"] for r in json.loads(prompt[len(MAP_PROMPT):])["source"]["segments"]}
+            sid = max(ids)
             obj = result(sid, "Пункт " + str(sid))
             if "ИТОГОВЫЙ список" in prompt:
                 obj["items"][0]["evidence"] = sorted(allowed)
