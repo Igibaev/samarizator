@@ -40,6 +40,7 @@ from PySide6.QtWidgets import (
 
 from .config import Settings, data_dir, set_api_key
 from .knowledge import stamp
+from .live import LiveCaptureError, LiveRecorder
 from .playback import evidence_intervals
 from .process import supervise
 from .store import Store
@@ -301,6 +302,7 @@ class Window(QMainWindow):
         self.playback_queue = deque()
         self.playback_total = 0
         self.playback_mid = None
+        self.live_recorder = None
         from .build import build_label
 
         self.build_label = build_label()
@@ -323,9 +325,16 @@ class Window(QMainWindow):
         layout.addWidget(split, 1)
         sidebar = QWidget()
         side = QVBoxLayout(sidebar)
-        add = QPushButton("+ Добавить аудио или видео")
-        add.clicked.connect(self.add_file)
-        side.addWidget(add)
+        self.add_button = QPushButton("+ Добавить аудио или видео")
+        self.add_button.clicked.connect(self.add_file)
+        side.addWidget(self.add_button)
+        self.live_button = QPushButton("● Live: начать запись")
+        self.live_button.setToolTip(
+            "Первый этап live-режима: записывает микрофон локально. После остановки запись "
+            "автоматически добавляется и запускается распознавание. Системный звук пока не захватывается."
+        )
+        self.live_button.clicked.connect(self.toggle_live)
+        side.addWidget(self.live_button)
         self.search = QLineEdit()
         self.search.setPlaceholderText("Поиск в записях и сводках…")
         self.search.textChanged.connect(self.refresh_list)
@@ -502,6 +511,44 @@ class Window(QMainWindow):
             self.mid = self.store.create(path, self.settings)
             self.refresh_list()
 
+    def toggle_live(self):
+        if self.job:
+            return
+        if self.live_recorder is not None:
+            self.stop_live()
+            return
+        try:
+            recorder = LiveRecorder()
+            recorder.start()
+        except LiveCaptureError as exc:
+            QMessageBox.warning(self, "Live-запись", str(exc))
+            return
+        self.live_recorder = recorder
+        self.stop_playback()
+        self.progress.setText("Live-запись с микрофона началась. Аудио сохраняется только на этом Mac.")
+        self.controls()
+
+    def stop_live(self, start_transcription=True):
+        recorder = self.live_recorder
+        if recorder is None:
+            return
+        self.live_recorder = None
+        try:
+            path = recorder.stop()
+            mid = self.store.create(path, self.settings)
+        except (LiveCaptureError, OSError, ValueError) as exc:
+            self.progress.setText(str(exc))
+            QMessageBox.warning(self, "Live-запись", str(exc))
+            self.controls()
+            return
+        self.store.update(mid, title="Live-запись " + path.stem.removeprefix("live-").rsplit("-", 1)[0])
+        self.mid, self.page = mid, 0
+        self.refresh_list()
+        self.progress.setText("Live-запись сохранена локально.")
+        self.controls()
+        if start_transcription:
+            self.start("transcribe")
+
     def refresh_list(self):
         current = self.mid
         self.list.blockSignals(True)
@@ -550,7 +597,7 @@ class Window(QMainWindow):
 
     def delete_meeting(self, mid=None):
         mid = mid or self.mid
-        if self.job or not mid:
+        if self.job or self.live_recorder is not None or not mid:
             return
         meeting = self.store.meeting(mid)
         confirm = QMessageBox.question(
@@ -838,7 +885,7 @@ class Window(QMainWindow):
         self.start("transcribe")
 
     def start(self, phase):
-        if self.job or not self.mid:
+        if self.job or self.live_recorder is not None or not self.mid:
             return
         try:
             meeting = self.store.meeting(self.mid)
@@ -920,6 +967,14 @@ class Window(QMainWindow):
             self.progress.setText("Остановка обработчиков…")
 
     def poll(self):
+        if self.live_recorder is not None:
+            if self.live_recorder.recording:
+                self.progress.setText(
+                    f"● Live-запись с микрофона · {stamp(self.live_recorder.elapsed)} · "
+                    "нажмите кнопку ещё раз для остановки"
+                )
+            else:
+                self.stop_live(start_transcription=False)
         if self.active_id:
             meeting = self.store.meeting(self.active_id)
             self.progress.setText(meeting["error"] or "Подготовка…")
@@ -936,9 +991,15 @@ class Window(QMainWindow):
             self.controls()
 
     def controls(self):
-        busy = self.job is not None
+        recording = self.live_recorder is not None
+        busy = self.job is not None or recording
         ready = self.mid is not None
         self.settings_button.setEnabled(not busy)
+        self.add_button.setEnabled(not busy)
+        self.search.setEnabled(not busy)
+        self.list.setEnabled(not busy)
+        self.live_button.setEnabled(self.job is None)
+        self.live_button.setText("■ Live: остановить и распознать" if recording else "● Live: начать запись")
         complete = ready and bool(self.store.checkpoint(self.mid, "asr_complete", 0))
         self.transcribe.setText("Распознавание завершено" if complete else "1. Распознать / продолжить")
         self.transcribe.setEnabled(ready and not busy and not complete)
@@ -1005,6 +1066,8 @@ class Window(QMainWindow):
             )
 
     def closeEvent(self, event):
+        if self.live_recorder is not None:
+            self.stop_live(start_transcription=False)
         if self.job:
             self.job.stop.set()
             if not self.job.wait(5000):
