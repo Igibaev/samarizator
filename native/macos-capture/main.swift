@@ -131,17 +131,60 @@ final class SystemAudioOutput: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 }
 
-func audioConfiguration() -> SCStreamConfiguration {
+struct Options {
+    var seconds: Int = 0          // 0 = run until stopped
+    var width = 128
+    var height = 72
+    var videoOutput = true        // consume screen frames alongside audio
+    var excludeSelf = true
+
+    /// Flags exist so one binary can A/B the settings under suspicion on a real Mac,
+    /// instead of guessing which ScreenCaptureKit combination delivers audio.
+    static func parse(_ arguments: [String]) -> Options {
+        var options = Options()
+        var iterator = arguments.makeIterator()
+        while let argument = iterator.next() {
+            switch argument {
+            case "--seconds":
+                options.seconds = Int(iterator.next() ?? "") ?? 0
+            case "--size":
+                let parts = (iterator.next() ?? "").split(separator: "x")
+                if parts.count == 2, let w = Int(parts[0]), let h = Int(parts[1]) {
+                    options.width = w
+                    options.height = h
+                }
+            case "--no-video":
+                options.videoOutput = false
+            case "--include-self":
+                options.excludeSelf = false
+            default:
+                continue
+            }
+        }
+        return options
+    }
+
+    var describedAsJSON: [String: Any] {
+        [
+            "size": "\(width)x\(height)",
+            "video_output": videoOutput,
+            "exclude_self": excludeSelf,
+            "seconds": seconds,
+        ]
+    }
+}
+
+func audioConfiguration(_ options: Options) -> SCStreamConfiguration {
     let config = SCStreamConfiguration()
     config.capturesAudio = true
     config.sampleRate = sampleRate
     config.channelCount = 2
-    config.excludesCurrentProcessAudio = true
+    config.excludesCurrentProcessAudio = options.excludeSelf
     // ScreenCaptureKit has no audio-only stream. Keep the video side small and slow,
     // but not degenerate: 2x2 frames are rejected by some display pipelines, and a
     // stream that never produces a frame can stop delivering audio as well.
-    config.width = 128
-    config.height = 72
+    config.width = options.width
+    config.height = options.height
     config.minimumFrameInterval = CMTime(value: 1, timescale: 2)
     config.queueDepth = 6
     return config
@@ -173,7 +216,7 @@ func probe() async -> Never {
     exit(0)
 }
 
-func capture() async -> Never {
+func capture(_ options: Options) async -> Never {
     if !CGPreflightScreenCaptureAccess() {
         // Shows the system prompt once; the grant applies to the next launch, so this
         // run still fails, with an explanation instead of silence.
@@ -197,20 +240,32 @@ func capture() async -> Never {
     }
     let failure = Failure()
     let output = SystemAudioOutput { code, message in failure.record(code, message) }
-    let stream = SCStream(filter: SCContentFilter(display: display, excludingWindows: []), configuration: audioConfiguration(), delegate: output)
+    let stream = SCStream(
+        filter: SCContentFilter(display: display, excludingWindows: []),
+        configuration: audioConfiguration(options),
+        delegate: output
+    )
     do {
         try stream.addStreamOutput(output, type: .audio, sampleHandlerQueue: DispatchQueue(label: "samarizator.system-audio"))
-        // Registered and immediately discarded: no screen content is stored or forwarded.
-        try stream.addStreamOutput(output, type: .screen, sampleHandlerQueue: DispatchQueue(label: "samarizator.discard-video"))
+        if options.videoOutput {
+            // Registered and immediately discarded: no screen content is stored or forwarded.
+            try stream.addStreamOutput(output, type: .screen, sampleHandlerQueue: DispatchQueue(label: "samarizator.discard-video"))
+        }
         try await stream.startCapture()
     } catch {
         emit("error", ["code": "start", "message": error.localizedDescription])
         exit(captureFailed)
     }
-    emit("started", ["macos": osVersion(), "sample_rate": sampleRate, "channels": 1, "format": "f32le"])
+    var describedStart: [String: Any] = [
+        "macos": osVersion(), "sample_rate": sampleRate, "channels": 1, "format": "f32le",
+    ]
+    describedStart.merge(options.describedAsJSON) { _, new in new }
+    emit("started", describedStart)
     installStopHandlers()
     var ticks = 0
+    let limit = options.seconds > 0 ? options.seconds * 10 : 0
     while !stopped.load() {
+        if limit > 0 && ticks >= limit { break }
         if let (code, message) = failure.take() {
             try? await stream.stopCapture()
             emit("error", ["code": code, "message": message, "progress": counter.snapshot()])
@@ -265,9 +320,13 @@ Task {
     case "probe":
         await probe()
     case "capture":
-        await capture()
+        await capture(Options.parse(Array(CommandLine.arguments.dropFirst(2))))
     default:
-        emit("error", ["code": "usage", "message": "Использование: samarizator-system-audio [probe|capture]"])
+        emit("error", [
+            "code": "usage",
+            "message": "Использование: samarizator-system-audio [probe|capture] "
+                + "[--seconds N] [--size WxH] [--no-video] [--include-self]",
+        ])
         exit(captureFailed)
     }
 }
