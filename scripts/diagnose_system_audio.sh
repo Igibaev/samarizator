@@ -58,5 +58,15 @@ echo "=== 6. Запись целиком через FFmpeg ==="
 .venv/bin/python -m samarizator.screencapture check
 
 echo
-echo "Файлы для проверки на слух лежат в $OUT (сырой f32le 48000 Гц моно):"
-echo "  ffplay -f f32le -ar 48000 -ac 1 $OUT/default.pcm"
+echo "=== 7. Файлы для проверки на слух ==="
+# Raw PCM converted to WAV here: option spellings for raw input differ between
+# FFmpeg builds (ffplay 9 dropped -ac), while a WAV opens in any player.
+for pcm in "$OUT"/*.pcm; do
+  [ -s "$pcm" ] || continue
+  wav="${pcm%.pcm}.wav"
+  if ffmpeg -v error -y -f f32le -sample_rate 48000 -ch_layout mono -i "$pcm" "$wav" 2>/dev/null; then
+    echo "  afplay $wav"
+  else
+    echo "  (не удалось преобразовать $pcm; сырой формат: f32le, 48000 Гц, моно)"
+  fi
+done
