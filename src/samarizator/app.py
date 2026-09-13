@@ -7,7 +7,6 @@ import threading
 from collections import deque
 from dataclasses import asdict
 from pathlib import Path
-from urllib.parse import quote
 
 from PySide6.QtCore import QLockFile, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import (
@@ -46,7 +45,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import screencapture
+from . import obsidian, screencapture
 from .config import Settings, data_dir, set_api_key
 from .knowledge import stamp
 from .live import (
@@ -1306,35 +1305,35 @@ class Window(QMainWindow):
     def open_obsidian(self):
         if not self.mid or not (note := self.store.meeting(self.mid)["note"]):
             return
-        # obsidian://open?path=<absolute path> only resolves if that exact path matches a
-        # vault Obsidian already knows about. On macOS that absolute path very often does not
-        # match: iCloud Drive's "Desktop & Documents Folders" sync turns ~/Documents into a
-        # symlink, so Path.resolve() (used both here and when the note was exported) yields
-        # .../Library/Mobile Documents/com~apple~CloudDocs/..., not the ~/Documents path the
-        # user picked and Obsidian registered the vault under. vault=<name>&file=<relative
-        # path> sidesteps this: Obsidian just needs a vault already open under that name, and
-        # resolves the file relative to it the same way it resolves a wikilink.
-        vault_root = Path(self.settings.vault).expanduser().resolve()
-        try:
-            relative = Path(note).resolve().relative_to(vault_root)
-        except ValueError:
-            QMessageBox.warning(
-                self,
-                "Не удалось открыть в Obsidian",
-                "Путь заметки не совпадает с текущим хранилищем в настройках. "
-                "Нажмите «Экспортировать снова», затем повторите попытку.",
-            )
+        # Ask Obsidian which vaults it knows rather than guessing a name from the
+        # settings folder: the name only matches if the user opened that exact folder
+        # as a vault, and a note can also live inside a vault registered higher up.
+        url = obsidian.note_url(note)
+        if url and QDesktopServices.openUrl(QUrl(url)):
             return
-        file_param = relative.with_suffix("").as_posix()
-        url = f"obsidian://open?vault={quote(vault_root.name, safe='')}&file={quote(file_param, safe='')}"
-        if not QDesktopServices.openUrl(QUrl(url)):
-            QMessageBox.warning(
-                self,
-                "Не удалось открыть в Obsidian",
-                "Проверьте, что Obsidian установлен и хранилище хотя бы раз было открыто "
-                f"внутри самого приложения Obsidian (Файл → Открыть хранилище → «{vault_root.name}»). "
-                "Без этого шага ссылка obsidian:// не находит хранилище, даже если папка есть на диске.",
+        folder = Path(self.settings.vault).expanduser()
+        registered = "\n".join(f"• {location}" for _, location in obsidian.vaults())
+        message = (
+            "Obsidian не знает хранилища с этой заметкой.\n\n"
+            f"Заметка лежит в {folder}. Откройте Obsidian → «Открыть папку как хранилище» "
+            "и выберите эту папку — одного наличия папки на диске недостаточно, "
+            "ссылка obsidian:// работает только с зарегистрированным хранилищем."
+        )
+        if registered:
+            message += "\n\nСейчас Obsidian знает такие хранилища:\n" + registered
+        elif not obsidian.config_path().is_file():
+            message = (
+                "Не найден конфиг Obsidian — похоже, приложение не установлено или ни разу "
+                f"не запускалось. Заметки лежат в {folder} и открываются любым "
+                "Markdown-редактором."
             )
+        box = QMessageBox(self)
+        box.setWindowTitle("Не удалось открыть в Obsidian")
+        box.setText(message)
+        box.addButton("Показать папку", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Закрыть", QMessageBox.ButtonRole.RejectRole)
+        if box.exec() == 0:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(note).parent)))
 
     def closeEvent(self, event):
         if self.live_recorder is not None:
