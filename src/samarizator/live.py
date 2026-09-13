@@ -35,6 +35,22 @@ SOURCE_LABELS = {
     BOTH: "микрофон и системный звук",
 }
 
+# Short form for record titles, which have to stay readable in a narrow list.
+SOURCE_TAGS = {MICROPHONE: "микрофон", SYSTEM: "система", BOTH: "микрофон + система"}
+
+
+def recording_title(source, stem):
+    """`live-2026-09-13_16-50-44-ab12cd34` → `Live 13.09 16:50 · микрофон + система`."""
+    moment = stem.removeprefix("live-").rsplit("-", 1)[0]
+    try:
+        date, clock = moment.split("_")
+        year, month, day = date.split("-")
+        hour, minute, _ = clock.split("-")
+        when = f"{day}.{month} {hour}:{minute}"
+    except ValueError:
+        when = moment
+    return f"Live {when} · {SOURCE_TAGS.get(source, source)}"
+
 # Inputs that can carry the Mac output stream. macOS exposes no built-in one:
 # the user installs a loopback driver or builds an aggregate device themselves.
 LOOPBACK_HINTS = (

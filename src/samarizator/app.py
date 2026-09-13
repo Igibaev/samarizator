@@ -10,7 +10,14 @@ from pathlib import Path
 from urllib.parse import quote
 
 from PySide6.QtCore import QLockFile, Qt, QThread, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QDesktopServices, QPalette
+from PySide6.QtGui import (
+    QColor,
+    QDesktopServices,
+    QKeySequence,
+    QPainter,
+    QPalette,
+    QShortcut,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -28,6 +35,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QSpinBox,
     QSplitter,
     QTableWidget,
@@ -53,6 +61,7 @@ from .live import (
     audio_devices,
     capture_supported,
     describe_tracks,
+    recording_title,
     system_audio_devices,
 )
 from .playback import evidence_intervals
@@ -83,6 +92,54 @@ STATUS = {
     "error": "Ошибка",
     "interrupted": "Приостановлена",
 }
+
+
+NEXT_STEP = {
+    "new": "Нажмите «1. Распознать» — текст создаётся на этом Mac, аудио никуда не уходит.",
+    "recording": "Идёт запись, готовые фрагменты распознаются по ходу. "
+    "Нажмите «Live: остановить», когда встреча закончится.",
+    "transcribing": "Идёт распознавание. Кнопки шагов включатся, когда оно закончится.",
+    "retrying": "Идёт повторный проход по отмеченным репликам.",
+    "review": "Проверьте отмеченные реплики, при необходимости исправьте текст — "
+    "затем «2. Создать сводку».",
+    "summarizing": "Создаётся сводка. Текст ушёл на выбранный API, аудио не отправляется.",
+    "done": "Готово. Сводки — во вкладках выше, «Открыть в Obsidian» — внизу.",
+    "error": "Шаг не выполнен. Причина ниже; после исправления запустите его заново.",
+    "interrupted": "Обработка остановлена. Тот же шаг продолжит с места остановки, "
+    "уже готовые фрагменты сохранены.",
+}
+
+
+def explain(button, enabled, reason=""):
+    """Enable a button and say why when it stays off: a dead control must not be a riddle."""
+    button.setEnabled(bool(enabled))
+    if not enabled and reason:
+        button.setToolTip(reason)
+    elif not enabled:
+        button.setToolTip("")
+    return enabled
+
+
+class ElidedLabel(QLabel):
+    """Shortens its own text with an ellipsis to whatever width it ends up with.
+
+    Measuring at build time is wrong: the sidebar has no final width yet, and it
+    changes again whenever the splitter moves.
+    """
+
+    def __init__(self, text="", parent=None):
+        super().__init__(text, parent)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self._full = text
+
+    def setText(self, text):
+        self._full = text
+        super().setText(text)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        elided = self.fontMetrics().elidedText(self._full, Qt.TextElideMode.ElideRight, self.width())
+        painter.drawText(self.rect(), int(self.alignment()) | int(Qt.AlignmentFlag.AlignVCenter), elided)
 
 
 class Job(QThread):
@@ -423,8 +480,8 @@ class Window(QMainWindow):
         self.live_button = QPushButton("● Live: начать запись")
         self.live_button.setToolTip(
             "Записывает локально выбранный в настройках источник: микрофон, системный звук или оба "
-            "раздельными каналами. После остановки запись добавляется и запускается распознавание. "
-            "Текст и сводка по ходу записи пока не создаются."
+            "раздельными каналами. Готовые фрагменты распознаются прямо во время записи, поэтому "
+            "после остановки остаётся только хвост."
         )
         self.live_button.clicked.connect(self.toggle_live)
         side.addWidget(self.live_button)
@@ -433,7 +490,11 @@ class Window(QMainWindow):
         self.search.textChanged.connect(self.refresh_list)
         side.addWidget(self.search)
         self.list = QListWidget()
+        self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.list.currentItemChanged.connect(self.select)
+        remove = QShortcut(QKeySequence.StandardKey.Delete, self.list)
+        remove.setContext(Qt.ShortcutContext.WidgetShortcut)
+        remove.activated.connect(lambda: self.delete_meeting())
         side.addWidget(self.list)
         split.addWidget(sidebar)
         detail = QWidget()
@@ -479,6 +540,7 @@ class Window(QMainWindow):
         )
         for button in [self.rerun_button, self.copy_error_button]:
             maintenance.addWidget(button)
+        maintenance.addStretch(1)
         body.addLayout(maintenance)
         self.tabs = QTabWidget()
         body.addWidget(self.tabs, 1)
@@ -627,11 +689,10 @@ class Window(QMainWindow):
         self.stop_playback()
         # The meeting exists from the first second so recognition can run alongside
         # the recording; its source moves to the finished file when capture stops.
-        moment = recorder.partial.stem.removeprefix("live-").rsplit("-", 1)[0]
         self.mid = self.store.create(recorder.partial, self.settings)
         self.store.update(
             self.mid,
-            title=f"Live-запись ({SOURCE_LABELS[recorder.source]}) {moment}",
+            title=recording_title(recorder.source, recorder.partial.stem),
             status="recording",
         )
         self.page = 0
@@ -728,10 +789,17 @@ class Window(QMainWindow):
             item.setData(Qt.ItemDataRole.UserRole, meeting["id"])
             row = QWidget()
             row_layout = QHBoxLayout(row)
-            row_layout.setContentsMargins(10, 8, 6, 8)
-            label = QLabel(f"{meeting['title']}\n{STATUS.get(meeting['status'], meeting['status'])}")
-            label.setWordWrap(True)
-            row_layout.addWidget(label, 1)
+            row_layout.setContentsMargins(10, 6, 6, 6)
+            text = QVBoxLayout()
+            text.setSpacing(1)
+            # One line per record keeps a long list scannable; the full title is in the tooltip.
+            label = ElidedLabel(meeting["title"])
+            state = QLabel(STATUS.get(meeting["status"], meeting["status"]))
+            state.setObjectName("rowStatus")
+            text.addWidget(label)
+            text.addWidget(state)
+            row_layout.addLayout(text, 1)
+            row.setToolTip(meeting["title"])
             trash = QPushButton("🗑")
             trash.setObjectName("trashButton")
             trash.setToolTip("Удалить запись")
@@ -796,10 +864,9 @@ class Window(QMainWindow):
             return
         meeting = self.store.meeting(self.mid)
         self.heading.setText(meeting["title"])
-        self.info.setText(
-            f"{STATUS.get(meeting['status'], meeting['status'])} · {stamp(meeting['duration'])} · "
-            "Проверьте отмеченные места перед созданием сводки."
-        )
+        state = STATUS.get(meeting["status"], meeting["status"])
+        length = f" · {stamp(meeting['duration'])}" if meeting["duration"] else ""
+        self.info.setText(f"{state}{length} · {NEXT_STEP.get(meeting['status'], '')}")
         self.error_detail.setText(
             "Причина: " + meeting["error"]
             if meeting["error"] and meeting["status"] not in {"transcribing", "summarizing", "retrying"}
@@ -1169,22 +1236,47 @@ class Window(QMainWindow):
         recording = self.live_recorder is not None
         busy = self.job is not None or recording
         ready = self.mid is not None
-        self.settings_button.setEnabled(not busy)
-        self.add_button.setEnabled(not busy)
+        working = "Дождитесь конца текущей обработки." if self.job else "Идёт запись."
+        pick = "Выберите запись в списке слева."
+        explain(self.settings_button, not busy, working)
+        explain(self.add_button, not busy, working)
         self.search.setEnabled(not busy)
         self.list.setEnabled(not busy)
         # Stopping must stay possible while catch-up recognition is running.
-        self.live_button.setEnabled(self.job is None or recording)
+        explain(self.live_button, self.job is None or recording, working)
         self.live_button.setText("■ Live: остановить и распознать" if recording else "● Live: начать запись")
         complete = ready and bool(self.store.checkpoint(self.mid, "asr_complete", 0))
-        self.transcribe.setText("Распознавание завершено" if complete else "1. Распознать / продолжить")
-        self.transcribe.setEnabled(ready and not busy and not complete)
-        self.rerun_button.setEnabled(ready and not busy)
-        self.copy_error_button.setEnabled(bool(self.error_detail.text()))
-        self.retry.setEnabled(ready and not busy and bool(self.store.checkpoint(self.mid, "asr_complete", 0)))
-        self.summarize.setEnabled(bool(complete) and not busy)
-        self.cancel.setEnabled(busy)
-        self.save_segment.setEnabled(ready and not busy)
+        explain(
+            self.transcribe,
+            ready and not busy and not complete,
+            "Распознавание уже завершено. Для нового прохода — «Распознать заново»."
+            if complete
+            else (working if busy else pick),
+        )
+        explain(self.rerun_button, ready and not busy, working if busy else pick)
+        # An error button with nothing to copy is noise; it appears only with an error.
+        self.copy_error_button.setVisible(bool(self.error_detail.text()))
+        explain(self.copy_error_button, bool(self.error_detail.text()))
+        explain(
+            self.retry,
+            ready and not busy and complete,
+            working if busy else ("Сначала распознайте запись целиком." if ready else pick),
+        )
+        explain(
+            self.summarize,
+            bool(complete) and not busy,
+            working if busy else ("Сначала распознайте запись целиком." if ready else pick),
+        )
+        explain(self.cancel, busy, "Сейчас нечего останавливать.")
+        explain(self.save_segment, ready and not busy, working if busy else pick)
+        # Exactly one step is highlighted, so the next action is never a guess.
+        step = self.summarize if complete else self.transcribe
+        for button in (self.transcribe, self.summarize):
+            primary = button is step and button.isEnabled()
+            if button.property("primary") != primary:
+                button.setProperty("primary", primary)
+                button.style().unpolish(button)
+                button.style().polish(button)
         index = self.table.currentRow()
         has_retry = (
             ready
@@ -1196,7 +1288,10 @@ class Window(QMainWindow):
         has_row = ready and hasattr(self, "visible_rows") and 0 <= index < len(self.visible_rows)
         self.undo_retry_button.setEnabled(bool(has_row) and not busy)
         self.play_button.setEnabled(has_row)
-        self.stop_button.setEnabled(bool(self.player_proc) and self.player_proc.poll() is None)
+        playing = bool(self.player_proc) and self.player_proc.poll() is None
+        self.stop_button.setEnabled(playing)
+        self.stop_button.setVisible(playing)
+        self.playback_label.setVisible(playing)
         self.obsidian.setEnabled(
             ready
             and bool(self.store.meeting(self.mid)["note"])
@@ -1253,11 +1348,8 @@ class Window(QMainWindow):
         event.accept()
 
 
-def main():
-    os.umask(0o077)
-    app = QApplication(sys.argv)
-    app.setApplicationName("Samarizator")
-    app.setStyle("Fusion")
+def apply_theme(app):
+    """Palette and stylesheet. Separate from main() so a rendered window can be checked."""
     palette = QPalette()
     for role, color in [
         (QPalette.ColorRole.Window, "#f4f5f7"),
@@ -1272,25 +1364,38 @@ def main():
     ]:
         palette.setColor(role, QColor(color))
     app.setPalette(palette)
-    lock = QLockFile(str(data_dir() / "app.lock"))
-    lock.setStaleLockTime(0)
-    if not lock.tryLock(100):
-        QMessageBox.information(None, "Samarizator", "Приложение уже запущено.")
-        return 0
     app.setStyleSheet("""
         QWidget { font-size: 13px; }
         QMainWindow { background: #f4f5f7; }
         QLabel#brand { font-size: 25px; font-weight: 700; color: #185c50; padding: 14px 10px; }
         QLabel#heading { font-size: 21px; font-weight: 600; padding: 14px 0; }
+        QLabel#step { color: #3c5a51; }
         QPushButton { padding: 8px 12px; border-radius: 6px; background: #e3ece8; color: #173e35; }
         QPushButton:hover { background: #ccded5; }
         QPushButton:disabled { color: #87968f; background: #edf0ee; }
+        QPushButton[primary="true"] { background: #185c50; color: #ffffff; font-weight: 600; }
+        QPushButton[primary="true"]:hover { background: #145046; }
+        QPushButton[primary="true"]:disabled { background: #cfd8d4; color: #8a9a94; }
         QLineEdit { padding: 7px; }
         QListWidget, QTableWidget, QTextBrowser { background: white; border: 1px solid #d9dfdb; }
         QListWidget::item:selected { background: #d9e9e2; color: #163f33; }
+        QLabel#rowStatus { color: #6b7d76; font-size: 12px; }
         QPushButton#trashButton { padding: 4px; background: transparent; border-radius: 4px; }
         QPushButton#trashButton:hover { background: #f0d3d3; }
     """)
+
+
+def main():
+    os.umask(0o077)
+    app = QApplication(sys.argv)
+    app.setApplicationName("Samarizator")
+    app.setStyle("Fusion")
+    lock = QLockFile(str(data_dir() / "app.lock"))
+    lock.setStaleLockTime(0)
+    if not lock.tryLock(100):
+        QMessageBox.information(None, "Samarizator", "Приложение уже запущено.")
+        return 0
+    apply_theme(app)
     window = Window()
     window.show()
     code = app.exec()
