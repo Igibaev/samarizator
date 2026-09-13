@@ -4,6 +4,7 @@ import math
 import sys
 import wave
 from array import array
+from pathlib import Path
 
 from .media import extract
 
@@ -37,7 +38,12 @@ def diagnose(path):
         warnings.append("тихий сигнал или много пауз")
     if clipped / max(1, total) > 0.001:
         warnings.append("возможное искажение: отсечение пиков")
-    return dict(rms_dbfs=round(dbfs, 1), clipped_fraction=clipped / max(1, total), warnings=warnings)
+    return dict(
+        rms_dbfs=round(dbfs, 1),
+        peak=peak / 32768,
+        clipped_fraction=clipped / max(1, total),
+        warnings=warnings,
+    )
 
 
 def nearest_pause(path, target, radius=6):
@@ -81,3 +87,19 @@ def plan_chunks(source, duration, seconds, work, pauses=False):
             bounds.append(cut)
     bounds.append(duration)
     return list(zip(bounds, bounds[1:]))
+
+
+def track_levels(path, tracks, work, seconds=None):
+    """Measure each channel of a live recording separately.
+
+    A merged file hides which source went missing: system audio can be loud while
+    the microphone track is digital silence, and the mix still sounds fine.
+    `seconds` bounds the work, because this analysis walks samples in Python.
+    """
+    levels = []
+    for channel, name in enumerate(tracks):
+        mono = Path(work) / f"track-{channel}.wav"
+        extract(path, mono, Path(work), duration=seconds, channel=channel)
+        levels.append(dict(track=name, channel=channel, **diagnose(mono)))
+        mono.unlink(missing_ok=True)
+    return levels

@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import time
 import uuid
+import wave
 from collections import namedtuple
 from datetime import datetime
 from pathlib import Path
@@ -447,3 +448,67 @@ class LiveRecorder:
             f"Не удалось записать выбранный источник ({SOURCE_LABELS[self.source]}). "
             "Проверьте устройства ввода и разрешения macOS."
         )
+
+
+TRACK_SAMPLE_SECONDS = 30
+
+
+def describe_tracks(path, tracks, names=(), seconds=TRACK_SAMPLE_SECONDS):
+    """Level report per track of a finished live recording, and which are silent.
+
+    Only the first `seconds` are measured: enough to catch a dead source, bounded
+    enough to run right after a long recording without freezing the window.
+    """
+    from tempfile import TemporaryDirectory
+
+    from .audio_quality import track_levels
+
+    labels = {MICROPHONE: "микрофон", SYSTEM: "системный звук"}
+    with TemporaryDirectory() as tmp:
+        levels = track_levels(path, tracks, tmp, seconds=seconds)
+    lines, silent = [], []
+    for level in levels:
+        name = labels.get(level["track"], level["track"])
+        # Naming the device turns "no microphone sound" into "this input gave nothing".
+        device = names[level["channel"]] if level["channel"] < len(names) else ""
+        titled = f"{name} ({device})" if device else name
+        state = "тишина" if level["peak"] == 0 else f"пик {level['peak']:.3f}"
+        lines.append(f"канал {level['channel'] + 1} · {titled}: RMS {level['rms_dbfs']} dBFS, {state}")
+        if level["peak"] == 0:
+            silent.append(titled)
+    return "\n".join(lines), silent
+
+
+def check_recording(path):
+    """CLI: report what actually landed in each channel of a live recording."""
+    path = Path(path)
+    if not path.is_file():
+        print(f"Файл не найден: {path}")
+        return 1
+    with wave.open(str(path)) as wav:
+        channels = wav.getnchannels()
+        duration = wav.getnframes() / max(1, wav.getframerate())
+    tracks = (MICROPHONE, SYSTEM) if channels == 2 else (MICROPHONE,)
+    measured = min(duration, 120)
+    print(f"{path.name}: каналов {channels}, длительность {duration:.1f} с")
+    print(f"Измерены первые {measured:.0f} с каждой дорожки:")
+    report, silent = describe_tracks(path, tracks, seconds=measured)
+    print(report)
+    if silent:
+        print("Пустые дорожки: " + ", ".join(silent))
+        return 1
+    print("Все дорожки содержат звук.")
+    return 0
+
+
+def main():
+    import sys
+
+    if len(sys.argv) < 2:
+        print("Использование: python -m samarizator.live <файл-записи.wav>")
+        return 2
+    return check_recording(sys.argv[1])
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

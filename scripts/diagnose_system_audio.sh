@@ -58,7 +58,20 @@ echo "=== 6. Запись целиком через FFmpeg ==="
 .venv/bin/python -m samarizator.screencapture check
 
 echo
-echo "=== 7. Файлы для проверки на слух ==="
+echo "=== 7. Микрофон ==="
+ffmpeg -hide_banner -f avfoundation -list_devices true -i "" 2>&1 | sed -n '/audio devices/,$p'
+MIC_INDEX="${MIC_INDEX:-0}"
+echo "Пишу 5 с со входа :$MIC_INDEX — ГОВОРИТЕ В МИКРОФОН."
+if ffmpeg -v error -y -f avfoundation -i ":$MIC_INDEX" -t 5 -ac 1 -ar 16000 \
+     -c:a pcm_s16le "$OUT/mic.wav" 2>"$OUT/mic.log"; then
+  .venv/bin/python -m samarizator.live "$OUT/mic.wav"
+else
+  echo "FFmpeg не записал микрофон:"
+  cat "$OUT/mic.log"
+fi
+
+echo
+echo "=== 8. Файлы для проверки на слух ==="
 # Raw PCM converted to WAV here: option spellings for raw input differ between
 # FFmpeg builds (ffplay 9 dropped -ac), while a WAV opens in any player.
 for pcm in "$OUT"/*.pcm; do

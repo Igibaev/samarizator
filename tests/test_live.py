@@ -1,3 +1,4 @@
+import shutil
 import time
 
 import pytest
@@ -115,6 +116,7 @@ def test_live_button_adds_recording_and_starts_transcription(tmp_path, monkeypat
         elapsed = 3
         source = "microphone"
         tracks = ("microphone",)
+        inputs = ()
 
         def __init__(self, **kwargs):
             self.kwargs = kwargs
@@ -532,3 +534,53 @@ def test_check_gives_up_at_the_deadline_when_no_audio_arrives(tmp_path, monkeypa
     assert screencapture.check(seconds=1, binary=helper) == 1
     assert time.monotonic() - started < 15
     assert "Аудиобуферы не приходят" in capsys.readouterr().out
+
+
+def stereo_fixture(path, left, right):
+    """Write a two-channel PCM16 file: `left`/`right` amplitudes, 0 meaning silence."""
+    import math
+    import struct
+    import wave
+
+    with wave.open(str(path), "wb") as wav:
+        wav.setparams((2, 2, 16000, 0, "NONE", "not compressed"))
+        frames = bytearray()
+        for index in range(16000 * 2):
+            tone = math.sin(2 * math.pi * 440 * index / 16000)
+            frames += struct.pack("<hh", int(left * tone * 20000), int(right * tone * 20000))
+        wav.writeframes(bytes(frames))
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg required")
+def test_describe_tracks_names_the_silent_source(tmp_path):
+    from samarizator.live import describe_tracks
+
+    recording = tmp_path / "live.wav"
+    stereo_fixture(recording, left=0, right=1)
+    report, silent = describe_tracks(recording, ("microphone", "system"), ["USB Audio", ""])
+    assert silent == ["микрофон (USB Audio)"]
+    # The device name is in the report, so a wrong input is visible, not guessed at.
+    assert "канал 1 · микрофон (USB Audio)" in report and "тишина" in report
+    assert "канал 2 · системный звук" in report and "пик" in report
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg required")
+def test_describe_tracks_reports_both_when_sound_is_present(tmp_path):
+    from samarizator.live import describe_tracks
+
+    recording = tmp_path / "live.wav"
+    stereo_fixture(recording, left=1, right=1)
+    _, silent = describe_tracks(recording, ("microphone", "system"))
+    assert silent == []
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg required")
+def test_check_recording_exit_code_flags_a_dead_track(tmp_path, capsys):
+    from samarizator.live import check_recording
+
+    recording = tmp_path / "live.wav"
+    stereo_fixture(recording, left=0, right=1)
+    assert check_recording(recording) == 1
+    assert "Пустые дорожки" in capsys.readouterr().out
+    stereo_fixture(recording, left=1, right=1)
+    assert check_recording(recording) == 0

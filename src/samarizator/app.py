@@ -52,6 +52,7 @@ from .live import (
     LiveRecorder,
     audio_devices,
     capture_supported,
+    describe_tracks,
     system_audio_devices,
 )
 from .playback import evidence_intervals
@@ -647,8 +648,31 @@ class Window(QMainWindow):
         self.refresh_list()
         self.progress.setText("Live-запись сохранена локально.")
         self.controls()
+        self.report_live_tracks(path, recorder.tracks, [e.name for e in recorder.inputs])
         if start_transcription:
             self.start("transcribe")
+
+    def report_live_tracks(self, path, tracks, names=()):
+        """Say which source made it into the file, instead of leaving it to the ear."""
+        if len(tracks) < 2:
+            return
+        try:
+            report, silent = describe_tracks(path, tracks, names)
+        except (OSError, ValueError, RuntimeError) as exc:
+            self.progress.setText(f"Запись сохранена, проверить дорожки не удалось: {exc}")
+            return
+        self.progress.setText("Live-запись сохранена локально. " + report.replace("\n", " · "))
+        if silent:
+            QMessageBox.warning(
+                self,
+                "Live-запись",
+                "В записи нет звука на дорожке: "
+                + ", ".join(silent)
+                + ".\n\n"
+                + report
+                + "\n\nЗапись сохранена, распознавание продолжится. Измерены первые "
+                "30 секунд: если источник молчал в начале, предупреждение ложное.",
+            )
 
     def refresh_list(self):
         current = self.mid
