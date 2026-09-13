@@ -7,15 +7,26 @@ import shutil
 import subprocess
 import time
 import uuid
+from collections import namedtuple
 from datetime import datetime
 from pathlib import Path
 
+from . import screencapture
 from .config import data_dir
 
 MICROPHONE = "microphone"
 SYSTEM = "system"
 BOTH = "both"
 LIVE_SOURCES = (MICROPHONE, SYSTEM, BOTH)
+
+# How system audio is obtained: Apple's own capture, or a loopback input device.
+NATIVE = "screencapturekit"
+DEVICE = "device"
+SYSTEM_BACKENDS = (NATIVE, DEVICE)
+
+# `index` is the AVFoundation input number; native capture has none and arrives
+# on a pipe from the ScreenCaptureKit helper instead.
+Input = namedtuple("Input", "kind index name native")
 
 SOURCE_LABELS = {
     MICROPHONE: "микрофон",
@@ -143,11 +154,15 @@ class LiveRecorder:
         source=MICROPHONE,
         microphone_device="",
         system_device="",
+        system_backend=NATIVE,
+        helper=None,
     ):
         if not capture_supported():
             raise LiveCaptureError("Live-запись пока поддерживается только на macOS.")
         if source not in LIVE_SOURCES:
             raise LiveCaptureError("Неизвестный источник live-записи.")
+        if system_backend not in SYSTEM_BACKENDS:
+            raise LiveCaptureError("Неизвестный способ захвата системного звука.")
         self.ffmpeg = ffmpeg or shutil.which("ffmpeg")
         if not self.ffmpeg:
             raise LiveCaptureError("FFmpeg не найден. Запустите ./start.sh для установки.")
@@ -155,32 +170,44 @@ class LiveRecorder:
         self.folder.mkdir(parents=True, exist_ok=True)
         self.folder.chmod(0o700)
         self.source = source
+        self.system_backend = system_backend
+        self.helper = Path(helper) if helper else screencapture.binary_path()
         self.inputs = self._inputs(device_index, microphone_device, system_device)
-        self.device_index = self.inputs[0][1]
+        self.device_index = self.inputs[0].index
         stamp = datetime.now().astimezone().strftime("%Y-%m-%d_%H-%M-%S")
         token = uuid.uuid4().hex[:8]
         self.path = self.folder / f"live-{stamp}-{token}.wav"
         self.partial = self.folder / f"live-{stamp}-{token}.partial.wav"
         self.log = self.folder / f"live-{stamp}-{token}.log"
+        self.helper_log = self.folder / f"live-{stamp}-{token}.helper.log"
         self.process = None
+        self.helper_process = None
         self.started = None
         self._log_handle = None
+        self._helper_log_handle = None
         self._popen = popen_factory or subprocess.Popen
 
     def _inputs(self, device_index, microphone_device, system_device):
-        """Return [(kind, index, name)] in channel order: microphone first, system second."""
+        """Inputs in channel order: microphone first, system audio second."""
         if self.source == MICROPHONE and device_index is not None:
-            return [(MICROPHONE, int(device_index), "")]
-        devices = audio_devices(self.ffmpeg)
+            return [Input(MICROPHONE, int(device_index), "", False)]
         kinds = [MICROPHONE] if self.source == MICROPHONE else (
             [SYSTEM] if self.source == SYSTEM else [MICROPHONE, SYSTEM]
         )
+        native = self.system_backend == NATIVE
+        if kinds == [SYSTEM] and native:
+            return [Input(SYSTEM, None, "ScreenCaptureKit", True)]
+        devices = audio_devices(self.ffmpeg)
         wanted = {MICROPHONE: microphone_device, SYSTEM: system_device}
         resolved = []
         for kind in kinds:
+            if kind == SYSTEM and native:
+                resolved.append(Input(SYSTEM, None, "ScreenCaptureKit", True))
+                continue
             index, name = resolve_device(devices, wanted[kind], kind)
-            resolved.append((kind, index, name))
-        if len({index for _, index, _ in resolved}) < len(resolved):
+            resolved.append(Input(kind, index, name, False))
+        taken = [entry.index for entry in resolved if entry.index is not None]
+        if len(set(taken)) < len(taken):
             raise LiveCaptureError(
                 "Микрофон и системный звук указывают на одно устройство. Выберите разные входы, "
                 "иначе дорожки будут одинаковыми."
@@ -190,7 +217,11 @@ class LiveRecorder:
     @property
     def tracks(self):
         """Channel layout of the produced WAV, in order."""
-        return tuple(kind for kind, _, _ in self.inputs)
+        return tuple(entry.kind for entry in self.inputs)
+
+    @property
+    def native_capture(self):
+        return any(entry.native for entry in self.inputs)
 
     @property
     def recording(self):
@@ -200,10 +231,25 @@ class LiveRecorder:
     def elapsed(self):
         return max(0.0, time.monotonic() - self.started) if self.started is not None else 0.0
 
-    def _args(self):
+    def _args(self, pipe_fd=None):
         args = [self.ffmpeg, "-hide_banner", "-loglevel", "error", "-nostats", "-y"]
-        for _, index, _ in self.inputs:
-            args += ["-thread_queue_size", "512", "-f", "avfoundation", "-i", f":{index}"]
+        for entry in self.inputs:
+            args += ["-thread_queue_size", "512"]
+            if entry.native:
+                # Raw PCM from the ScreenCaptureKit helper; FFmpeg cannot probe a pipe,
+                # so the format is stated explicitly and must match the helper's output.
+                args += [
+                    "-f",
+                    screencapture.SAMPLE_FORMAT,
+                    "-ar",
+                    str(screencapture.SAMPLE_RATE),
+                    "-ac",
+                    str(screencapture.CHANNELS),
+                    "-i",
+                    f"pipe:{pipe_fd}",
+                ]
+            else:
+                args += ["-f", "avfoundation", "-i", f":{entry.index}"]
         args += ["-vn"]
         if len(self.inputs) == 1:
             args += ["-ac", "1"]
@@ -231,28 +277,103 @@ class LiveRecorder:
             raise LiveCaptureError("Live-запись уже запущена.")
         env = os.environ.copy()
         env.pop("SAMARIZATOR_API_KEY", None)
+        if self.native_capture:
+            self._check_helper()
+        read_fd, write_fd = os.pipe() if self.native_capture else (None, None)
         self._log_handle = self.log.open("wb")
         try:
+            # FFmpeg starts first and blocks on an empty pipe; the helper then fills it.
             self.process = self._popen(
-                self._args(),
+                self._args(read_fd),
                 stdin=subprocess.PIPE,
                 stdout=subprocess.DEVNULL,
                 stderr=self._log_handle,
                 env=env,
                 start_new_session=True,
+                **({"pass_fds": (read_fd,)} if read_fd is not None else {}),
             )
         except (OSError, ValueError) as exc:
+            self._close_pipe(read_fd, write_fd)
             self._close_log()
             raise LiveCaptureError(
                 f"Не удалось запустить захват ({SOURCE_LABELS[self.source]}) через FFmpeg."
             ) from exc
+        if read_fd is not None:
+            self._close_fd(read_fd)
+            try:
+                self._start_helper(write_fd, env)
+            except LiveCaptureError:
+                self._close_fd(write_fd)
+                self._stop_ffmpeg()
+                self._close_log()
+                self.process = None
+                self.partial.unlink(missing_ok=True)
+                raise
+            self._close_fd(write_fd)
         self.started = time.monotonic()
         return self.path
+
+    def _check_helper(self):
+        report = screencapture.status(self.helper)
+        if not report["available"]:
+            raise LiveCaptureError(report["message"])
+
+    def _start_helper(self, write_fd, env):
+        self._helper_log_handle = self.helper_log.open("wb")
+        try:
+            self.helper_process = self._popen(
+                [str(self.helper), "capture"],
+                stdin=subprocess.DEVNULL,
+                stdout=write_fd,
+                stderr=self._helper_log_handle,
+                env=env,
+                start_new_session=True,
+            )
+        except (OSError, ValueError) as exc:
+            self._close_helper_log()
+            raise LiveCaptureError(
+                "Не удалось запустить helper системного звука. Пересоберите его через ./start.sh."
+            ) from exc
+
+    @staticmethod
+    def _close_fd(fd):
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+    def _close_pipe(self, read_fd, write_fd):
+        for fd in (read_fd, write_fd):
+            if fd is not None:
+                self._close_fd(fd)
 
     def stop(self, timeout=10):
         if self.process is None:
             raise LiveCaptureError("Live-запись не запущена.")
+        # The helper goes first: closing its end of the pipe is what lets FFmpeg
+        # finish that input cleanly instead of waiting for more audio.
+        helper_problem = self._stop_helper(timeout)
+        self._stop_ffmpeg(timeout)
+        self._close_log()
+        if helper_problem:
+            self.partial.unlink(missing_ok=True)
+            self.log.unlink(missing_ok=True)
+            raise LiveCaptureError(helper_problem)
+        if self.process.returncode != 0:
+            self.partial.unlink(missing_ok=True)
+            raise LiveCaptureError(self._failure_message())
+        if not self.partial.is_file() or self.partial.stat().st_size <= 1024:
+            self.partial.unlink(missing_ok=True)
+            raise LiveCaptureError(self._silence_message())
+        self.partial.replace(self.path)
+        self.log.unlink(missing_ok=True)
+        self.helper_log.unlink(missing_ok=True)
+        return self.path
+
+    def _stop_ffmpeg(self, timeout=10):
         proc = self.process
+        if proc is None:
+            return
         if proc.poll() is None:
             try:
                 proc.stdin.write(b"q\n")
@@ -268,25 +389,43 @@ class LiveRecorder:
                 except subprocess.TimeoutExpired:
                     proc.kill()
                     proc.wait()
-        self._close_log()
-        if proc.returncode != 0:
-            self.partial.unlink(missing_ok=True)
-            raise LiveCaptureError(self._failure_message())
-        if not self.partial.is_file() or self.partial.stat().st_size <= 1024:
-            self.partial.unlink(missing_ok=True)
-            raise LiveCaptureError(self._silence_message())
-        self.partial.replace(self.path)
-        self.log.unlink(missing_ok=True)
-        return self.path
+
+    def _stop_helper(self, timeout=10):
+        """Stop the ScreenCaptureKit helper; return a message if it failed."""
+        proc = self.helper_process
+        if proc is None:
+            return ""
+        if proc.poll() is None:
+            proc.terminate()  # SIGTERM: the helper stops the stream and exits 0.
+            try:
+                proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        self._close_helper_log()
+        detail = self.helper_log.read_text(errors="replace") if self.helper_log.is_file() else ""
+        message = screencapture.failure_message(proc.returncode, detail)
+        self.helper_log.unlink(missing_ok=True)
+        return message
 
     def _close_log(self):
         if self._log_handle is not None:
             self._log_handle.close()
             self._log_handle = None
 
+    def _close_helper_log(self):
+        if self._helper_log_handle is not None:
+            self._helper_log_handle.close()
+            self._helper_log_handle = None
+
     def _silence_message(self):
         if self.source == MICROPHONE:
             return "Микрофон не записал звук. Проверьте выбранный вход и разрешение macOS."
+        if self.native_capture:
+            return (
+                "Запись получилась пустой. macOS отдаёт системный звук только когда он "
+                "действительно играет: проверьте, что во время записи был звук из приложений."
+            )
         return (
             "Запись получилась пустой. Проверьте, что устройство петли выбрано выходом звука "
             "в системных настройках, иначе на его вход ничего не поступает."

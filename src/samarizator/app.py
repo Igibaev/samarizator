@@ -38,11 +38,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from . import screencapture
 from .config import Settings, data_dir, set_api_key
 from .knowledge import stamp
 from .live import (
     BOTH,
+    DEVICE,
     MICROPHONE,
+    NATIVE,
     SOURCE_LABELS,
     SYSTEM,
     LiveCaptureError,
@@ -174,6 +177,21 @@ class SettingsDialog(QDialog):
         source.setCurrentIndex(max(0, source.findData(settings.live_source)))
         self.fields["live_source"] = source
         form.addRow("Источник", source)
+        backend = QComboBox()
+        for value, label in [
+            (NATIVE, "Штатный macOS · ScreenCaptureKit, без драйверов"),
+            (DEVICE, "Устройство петли · BlackHole, Loopback, интерфейс"),
+        ]:
+            backend.addItem(label, value)
+        backend.setCurrentIndex(max(0, backend.findData(settings.live_system_backend)))
+        self.fields["live_system_backend"] = backend
+        form.addRow("Захват системного звука", backend)
+        self.helper = screencapture.status()
+        helper_state = QLabel(
+            ("✓ " if self.helper["available"] else "⚠ ") + self.helper["message"]
+        )
+        helper_state.setWordWrap(True)
+        form.addRow("Состояние helper'а", helper_state)
         self.inputs, self.loopback = self.live_devices()
         for key, label, only_loopback in [
             ("live_microphone_device", "Устройство микрофона", False),
@@ -193,9 +211,13 @@ class SettingsDialog(QDialog):
             self.fields[key] = box
             form.addRow(label, box)
         live_hint = QLabel(
-            "Системный звук macOS не отдаёт как вход сама: нужно устройство петли (BlackHole, "
-            "Loopback или агрегатное устройство в «Настройке Audio-MIDI»), выбранное выходом звука. "
-            "Обход корпоративного запрета приложение не выполняет — согласуйте установку с IT.\n"
+            "Штатный захват берёт системный звук через ScreenCaptureKit: сторонний драйвер не нужен, "
+            "разрешение — «Запись экрана и системного звука», отдельное от микрофонного. Оно "
+            "выдаётся приложению-хозяину: при запуске из Terminal в списке нужно включить Terminal. "
+            "Экран при этом не записывается, helper берёт только звук.\n"
+            "Устройство петли — запасной путь, если штатный захват запрещён политикой компании: "
+            "BlackHole, Loopback или интерфейс с аппаратным loopback, выбранный выходом звука. "
+            "Обход запрета приложение не выполняет — согласуйте вариант с IT.\n"
             "Оба источника пишутся в один WAV: канал 1 — микрофон, канал 2 — системный звук, "
             "на общей шкале времени. Whisper сводит каналы в моно, оба голоса попадают в текст.\n"
             "При выводе в динамики микрофон повторно захватит удалённую речь — используйте наушники."
@@ -204,8 +226,8 @@ class SettingsDialog(QDialog):
         form.addRow(live_hint)
         if self.inputs and not self.loopback:
             missing = QLabel(
-                "Устройства петли сейчас не видно. Установите его и переоткройте настройки, "
-                "либо впишите имя устройства вручную."
+                "Устройства петли сейчас не видно. Оно нужно только для запасного пути: "
+                "установите его и переоткройте настройки либо впишите имя вручную."
             )
             missing.setWordWrap(True)
             form.addRow(missing)
@@ -590,6 +612,7 @@ class Window(QMainWindow):
                 source=self.settings.live_source,
                 microphone_device=self.settings.live_microphone_device,
                 system_device=self.settings.live_system_device,
+                system_backend=self.settings.live_system_backend,
             )
             recorder.start()
         except LiveCaptureError as exc:

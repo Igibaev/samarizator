@@ -1,5 +1,6 @@
 import pytest
 
+from samarizator import screencapture
 from samarizator.live import (
     NO_LOOPBACK_DEVICE,
     LiveCaptureError,
@@ -132,7 +133,10 @@ def test_live_button_adds_recording_and_starts_transcription(tmp_path, monkeypat
     window.settings.live_system_device = "BlackHole 2ch"
     window.toggle_live()
     assert window.live_recorder.kwargs == dict(
-        source="both", microphone_device="", system_device="BlackHole 2ch"
+        source="both",
+        microphone_device="",
+        system_device="BlackHole 2ch",
+        system_backend="screencapturekit",
     )
     assert "остановить" in window.live_button.text().lower()
     window.toggle_live()
@@ -186,6 +190,7 @@ def test_system_only_capture_records_the_loopback_input(tmp_path, monkeypatch):
         ffmpeg="/usr/bin/ffmpeg",
         popen_factory=SuccessfulProcess,
         source="system",
+        system_backend="device",
     )
     recorder.start()
     args = recorder.process.args
@@ -202,6 +207,7 @@ def test_dual_capture_merges_microphone_and_system_into_two_channels(tmp_path, m
         ffmpeg="/usr/bin/ffmpeg",
         popen_factory=SuccessfulProcess,
         source="both",
+        system_backend="device",
         microphone_device="USB Audio",
         system_device="BlackHole 2ch",
     )
@@ -225,6 +231,7 @@ def test_dual_capture_rejects_the_same_device_on_both_tracks(tmp_path, monkeypat
             ffmpeg="/usr/bin/ffmpeg",
             popen_factory=SuccessfulProcess,
             source="both",
+            system_backend="device",
             microphone_device="BlackHole 2ch",
             system_device="BlackHole 2ch",
         )
@@ -245,6 +252,7 @@ def test_empty_system_recording_points_at_the_output_device(tmp_path, monkeypatc
         ffmpeg="/usr/bin/ffmpeg",
         popen_factory=SilentProcess,
         source="system",
+        system_backend="device",
     )
     recorder.start()
     with pytest.raises(LiveCaptureError, match="выходом звука"):
@@ -285,3 +293,165 @@ def test_settings_reject_an_unknown_live_source():
 
     with pytest.raises(ValueError, match="Источник live-записи"):
         Settings(live_source="speakers").validate()
+
+
+class HelperProcess:
+    """Stands in for the ScreenCaptureKit helper: JSON events on stderr, PCM on the pipe."""
+
+    def __init__(self, args, events=b'{"event": "started"}\n', code=None, **kwargs):
+        self.args = args
+        self.stdout_fd = kwargs.get("stdout")
+        self.returncode = code
+        self._code = code
+        kwargs["stderr"].write(events)
+        kwargs["stderr"].flush()
+
+    def poll(self):
+        return self.returncode
+
+    def terminate(self):
+        self.returncode = 0 if self._code is None else self._code
+
+    def wait(self, timeout=None):
+        self.returncode = 0 if self._code is None else self._code
+        return self.returncode
+
+    def kill(self):
+        self.returncode = -9
+
+
+def native_popen(helper_events=b'{"event": "started"}\n', helper_code=None, seen=None):
+    """Dispatch by executable: FFmpeg writes the WAV, the helper only reports events."""
+
+    def factory(args, **kwargs):
+        if seen is not None:
+            seen.append((args, kwargs))
+        if args[0].endswith("system-audio"):
+            return HelperProcess(args, events=helper_events, code=helper_code, **kwargs)
+        return SuccessfulProcess(args, **kwargs)
+
+    return factory
+
+
+def available_helper(monkeypatch, tmp_path):
+    binary = tmp_path / "samarizator-system-audio"
+    binary.write_bytes(b"#!/bin/sh\n")
+    monkeypatch.setattr(
+        screencapture, "status", lambda b=None: dict(available=True, reason="", message="ok")
+    )
+    return binary
+
+
+def test_native_capture_feeds_screencapturekit_audio_into_ffmpeg(tmp_path, monkeypatch):
+    monkeypatch.setenv("SAMARIZATOR_DEV", "1")
+    binary = available_helper(monkeypatch, tmp_path)
+    seen = []
+    recorder = LiveRecorder(
+        folder=tmp_path,
+        ffmpeg="/usr/bin/ffmpeg",
+        popen_factory=native_popen(seen=seen),
+        source="system",
+        helper=binary,
+    )
+    assert recorder.native_capture and recorder.tracks == ("system",)
+    recorder.start()
+    (ffmpeg_args, ffmpeg_kwargs), (helper_args, helper_kwargs) = seen
+    read_fd = ffmpeg_kwargs["pass_fds"][0]
+    assert ffmpeg_args[ffmpeg_args.index("-i") + 1] == f"pipe:{read_fd}"
+    assert "avfoundation" not in ffmpeg_args
+    # The declared format must match what the helper writes, byte for byte.
+    assert ffmpeg_args[ffmpeg_args.index("-f") + 1] == screencapture.SAMPLE_FORMAT
+    assert ffmpeg_args[ffmpeg_args.index("-ar") + 1] == str(screencapture.SAMPLE_RATE)
+    assert helper_args == [str(binary), "capture"]
+    assert helper_kwargs["stdout"] != read_fd  # the helper holds the writing end
+    assert recorder.stop().is_file()
+
+
+def test_native_and_microphone_share_one_stereo_timeline(tmp_path, monkeypatch):
+    monkeypatch.setenv("SAMARIZATOR_DEV", "1")
+    binary = available_helper(monkeypatch, tmp_path)
+    stub_devices(monkeypatch)
+    recorder = LiveRecorder(
+        folder=tmp_path,
+        ffmpeg="/usr/bin/ffmpeg",
+        popen_factory=native_popen(),
+        source="both",
+        helper=binary,
+    )
+    recorder.start()
+    args = recorder.process.args
+    inputs = [args[i + 1] for i, a in enumerate(args) if a == "-i"]
+    assert inputs[0] == ":0" and inputs[1].startswith("pipe:")
+    assert recorder.tracks == ("microphone", "system")
+    assert args[args.index("-filter_complex") + 1].endswith("[t0][t1]amerge=inputs=2[live]")
+    assert recorder.stop().is_file()
+
+
+def test_native_capture_refuses_to_start_without_the_permission(tmp_path, monkeypatch):
+    monkeypatch.setenv("SAMARIZATOR_DEV", "1")
+    monkeypatch.setattr(
+        screencapture,
+        "status",
+        lambda b=None: dict(available=False, reason="permission", message=screencapture.PERMISSION_HELP),
+    )
+    recorder = LiveRecorder(
+        folder=tmp_path,
+        ffmpeg="/usr/bin/ffmpeg",
+        popen_factory=native_popen(),
+        source="system",
+        helper=tmp_path / "helper",
+    )
+    with pytest.raises(LiveCaptureError, match="Запись экрана и системного звука"):
+        recorder.start()
+    assert recorder.process is None and not list(tmp_path.glob("live-*.wav"))
+
+
+def test_helper_failure_is_reported_instead_of_a_truncated_recording(tmp_path, monkeypatch):
+    monkeypatch.setenv("SAMARIZATOR_DEV", "1")
+    binary = available_helper(monkeypatch, tmp_path)
+    events = b'{"event": "error", "code": "permission", "message": "denied"}\n'
+    recorder = LiveRecorder(
+        folder=tmp_path,
+        ffmpeg="/usr/bin/ffmpeg",
+        popen_factory=native_popen(helper_events=events, helper_code=2),
+        source="system",
+        helper=binary,
+    )
+    recorder.start()
+    with pytest.raises(LiveCaptureError, match="Запись экрана и системного звука"):
+        recorder.stop()
+    assert not recorder.path.exists() and not recorder.partial.exists()
+    assert not recorder.helper_log.exists()
+
+
+def test_helper_status_reads_the_probe_answer(tmp_path, monkeypatch):
+    monkeypatch.setenv("SAMARIZATOR_DEV", "1")
+    binary = tmp_path / "samarizator-system-audio"
+    binary.write_bytes(b"#!/bin/sh\n")
+
+    class Result:
+        def __init__(self, stdout):
+            self.stdout, self.returncode = stdout, 0
+
+    granted = screencapture.status(
+        binary, runner=lambda *a, **k: Result('{"permission": "granted", "supported": true}')
+    )
+    assert granted["available"]
+    denied = screencapture.status(
+        binary, runner=lambda *a, **k: Result('{"permission": "denied", "supported": false}')
+    )
+    assert not denied["available"] and denied["reason"] == "permission"
+    broken = screencapture.status(binary, runner=lambda *a, **k: Result("not json"))
+    assert not broken["available"] and broken["reason"] == "probe-failed"
+
+
+def test_missing_helper_binary_explains_how_to_build_it(tmp_path, monkeypatch):
+    monkeypatch.setenv("SAMARIZATOR_DEV", "1")
+    report = screencapture.status(tmp_path / "absent")
+    assert not report["available"] and report["reason"] == "not-built"
+    assert "start.sh" in report["message"]
+
+
+def test_helper_exit_without_an_event_still_produces_a_message():
+    assert screencapture.failure_message(0, "") == ""
+    assert "журнал" in screencapture.failure_message(3, "не json")

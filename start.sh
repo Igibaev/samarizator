@@ -21,6 +21,11 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
   if [[ ${#packages[@]} -gt 0 ]]; then brew install "${packages[@]}"; fi
 fi
 uv sync --frozen --python 3.12
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  # System audio through Apple's ScreenCaptureKit. Failure here is not fatal:
+  # the microphone and the loopback-device path keep working without the helper.
+  .venv/bin/python -m samarizator.screencapture || true
+fi
 if [[ "${SAMARIZATOR_SKIP_DOWNLOAD:-0}" != "1" ]]; then
   .venv/bin/python -m samarizator.setup_models "$@"
 elif [[ $# -gt 0 ]]; then
