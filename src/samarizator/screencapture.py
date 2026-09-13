@@ -11,6 +11,7 @@ launched from `start.sh` the prompt names Terminal, not Samarizator.
 import json
 import os
 import platform
+import select
 import shutil
 import subprocess
 import time
@@ -201,8 +202,12 @@ def check(seconds=5, binary=None):
         received = 0
         deadline = time.monotonic() + seconds
         try:
-            while time.monotonic() < deadline:
-                chunk = proc.stdout.read(65536)
+            # select, not a plain read: a helper that sends nothing must end the check
+            # at the deadline instead of blocking the diagnosis forever.
+            while (remaining := deadline - time.monotonic()) > 0:
+                if not select.select([proc.stdout], [], [], min(0.5, remaining))[0]:
+                    continue
+                chunk = proc.stdout.read1(65536)
                 if not chunk:
                     break
                 received += len(chunk)

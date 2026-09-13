@@ -1,3 +1,5 @@
+import time
+
 import pytest
 
 from samarizator import screencapture
@@ -509,3 +511,24 @@ def test_capture_stats_track_the_highest_reported_counters():
     # An error event carries its progress in a nested object.
     failed = '{"event": "error", "code": "pipe-closed", "progress": {"buffers": 3, "bytes": 30}}\n'
     assert screencapture.capture_stats(failed)["bytes"] == 30
+
+
+def test_check_gives_up_at_the_deadline_when_no_audio_arrives(tmp_path, monkeypatch, capsys):
+    """A helper that starts but sends nothing must not block the diagnosis."""
+    monkeypatch.setenv("SAMARIZATOR_DEV", "1")
+    monkeypatch.setenv("SAMARIZATOR_HOME", str(tmp_path))
+    helper = tmp_path / "mute-helper"
+    helper.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys, time\n"
+        'sys.stderr.write(\'{"event": "started"}\\n\'); sys.stderr.flush()\n'
+        "time.sleep(60)\n"
+    )
+    helper.chmod(0o755)
+    monkeypatch.setattr(
+        screencapture, "status", lambda b=None: dict(available=True, reason="", message="ok")
+    )
+    started = time.monotonic()
+    assert screencapture.check(seconds=1, binary=helper) == 1
+    assert time.monotonic() - started < 15
+    assert "Аудиобуферы не приходят" in capsys.readouterr().out

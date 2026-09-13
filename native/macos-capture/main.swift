@@ -85,9 +85,7 @@ final class SystemAudioOutput: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer buffer: CMSampleBuffer, of type: SCStreamOutputType) {
-        // Screen frames are requested only because ScreenCaptureKit has no audio-only
-        // stream, and some macOS builds deliver audio only while video is consumed.
-        guard type == .audio else { return }
+        guard type == .audio else { return }  // only reachable with --with-video
         guard buffer.isValid, buffer.numSamples > 0 else { return }
         do {
             try buffer.withAudioBufferList { list, _ in
@@ -135,7 +133,9 @@ struct Options {
     var seconds: Int = 0          // 0 = run until stopped
     var width = 128
     var height = 72
-    var videoOutput = true        // consume screen frames alongside audio
+    // Off by default: measured on macOS 15.6.1, registering a .screen output stops
+    // audio buffers from arriving at all (0 buffers over 5 s, vs 262 without it).
+    var videoOutput = false
     var excludeSelf = true
 
     /// Flags exist so one binary can A/B the settings under suspicion on a real Mac,
@@ -153,8 +153,8 @@ struct Options {
                     options.width = w
                     options.height = h
                 }
-            case "--no-video":
-                options.videoOutput = false
+            case "--with-video":
+                options.videoOutput = true
             case "--include-self":
                 options.excludeSelf = false
             default:
@@ -180,9 +180,9 @@ func audioConfiguration(_ options: Options) -> SCStreamConfiguration {
     config.sampleRate = sampleRate
     config.channelCount = 2
     config.excludesCurrentProcessAudio = options.excludeSelf
-    // ScreenCaptureKit has no audio-only stream. Keep the video side small and slow,
-    // but not degenerate: 2x2 frames are rejected by some display pipelines, and a
-    // stream that never produces a frame can stop delivering audio as well.
+    // ScreenCaptureKit has no audio-only stream, so a video size is still required.
+    // Nothing reads those frames; 2x2 is avoided because degenerate sizes are rejected
+    // by some display pipelines.
     config.width = options.width
     config.height = options.height
     config.minimumFrameInterval = CMTime(value: 1, timescale: 2)
@@ -248,7 +248,7 @@ func capture(_ options: Options) async -> Never {
     do {
         try stream.addStreamOutput(output, type: .audio, sampleHandlerQueue: DispatchQueue(label: "samarizator.system-audio"))
         if options.videoOutput {
-            // Registered and immediately discarded: no screen content is stored or forwarded.
+            // Kept only as a diagnostic switch: frames are discarded, never stored.
             try stream.addStreamOutput(output, type: .screen, sampleHandlerQueue: DispatchQueue(label: "samarizator.discard-video"))
         }
         try await stream.startCapture()
@@ -325,7 +325,7 @@ Task {
         emit("error", [
             "code": "usage",
             "message": "Использование: samarizator-system-audio [probe|capture] "
-                + "[--seconds N] [--size WxH] [--no-video] [--include-self]",
+                + "[--seconds N] [--size WxH] [--with-video] [--include-self]",
         ])
         exit(captureFailed)
     }

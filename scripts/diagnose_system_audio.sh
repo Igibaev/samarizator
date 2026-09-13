@@ -40,8 +40,8 @@ run_variant() {
     "$(grep -o '"peak":[^,}]*' "$OUT/$name.log" | tail -1)"
 }
 
-run_variant "default"        # как в приложении
-run_variant "no-video"       --no-video        # без выхода .screen
+run_variant "default"        # как в приложении: без выхода .screen
+run_variant "with-video"     --with-video      # регрессия: на 15.6.1 глушит аудио
 run_variant "size-2x2"       --size 2x2        # вырожденный кадр
 run_variant "size-1080p"     --size 1920x1080  # обычный кадр
 run_variant "include-self"   --include-self    # не исключать свой звук
