@@ -1,6 +1,13 @@
 import pytest
 
-from samarizator.live import LiveCaptureError, LiveRecorder, parse_avfoundation_audio_devices
+from samarizator.live import (
+    NO_LOOPBACK_DEVICE,
+    LiveCaptureError,
+    LiveRecorder,
+    parse_avfoundation_audio_devices,
+    resolve_device,
+    system_audio_devices,
+)
 
 
 class Stdin:
@@ -103,6 +110,11 @@ def test_live_button_adds_recording_and_starts_transcription(tmp_path, monkeypat
     class Recorder:
         recording = True
         elapsed = 3
+        source = "microphone"
+        tracks = ("microphone",)
+
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
 
         def start(self):
             return recorded
@@ -116,7 +128,12 @@ def test_live_button_adds_recording_and_starts_transcription(tmp_path, monkeypat
     window = Window()
     phases = []
     monkeypatch.setattr(window, "start", phases.append)
+    window.settings.live_source = "both"
+    window.settings.live_system_device = "BlackHole 2ch"
     window.toggle_live()
+    assert window.live_recorder.kwargs == dict(
+        source="both", microphone_device="", system_device="BlackHole 2ch"
+    )
     assert "остановить" in window.live_button.text().lower()
     window.toggle_live()
     assert phases == ["transcribe"]
@@ -126,3 +143,145 @@ def test_live_button_adds_recording_and_starts_transcription(tmp_path, monkeypat
     window.close()
     window.deleteLater()
     app.processEvents()
+
+
+DEVICES = [(0, "MacBook Pro Microphone"), (1, "BlackHole 2ch"), (2, "USB Audio")]
+
+
+def stub_devices(monkeypatch, devices=DEVICES):
+    monkeypatch.setattr("samarizator.live.audio_devices", lambda ffmpeg: list(devices))
+
+
+def test_system_audio_devices_match_loopback_drivers_only():
+    assert system_audio_devices(DEVICES) == [(1, "BlackHole 2ch")]
+    assert system_audio_devices([(0, "Aggregate Device"), (1, "Loopback Audio")]) == [
+        (0, "Aggregate Device"),
+        (1, "Loopback Audio"),
+    ]
+
+
+def test_resolve_device_prefers_saved_name_over_index():
+    assert resolve_device(DEVICES, "USB Audio", "microphone") == (2, "USB Audio")
+    assert resolve_device(DEVICES, "", "system") == (1, "BlackHole 2ch")
+    assert resolve_device(DEVICES, "", "microphone") == (0, "MacBook Pro Microphone")
+
+
+def test_resolve_device_reports_missing_name_with_available_inputs():
+    with pytest.raises(LiveCaptureError, match="USB Headset"):
+        resolve_device(DEVICES, "USB Headset", "microphone")
+
+
+def test_missing_loopback_device_explains_setup_without_offering_a_bypass():
+    with pytest.raises(LiveCaptureError) as error:
+        resolve_device([(0, "MacBook Pro Microphone")], "", "system")
+    assert str(error.value) == NO_LOOPBACK_DEVICE
+    assert "обход" in NO_LOOPBACK_DEVICE.casefold()
+
+
+def test_system_only_capture_records_the_loopback_input(tmp_path, monkeypatch):
+    monkeypatch.setenv("SAMARIZATOR_DEV", "1")
+    stub_devices(monkeypatch)
+    recorder = LiveRecorder(
+        folder=tmp_path,
+        ffmpeg="/usr/bin/ffmpeg",
+        popen_factory=SuccessfulProcess,
+        source="system",
+    )
+    recorder.start()
+    args = recorder.process.args
+    assert args.count("-i") == 1 and args[args.index("-i") + 1] == ":1"
+    assert recorder.tracks == ("system",)
+    assert recorder.stop().is_file()
+
+
+def test_dual_capture_merges_microphone_and_system_into_two_channels(tmp_path, monkeypatch):
+    monkeypatch.setenv("SAMARIZATOR_DEV", "1")
+    stub_devices(monkeypatch)
+    recorder = LiveRecorder(
+        folder=tmp_path,
+        ffmpeg="/usr/bin/ffmpeg",
+        popen_factory=SuccessfulProcess,
+        source="both",
+        microphone_device="USB Audio",
+        system_device="BlackHole 2ch",
+    )
+    recorder.start()
+    args = recorder.process.args
+    assert [args[i + 1] for i, a in enumerate(args) if a == "-i"] == [":2", ":1"]
+    graph = args[args.index("-filter_complex") + 1]
+    assert graph.endswith("[t0][t1]amerge=inputs=2[live]")
+    assert graph.count("aresample=async=1000:first_pts=0") == 2
+    assert args[args.index("-ac") + 1] == "2"
+    assert recorder.tracks == ("microphone", "system")
+    assert recorder.stop().is_file()
+
+
+def test_dual_capture_rejects_the_same_device_on_both_tracks(tmp_path, monkeypatch):
+    monkeypatch.setenv("SAMARIZATOR_DEV", "1")
+    stub_devices(monkeypatch)
+    with pytest.raises(LiveCaptureError, match="одно устройство"):
+        LiveRecorder(
+            folder=tmp_path,
+            ffmpeg="/usr/bin/ffmpeg",
+            popen_factory=SuccessfulProcess,
+            source="both",
+            microphone_device="BlackHole 2ch",
+            system_device="BlackHole 2ch",
+        )
+
+
+def test_empty_system_recording_points_at_the_output_device(tmp_path, monkeypatch):
+    monkeypatch.setenv("SAMARIZATOR_DEV", "1")
+    stub_devices(monkeypatch)
+
+    class SilentProcess(SuccessfulProcess):
+        def __init__(self, args, **kwargs):
+            super().__init__(args, **kwargs)
+            with open(self.target, "wb") as output:
+                output.write(b"RIFF")
+
+    recorder = LiveRecorder(
+        folder=tmp_path,
+        ffmpeg="/usr/bin/ffmpeg",
+        popen_factory=SilentProcess,
+        source="system",
+    )
+    recorder.start()
+    with pytest.raises(LiveCaptureError, match="выходом звука"):
+        recorder.stop()
+
+
+def test_settings_dialog_exposes_live_source_and_devices(tmp_path, monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    monkeypatch.setenv("SAMARIZATOR_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("SAMARIZATOR_DEV", "1")
+    from PySide6.QtWidgets import QApplication
+
+    from samarizator.app import SettingsDialog
+    from samarizator.config import Settings
+
+    monkeypatch.setattr("samarizator.app.audio_devices", lambda ffmpeg: list(DEVICES))
+    app = QApplication.instance() or QApplication([])
+    settings = Settings(live_source="system", live_system_device="BlackHole 2ch")
+    dialog = SettingsDialog(settings)
+    assert dialog.fields["live_source"].currentData() == "system"
+    assert dialog.fields["live_system_device"].currentData() == "BlackHole 2ch"
+    # Only loopback inputs may be offered as the system source.
+    system_box = dialog.fields["live_system_device"]
+    assert [system_box.itemData(i) for i in range(system_box.count())] == ["", "BlackHole 2ch"]
+    microphone_box = dialog.fields["live_microphone_device"]
+    assert [microphone_box.itemData(i) for i in range(microphone_box.count())] == [
+        "",
+        "MacBook Pro Microphone",
+        "BlackHole 2ch",
+        "USB Audio",
+    ]
+    dialog.deleteLater()
+    app.processEvents()
+
+
+def test_settings_reject_an_unknown_live_source():
+    from samarizator.config import Settings
+
+    with pytest.raises(ValueError, match="Источник live-записи"):
+        Settings(live_source="speakers").validate()

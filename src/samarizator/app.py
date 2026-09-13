@@ -40,7 +40,17 @@ from PySide6.QtWidgets import (
 
 from .config import Settings, data_dir, set_api_key
 from .knowledge import stamp
-from .live import LiveCaptureError, LiveRecorder
+from .live import (
+    BOTH,
+    MICROPHONE,
+    SOURCE_LABELS,
+    SYSTEM,
+    LiveCaptureError,
+    LiveRecorder,
+    audio_devices,
+    capture_supported,
+    system_audio_devices,
+)
 from .playback import evidence_intervals
 from .process import supervise
 from .store import Store
@@ -153,6 +163,52 @@ class SettingsDialog(QDialog):
         )
         hint.setWordWrap(True)
         form.addRow(hint)
+        form.addRow(QLabel("<b>Live-запись</b>"))
+        source = QComboBox()
+        for value, label in [
+            (MICROPHONE, "Только микрофон"),
+            (SYSTEM, "Только системный звук"),
+            (BOTH, "Микрофон и системный звук — раздельными каналами"),
+        ]:
+            source.addItem(label, value)
+        source.setCurrentIndex(max(0, source.findData(settings.live_source)))
+        self.fields["live_source"] = source
+        form.addRow("Источник", source)
+        self.inputs, self.loopback = self.live_devices()
+        for key, label, only_loopback in [
+            ("live_microphone_device", "Устройство микрофона", False),
+            ("live_system_device", "Устройство системного звука", True),
+        ]:
+            box = QComboBox()
+            box.setEditable(True)
+            box.addItem("По умолчанию", "")
+            for _, name in (self.loopback if only_loopback else self.inputs):
+                box.addItem(name, name)
+            saved = getattr(settings, key)
+            found = box.findData(saved)
+            if saved and found < 0:
+                box.addItem(saved, saved)
+                found = box.count() - 1
+            box.setCurrentIndex(max(0, found))
+            self.fields[key] = box
+            form.addRow(label, box)
+        live_hint = QLabel(
+            "Системный звук macOS не отдаёт как вход сама: нужно устройство петли (BlackHole, "
+            "Loopback или агрегатное устройство в «Настройке Audio-MIDI»), выбранное выходом звука. "
+            "Обход корпоративного запрета приложение не выполняет — согласуйте установку с IT.\n"
+            "Оба источника пишутся в один WAV: канал 1 — микрофон, канал 2 — системный звук, "
+            "на общей шкале времени. Whisper сводит каналы в моно, оба голоса попадают в текст.\n"
+            "При выводе в динамики микрофон повторно захватит удалённую речь — используйте наушники."
+        )
+        live_hint.setWordWrap(True)
+        form.addRow(live_hint)
+        if self.inputs and not self.loopback:
+            missing = QLabel(
+                "Устройства петли сейчас не видно. Установите его и переоткройте настройки, "
+                "либо впишите имя устройства вручную."
+            )
+            missing.setWordWrap(True)
+            form.addRow(missing)
         quality = QWidget()
         qform = QFormLayout(quality)
         tabs.addTab(quality, "Качество и термины")
@@ -243,6 +299,17 @@ class SettingsDialog(QDialog):
         if not self.fields["vad_model"].text().strip():
             self.fields["vad_model"].setText(profile.vad_model)
 
+    @staticmethod
+    def live_devices():
+        """Enumerate macOS inputs for the pickers; elsewhere the fields stay free text."""
+        if not capture_supported():
+            return [], []
+        try:
+            devices = audio_devices(shutil.which("ffmpeg") or "ffmpeg")
+        except LiveCaptureError:
+            return [], []
+        return devices, system_audio_devices(devices)
+
     def pick_provider(self, index):
         if url := self.provider.itemData(index):
             self.fields["base_url"].setText(url)
@@ -330,8 +397,9 @@ class Window(QMainWindow):
         side.addWidget(self.add_button)
         self.live_button = QPushButton("● Live: начать запись")
         self.live_button.setToolTip(
-            "Первый этап live-режима: записывает микрофон локально. После остановки запись "
-            "автоматически добавляется и запускается распознавание. Системный звук пока не захватывается."
+            "Записывает локально выбранный в настройках источник: микрофон, системный звук или оба "
+            "раздельными каналами. После остановки запись добавляется и запускается распознавание. "
+            "Текст и сводка по ходу записи пока не создаются."
         )
         self.live_button.clicked.connect(self.toggle_live)
         side.addWidget(self.live_button)
@@ -518,14 +586,21 @@ class Window(QMainWindow):
             self.stop_live()
             return
         try:
-            recorder = LiveRecorder()
+            recorder = LiveRecorder(
+                source=self.settings.live_source,
+                microphone_device=self.settings.live_microphone_device,
+                system_device=self.settings.live_system_device,
+            )
             recorder.start()
         except LiveCaptureError as exc:
             QMessageBox.warning(self, "Live-запись", str(exc))
             return
         self.live_recorder = recorder
         self.stop_playback()
-        self.progress.setText("Live-запись с микрофона началась. Аудио сохраняется только на этом Mac.")
+        self.progress.setText(
+            f"Live-запись началась ({SOURCE_LABELS[recorder.source]}). "
+            "Аудио сохраняется только на этом Mac."
+        )
         self.controls()
 
     def stop_live(self, start_transcription=True):
@@ -541,7 +616,10 @@ class Window(QMainWindow):
             QMessageBox.warning(self, "Live-запись", str(exc))
             self.controls()
             return
-        self.store.update(mid, title="Live-запись " + path.stem.removeprefix("live-").rsplit("-", 1)[0])
+        # `note` holds the exported Obsidian path, so the track layout goes into the title.
+        moment = path.stem.removeprefix("live-").rsplit("-", 1)[0]
+        layout = " · канал 1 микрофон, канал 2 системный" if recorder.tracks == (MICROPHONE, SYSTEM) else ""
+        self.store.update(mid, title=f"Live-запись ({SOURCE_LABELS[recorder.source]}){layout} {moment}")
         self.mid, self.page = mid, 0
         self.refresh_list()
         self.progress.setText("Live-запись сохранена локально.")
@@ -970,7 +1048,8 @@ class Window(QMainWindow):
         if self.live_recorder is not None:
             if self.live_recorder.recording:
                 self.progress.setText(
-                    f"● Live-запись с микрофона · {stamp(self.live_recorder.elapsed)} · "
+                    f"● Live-запись · {SOURCE_LABELS[self.live_recorder.source]} · "
+                    f"{stamp(self.live_recorder.elapsed)} · "
                     "нажмите кнопку ещё раз для остановки"
                 )
             else:

@@ -29,6 +29,9 @@ class Settings:
     vad_model: str = ""
     glossary: str = ""
     beam_size: int = 5
+    live_source: str = "microphone"
+    live_microphone_device: str = ""
+    live_system_device: str = ""
 
     def quality_profile(self):
         """Opt-in profile. Preserve the user's ASR model and corporate API configuration."""
@@ -53,6 +56,8 @@ class Settings:
     def validate(self, api=False):
         if not 1 <= self.beam_size <= 8 or len(self.glossary) > 800:
             raise ValueError("Beam size: 1–8; словарь терминов: не более 800 символов.")
+        if self.live_source not in {"microphone", "system", "both"}:
+            raise ValueError("Источник live-записи: микрофон, системный звук или оба.")
         if not 2 <= self.memory_gb <= 64:
             raise ValueError("Бюджет памяти должен быть от 2 до 64 ГиБ.")
         if not 1 <= self.threads <= 16 or not 30 <= self.chunk_seconds <= 300:
