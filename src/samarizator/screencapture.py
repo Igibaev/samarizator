@@ -13,6 +13,7 @@ import os
 import platform
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 from .config import data_dir
@@ -149,6 +150,88 @@ def failure_message(returncode, log_text):
     return ""
 
 
+def capture_stats(log_text):
+    """What the helper reported about the audio it actually received."""
+    stats = dict(started=False, buffers=0, bytes=0, frames=0, peak=0.0)
+    for payload in events(log_text):
+        if payload.get("event") == "started":
+            stats["started"] = True
+        progress = payload.get("progress") if payload.get("event") == "error" else payload
+        if payload.get("event") in {"progress", "stopped", "error"} and isinstance(progress, dict):
+            for key in ("buffers", "bytes", "frames"):
+                stats[key] = max(stats[key], int(progress.get(key) or 0))
+            stats["peak"] = max(stats["peak"], float(progress.get("peak") or 0))
+    return stats
+
+
+def silence_diagnosis(log_text):
+    """Explain an empty recording from the helper's own counters."""
+    stats = capture_stats(log_text)
+    if not stats["started"]:
+        return (
+            "Helper системного звука не сообщил о старте захвата. Проверьте разрешение "
+            "и запустите диагностику: .venv/bin/python -m samarizator.screencapture check"
+        )
+    if stats["bytes"] == 0:
+        return (
+            "ScreenCaptureKit не отдал ни одного аудиобуфера, хотя захват стартовал и "
+            "разрешение есть. Это не про громкость источника: буферы приходят даже в тишине. "
+            "Проверьте версию macOS и соберите диагностику: "
+            ".venv/bin/python -m samarizator.screencapture check"
+        )
+    return (
+        f"Helper получил {stats['bytes'] // 1024} КиБ звука, но в файл ничего не попало — "
+        "значит потерялось между helper'ом и FFmpeg. Пришлите журнал записи."
+    )
+
+
+def check(seconds=5, binary=None):
+    """Run the helper alone and report what ScreenCaptureKit gives, bypassing FFmpeg."""
+    binary = Path(binary or binary_path())
+    report = status(binary)
+    print(f"Состояние: {report['message']}")
+    if not report["available"]:
+        return 1
+    print(f"Проверяю {seconds} с. Включите любой звук — музыку, видео, звонок.")
+    log = data_dir() / "system-audio-check.log"
+    with log.open("wb") as errors:
+        proc = subprocess.Popen(
+            [str(binary), "capture"], stdout=subprocess.PIPE, stderr=errors, start_new_session=True
+        )
+        received = 0
+        deadline = time.monotonic() + seconds
+        try:
+            while time.monotonic() < deadline:
+                chunk = proc.stdout.read(65536)
+                if not chunk:
+                    break
+                received += len(chunk)
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+            proc.stdout.close()
+    detail = log.read_text(errors="replace")
+    stats = capture_stats(detail)
+    seconds_of_audio = received / (SAMPLE_RATE * 4)
+    print(f"Прочитано из helper'а: {received} байт ≈ {seconds_of_audio:.1f} с звука.")
+    print(
+        f"Сам helper насчитал: буферов {stats['buffers']}, байт {stats['bytes']}, "
+        f"пиковый уровень {stats['peak']:.3f}."
+    )
+    if stats["buffers"] and stats["peak"] == 0:
+        print("Буферы приходят, но в них цифровая тишина: звук не попадает в захват macOS.")
+    print(f"Код возврата: {proc.returncode}. Журнал: {log}")
+    if received == 0:
+        print("Аудиобуферы не приходят. Пришлите журнал целиком — по нему видно причину.")
+        return 1
+    print("ScreenCaptureKit отдаёт звук: захват работает.")
+    return 0
+
+
 def events(log_text):
     parsed = []
     for line in (log_text or "").splitlines():
@@ -163,6 +246,10 @@ def events(log_text):
 
 def main():
     """Build the helper from start.sh. Never fatal: the loopback path stays available."""
+    import sys
+
+    if len(sys.argv) > 1 and sys.argv[1] == "check":
+        return check()
     if not supported_platform():
         print(f"Штатный захват системного звука требует macOS {MINIMUM_MACOS}+, пропускаю сборку.")
         return 0

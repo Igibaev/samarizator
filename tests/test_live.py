@@ -421,7 +421,8 @@ def test_helper_failure_is_reported_instead_of_a_truncated_recording(tmp_path, m
     with pytest.raises(LiveCaptureError, match="Запись экрана и системного звука"):
         recorder.stop()
     assert not recorder.path.exists() and not recorder.partial.exists()
-    assert not recorder.helper_log.exists()
+    # The helper's report is kept: a failed session must stay diagnosable.
+    assert "permission" in recorder.helper_log.read_text()
 
 
 def test_helper_status_reads_the_probe_answer(tmp_path, monkeypatch):
@@ -455,3 +456,56 @@ def test_missing_helper_binary_explains_how_to_build_it(tmp_path, monkeypatch):
 def test_helper_exit_without_an_event_still_produces_a_message():
     assert screencapture.failure_message(0, "") == ""
     assert "журнал" in screencapture.failure_message(3, "не json")
+
+
+def test_empty_native_recording_separates_a_silent_stream_from_a_lost_one(tmp_path, monkeypatch):
+    monkeypatch.setenv("SAMARIZATOR_DEV", "1")
+    binary = available_helper(monkeypatch, tmp_path)
+
+    class SilentFFmpeg(SuccessfulProcess):
+        def __init__(self, args, **kwargs):
+            super().__init__(args, **kwargs)
+            with open(self.target, "wb") as output:
+                output.write(b"RIFF")
+
+    def recorder_for(events):
+        def factory(args, **kwargs):
+            if args[0].endswith("system-audio"):
+                return HelperProcess(args, events=events, **kwargs)
+            return SilentFFmpeg(args, **kwargs)
+
+        recorder = LiveRecorder(
+            folder=tmp_path,
+            ffmpeg="/usr/bin/ffmpeg",
+            popen_factory=factory,
+            source="system",
+            helper=binary,
+        )
+        recorder.start()
+        return recorder
+
+    nothing = recorder_for(
+        b'{"event": "started"}\n{"event": "stopped", "buffers": 0, "bytes": 0}\n'
+    )
+    with pytest.raises(LiveCaptureError, match="не отдал ни одного аудиобуфера"):
+        nothing.stop()
+
+    lost = recorder_for(
+        b'{"event": "started"}\n{"event": "stopped", "buffers": 40, "bytes": 400000}\n'
+    )
+    with pytest.raises(LiveCaptureError, match="потерялось между helper"):
+        lost.stop()
+
+
+def test_capture_stats_track_the_highest_reported_counters():
+    log = (
+        '{"event": "started"}\n'
+        '{"event": "progress", "buffers": 10, "bytes": 1000, "frames": 250, "peak": 0.4}\n'
+        '{"event": "stopped", "buffers": 25, "bytes": 2500, "frames": 625, "peak": 0.9}\n'
+    )
+    assert screencapture.capture_stats(log) == dict(
+        started=True, buffers=25, bytes=2500, frames=625, peak=0.9
+    )
+    # An error event carries its progress in a nested object.
+    failed = '{"event": "error", "code": "pipe-closed", "progress": {"buffers": 3, "bytes": 30}}\n'
+    assert screencapture.capture_stats(failed)["bytes"] == 30

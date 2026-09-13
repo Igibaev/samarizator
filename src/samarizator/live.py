@@ -352,7 +352,7 @@ class LiveRecorder:
             raise LiveCaptureError("Live-запись не запущена.")
         # The helper goes first: closing its end of the pipe is what lets FFmpeg
         # finish that input cleanly instead of waiting for more audio.
-        helper_problem = self._stop_helper(timeout)
+        helper_problem, helper_detail = self._stop_helper(timeout)
         self._stop_ffmpeg(timeout)
         self._close_log()
         if helper_problem:
@@ -364,10 +364,10 @@ class LiveRecorder:
             raise LiveCaptureError(self._failure_message())
         if not self.partial.is_file() or self.partial.stat().st_size <= 1024:
             self.partial.unlink(missing_ok=True)
-            raise LiveCaptureError(self._silence_message())
+            raise LiveCaptureError(self._silence_message(helper_detail))
         self.partial.replace(self.path)
         self.log.unlink(missing_ok=True)
-        self.helper_log.unlink(missing_ok=True)
+        self.helper_log.unlink(missing_ok=True)  # only a good recording removes the evidence
         return self.path
 
     def _stop_ffmpeg(self, timeout=10):
@@ -391,10 +391,10 @@ class LiveRecorder:
                     proc.wait()
 
     def _stop_helper(self, timeout=10):
-        """Stop the ScreenCaptureKit helper; return a message if it failed."""
+        """Stop the helper; return (error message, its raw report) for diagnosis."""
         proc = self.helper_process
         if proc is None:
-            return ""
+            return "", ""
         if proc.poll() is None:
             proc.terminate()  # SIGTERM: the helper stops the stream and exits 0.
             try:
@@ -404,9 +404,7 @@ class LiveRecorder:
                 proc.wait()
         self._close_helper_log()
         detail = self.helper_log.read_text(errors="replace") if self.helper_log.is_file() else ""
-        message = screencapture.failure_message(proc.returncode, detail)
-        self.helper_log.unlink(missing_ok=True)
-        return message
+        return screencapture.failure_message(proc.returncode, detail), detail
 
     def _close_log(self):
         if self._log_handle is not None:
@@ -418,13 +416,15 @@ class LiveRecorder:
             self._helper_log_handle.close()
             self._helper_log_handle = None
 
-    def _silence_message(self):
+    def _silence_message(self, helper_detail=""):
         if self.source == MICROPHONE:
             return "Микрофон не записал звук. Проверьте выбранный вход и разрешение macOS."
         if self.native_capture:
+            # The helper's own counters say whether ScreenCaptureKit delivered anything,
+            # so an empty file is never blamed on the user's volume by guesswork.
             return (
-                "Запись получилась пустой. macOS отдаёт системный звук только когда он "
-                "действительно играет: проверьте, что во время записи был звук из приложений."
+                screencapture.silence_diagnosis(helper_detail)
+                + f"\nЖурнал helper'а: {self.helper_log}"
             )
         return (
             "Запись получилась пустой. Проверьте, что устройство петли выбрано выходом звука "

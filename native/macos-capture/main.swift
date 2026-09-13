@@ -52,6 +52,31 @@ func writeSamples(_ data: Data) -> Bool {
     }
 }
 
+final class Counter {
+    private let lock = NSLock()
+    private var buffers = 0
+    private var bytes = 0
+    private var frames = 0
+    private var peak: Float = 0
+
+    func add(bytes count: Int, frames frameCount: Int, peak level: Float) {
+        lock.lock()
+        buffers += 1
+        bytes += count
+        frames += frameCount
+        peak = max(peak, level)
+        lock.unlock()
+    }
+
+    /// `peak` separates "no audio at all" from "audio arrives but is digital silence".
+    func snapshot() -> [String: Any] {
+        lock.lock(); defer { lock.unlock() }
+        return ["buffers": buffers, "bytes": bytes, "frames": frames, "peak": Double(peak)]
+    }
+}
+
+let counter = Counter()
+
 final class SystemAudioOutput: NSObject, SCStreamOutput, SCStreamDelegate {
     private let onFailure: (String, String) -> Void
 
@@ -60,7 +85,10 @@ final class SystemAudioOutput: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer buffer: CMSampleBuffer, of type: SCStreamOutputType) {
-        guard type == .audio, buffer.isValid, buffer.numSamples > 0 else { return }
+        // Screen frames are requested only because ScreenCaptureKit has no audio-only
+        // stream, and some macOS builds deliver audio only while video is consumed.
+        guard type == .audio else { return }
+        guard buffer.isValid, buffer.numSamples > 0 else { return }
         do {
             try buffer.withAudioBufferList { list, _ in
                 guard let first = list.first else { return }
@@ -85,7 +113,13 @@ final class SystemAudioOutput: NSObject, SCStreamOutput, SCStreamDelegate {
                 let ok = mono.withUnsafeBufferPointer { samples -> Bool in
                     writeSamples(Data(buffer: samples))
                 }
-                if !ok { onFailure("pipe-closed", "Приёмник аудио закрылся.") }
+                if !ok {
+                    onFailure("pipe-closed", "Приёмник аудио закрылся.")
+                    return
+                }
+                var peak: Float = 0
+                for value in mono { peak = max(peak, abs(value)) }
+                counter.add(bytes: frames * MemoryLayout<Float>.size, frames: frames, peak: peak)
             }
         } catch {
             onFailure("buffer", error.localizedDescription)
@@ -103,10 +137,12 @@ func audioConfiguration() -> SCStreamConfiguration {
     config.sampleRate = sampleRate
     config.channelCount = 2
     config.excludesCurrentProcessAudio = true
-    // No screen frames are consumed; keep the video side as small and as slow as allowed.
-    config.width = 2
-    config.height = 2
-    config.minimumFrameInterval = CMTime(value: 1, timescale: 1)
+    // ScreenCaptureKit has no audio-only stream. Keep the video side small and slow,
+    // but not degenerate: 2x2 frames are rejected by some display pipelines, and a
+    // stream that never produces a frame can stop delivering audio as well.
+    config.width = 128
+    config.height = 72
+    config.minimumFrameInterval = CMTime(value: 1, timescale: 2)
     config.queueDepth = 6
     return config
 }
@@ -164,6 +200,8 @@ func capture() async -> Never {
     let stream = SCStream(filter: SCContentFilter(display: display, excludingWindows: []), configuration: audioConfiguration(), delegate: output)
     do {
         try stream.addStreamOutput(output, type: .audio, sampleHandlerQueue: DispatchQueue(label: "samarizator.system-audio"))
+        // Registered and immediately discarded: no screen content is stored or forwarded.
+        try stream.addStreamOutput(output, type: .screen, sampleHandlerQueue: DispatchQueue(label: "samarizator.discard-video"))
         try await stream.startCapture()
     } catch {
         emit("error", ["code": "start", "message": error.localizedDescription])
@@ -171,16 +209,19 @@ func capture() async -> Never {
     }
     emit("started", ["macos": osVersion(), "sample_rate": sampleRate, "channels": 1, "format": "f32le"])
     installStopHandlers()
+    var ticks = 0
     while !stopped.load() {
         if let (code, message) = failure.take() {
             try? await stream.stopCapture()
-            emit("error", ["code": code, "message": message])
+            emit("error", ["code": code, "message": message, "progress": counter.snapshot()])
             exit(code == "pipe-closed" ? 0 : captureFailed)
         }
+        ticks += 1
+        if ticks % 50 == 0 { emit("progress", counter.snapshot()) }  // every ~5 seconds
         try? await Task.sleep(nanoseconds: 100_000_000)
     }
     try? await stream.stopCapture()
-    emit("stopped")
+    emit("stopped", counter.snapshot())
     exit(0)
 }
 
