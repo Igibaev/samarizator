@@ -5,7 +5,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from .audio_quality import diagnose, plan_chunks
+from .audio_quality import cut_points, diagnose, plan_chunks
 from .config import Settings, data_dir
 from .media import dedup_seam, extract, fingerprint, parse_whisper, probe, whisper
 from .store import Store
@@ -13,6 +13,47 @@ from .store import Store
 
 def status(store, mid, message):
     store.update(mid, error=message)
+
+
+def transcribe_chunk(store, mid, settings, work, source, duration, index, lower, upper):
+    """Recognise one planned chunk. Shared by the closing pass and live catch-up,
+    so audio recognised during a meeting goes through exactly the same steps."""
+    start = max(0, lower - 2)
+    length = min(duration, upper + 2) - start
+    wav = work / "chunk.wav"
+    extract(source, wav, work, start, length)
+    diagnostics = [dict(channel=None, **diagnose(wav))]
+    result = whisper(
+        wav,
+        settings.whisper_model,
+        settings.language,
+        settings.threads,
+        work,
+        settings.gpu,
+        vad_model=settings.vad_model if settings.vad else "",
+        glossary=settings.glossary,
+        beam_size=settings.beam_size,
+    )
+    rows = parse_whisper(result, start, lower, upper)
+    wav.unlink()
+    rows = sorted(rows, key=lambda r: r["start"])
+    # Text equality cannot prove that two utterances are the same audio.
+    # Preserve every word; only flag plausible overlap for human review.
+    if index > 0 and rows:
+        previous = store.last_segment(mid)
+        first = rows[0]
+        if (
+            previous
+            and previous["end"] > first["start"]
+            and first["start"] < lower + 2
+            and previous["end"] > lower - 2
+        ):
+            _, overlap = dedup_seam(previous["text"], first["text"])
+            if overlap:
+                reasons = [r for r in [first["review"], "возможный повтор на стыке — сверить по аудио"] if r]
+                rows[0] = dict(first, uncertain=True, review=", ".join(reasons))
+    store.save_checkpoint(mid, "audio-quality", index, diagnostics)
+    store.save_chunk(mid, index, rows)
 
 
 def transcribe(store, mid, settings, work):
@@ -42,55 +83,77 @@ def transcribe(store, mid, settings, work):
         status(store, mid, "Подбор границ фрагментов по паузам…")
         plan = plan_chunks(source, duration, settings.chunk_seconds, work, settings.pause_boundaries)
         store.save_checkpoint(mid, "asr-plan", 0, plan)
+    elif plan and plan[-1][1] < duration - 0.5:
+        # Live catch-up planned only the part that had been recorded. Its boundaries are
+        # already settled, so the closing pass keeps them and plans the rest the same way.
+        status(store, mid, "Подбор границ оставшейся части…")
+        settled = [plan[0][0], *(upper for _, upper in plan)]
+        cuts = cut_points(
+            source, duration, settings.chunk_seconds, work, settings.pause_boundaries, bounds=settled
+        )
+        bounds = [0.0, *cuts, duration]
+        plan = list(zip(bounds, bounds[1:]))
+        store.save_checkpoint(mid, "asr-plan", 0, plan)
     count = len(plan)
     for index, (lower, upper) in enumerate(plan):
         if store.checkpoint(mid, "asr", index):
             continue
-        start = max(0, lower - 2)
-        length = min(duration, upper + 2) - start
         status(store, mid, f"Whisper: фрагмент {index + 1}/{count}")
-        rows = []
-        diagnostics = []
-        wav = work / "chunk.wav"
-        extract(source, wav, work, start, length)
-        diagnostics.append(dict(channel=None, **diagnose(wav)))
-        result = whisper(
-            wav,
-            settings.whisper_model,
-            settings.language,
-            settings.threads,
-            work,
-            settings.gpu,
-            vad_model=settings.vad_model if settings.vad else "",
-            glossary=settings.glossary,
-            beam_size=settings.beam_size,
-        )
-        rows += parse_whisper(result, start, lower, upper)
-        wav.unlink()
-        rows = sorted(rows, key=lambda r: r["start"])
-        # Text equality cannot prove that two utterances are the same audio.
-        # Preserve every word; only flag plausible overlap for human review.
-        if index > 0 and rows:
-            previous = store.last_segment(mid)
-            first = rows[0]
-            if (
-                previous
-                and previous["end"] > first["start"]
-                and first["start"] < lower + 2
-                and previous["end"] > lower - 2
-            ):
-                _, overlap = dedup_seam(previous["text"], first["text"])
-                if overlap:
-                    reasons = [
-                        r for r in [first["review"], "возможный повтор на стыке — сверить по аудио"] if r
-                    ]
-                    rows[0] = dict(first, uncertain=True, review=", ".join(reasons))
-        store.save_checkpoint(mid, "audio-quality", index, diagnostics)
-        store.save_chunk(mid, index, rows)
+        transcribe_chunk(store, mid, settings, work, source, duration, index, lower, upper)
     if not store.segments(mid, limit=1):
         raise ValueError("Whisper не обнаружил речь. Проверьте аудиодорожку и язык.")
     store.save_checkpoint(mid, "asr_complete", 0, True)
     store.update(mid, status="review", error=None)
+
+
+def catchup(store, mid, settings, work, poll=2.0, sleep=None):
+    """Recognise a live recording while it is still being written.
+
+    Only chunks whose boundaries are already settled are processed, so every
+    fragment goes through the same planning, padding and seam checks as a file
+    imported afterwards. The closing pass then has only the tail left to do.
+    """
+    import time
+
+    sleep = sleep or time.sleep
+    source = Path(store.meeting(mid)["source"])
+    settings.validate()
+    if not Path(settings.whisper_model).is_file():
+        raise ValueError("Модель Whisper не найдена. Запустите ./start.sh или выберите .bin в настройках.")
+    if settings.vad and not Path(settings.vad_model).is_file():
+        raise ValueError("Модель VAD не найдена. Запустите ./start.sh --quality или отключите VAD.")
+    while True:
+        stopped = bool(store.checkpoint(mid, "live-stopped", 0))
+        available = 0.0
+        if source.is_file() and source.stat().st_size > 1024:
+            try:
+                available = probe(source, work)[0]
+            except (ValueError, RuntimeError):
+                available = 0.0  # header not written yet; the next poll will see it
+        if available:
+            plan = store.checkpoint(mid, "asr-plan", 0) or []
+            settled = [0.0, *(upper for _, upper in plan)]
+            cuts = cut_points(
+                source,
+                available,
+                settings.chunk_seconds,
+                work,
+                settings.pause_boundaries,
+                bounds=settled,
+                growing=True,
+            )
+            if len(cuts) + 1 > len(settled):
+                bounds = [0.0, *cuts]
+                plan = list(zip(bounds, bounds[1:]))
+                store.save_checkpoint(mid, "asr-plan", 0, plan)
+            for index, (lower, upper) in enumerate(plan):
+                if store.checkpoint(mid, "asr", index):
+                    continue
+                status(store, mid, f"Распознаю по ходу записи: фрагмент {index + 1}")
+                transcribe_chunk(store, mid, settings, work, source, available, index, lower, upper)
+        if stopped:
+            return
+        sleep(poll)
 
 
 def retry_uncertain(store, mid, settings, work, limit=20, pad=2.0):
@@ -163,6 +226,8 @@ def main():
         with tempfile.TemporaryDirectory(dir=work_root, prefix=mid + "-") as temp:
             if phase == "transcribe":
                 transcribe(store, mid, settings, Path(temp))
+            elif phase == "catchup":
+                catchup(store, mid, settings, Path(temp))
             elif phase == "retry":
                 retry_uncertain(store, mid, settings, Path(temp))
             elif phase == "summary":

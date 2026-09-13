@@ -270,7 +270,9 @@ class LiveRecorder:
                 "-ac",
                 str(len(self.inputs)),
             ]
-        args += ["-ar", "16000", "-c:a", "pcm_s16le", str(self.partial)]
+        # flush_packets keeps the growing file readable: without it FFmpeg buffers the
+        # WAV and nothing reaches disk until the end, so catch-up would have nothing to do.
+        args += ["-ar", "16000", "-c:a", "pcm_s16le", "-flush_packets", "1", str(self.partial)]
         return args
 
     def start(self):
@@ -280,6 +282,9 @@ class LiveRecorder:
         env.pop("SAMARIZATOR_API_KEY", None)
         if self.native_capture:
             self._check_helper()
+        # Created before FFmpeg starts so catch-up recognition has a path to watch
+        # from the first second of the meeting.
+        self.partial.touch(mode=0o600)
         read_fd, write_fd = os.pipe() if self.native_capture else (None, None)
         self._log_handle = self.log.open("wb")
         try:

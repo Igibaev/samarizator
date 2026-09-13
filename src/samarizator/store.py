@@ -102,7 +102,17 @@ class Store:
             ]
 
     def update(self, mid, **values):
-        allowed = {"status", "duration", "channels", "summary", "note", "error", "settings", "title"}
+        allowed = {
+            "status",
+            "duration",
+            "channels",
+            "summary",
+            "note",
+            "error",
+            "settings",
+            "title",
+            "source",  # a live recording is renamed from its partial file when it stops
+        }
         if not values or not set(values) <= allowed:
             raise ValueError("Invalid meeting fields")
         with self.connect() as db:

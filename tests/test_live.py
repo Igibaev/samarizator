@@ -76,6 +76,8 @@ def test_live_recorder_streams_to_disk_and_finalizes_wav(tmp_path, monkeypatch):
     result = recorder.stop()
     assert result == expected and result.is_file()
     assert recorder.process.stdin.data == b"q\n"
+    # The file has to be readable while it grows, for catch-up recognition.
+    assert recorder.process.args[recorder.process.args.index("-flush_packets") + 1] == "1"
     assert not recorder.partial.exists() and not recorder.log.exists()
 
 
@@ -101,7 +103,7 @@ def test_live_recorder_reports_microphone_permission_error(tmp_path, monkeypatch
     assert not recorder.partial.exists()
 
 
-def test_live_button_adds_recording_and_starts_transcription(tmp_path, monkeypatch):
+def test_live_button_records_then_hands_over_to_recognition(tmp_path, monkeypatch):
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     monkeypatch.setenv("SAMARIZATOR_HOME", str(tmp_path / "home"))
     from PySide6.QtWidgets import QApplication
@@ -110,6 +112,7 @@ def test_live_button_adds_recording_and_starts_transcription(tmp_path, monkeypat
 
     app = QApplication.instance() or QApplication([])
     recorded = tmp_path / "live-2026-09-12_14-30-00-12345678.wav"
+    partial = tmp_path / "live-2026-09-12_14-30-00-12345678.partial.wav"
 
     class Recorder:
         recording = True
@@ -120,33 +123,93 @@ def test_live_button_adds_recording_and_starts_transcription(tmp_path, monkeypat
 
         def __init__(self, **kwargs):
             self.kwargs = kwargs
+            self.partial = partial
 
         def start(self):
+            partial.write_bytes(b"RIFF" + b"\0" * 2048)
             return recorded
 
         def stop(self):
-            recorded.write_bytes(b"RIFF" + b"\0" * 2048)
+            partial.replace(recorded)
             self.recording = False
             return recorded
 
     monkeypatch.setattr("samarizator.app.LiveRecorder", Recorder)
     window = Window()
-    phases = []
+    phases, catchups = [], []
     monkeypatch.setattr(window, "start", phases.append)
-    window.settings.live_source = "both"
-    window.settings.live_system_device = "BlackHole 2ch"
+    monkeypatch.setattr(window, "start_catchup", lambda: catchups.append(window.mid))
+
     window.toggle_live()
-    assert window.live_recorder.kwargs == dict(
-        source="both",
-        microphone_device="",
-        system_device="BlackHole 2ch",
-        system_backend="screencapturekit",
-    )
+    # Recognition needs a meeting from the first second, pointed at the growing file.
+    assert window.mid and catchups == [window.mid]
+    assert window.store.meeting(window.mid)["source"] == str(partial)
+    assert window.store.meeting(window.mid)["status"] == "recording"
     assert "остановить" in window.live_button.text().lower()
+
     window.toggle_live()
     assert phases == ["transcribe"]
-    assert window.mid and window.store.meeting(window.mid)["source"] == str(recorded)
+    assert window.store.meeting(window.mid)["source"] == str(recorded)
+    assert window.store.checkpoint(window.mid, "live-stopped", 0)
     assert "начать" in window.live_button.text().lower()
+    window.timer.stop()
+    window.close()
+    window.deleteLater()
+    app.processEvents()
+
+
+def test_stop_waits_for_catchup_before_the_closing_pass(tmp_path, monkeypatch):
+    """The closing pass must not start while catch-up still holds a Whisper process."""
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    monkeypatch.setenv("SAMARIZATOR_HOME", str(tmp_path / "home"))
+    from PySide6.QtWidgets import QApplication
+
+    from samarizator.app import Window
+
+    app = QApplication.instance() or QApplication([])
+    recorded = tmp_path / "live-2026-09-12_15-00-00-abcdef12.wav"
+    partial = tmp_path / "live-2026-09-12_15-00-00-abcdef12.partial.wav"
+
+    class Recorder:
+        recording = True
+        elapsed = 1
+        source = "microphone"
+        tracks = ("microphone",)
+        inputs = ()
+
+        def __init__(self, **kwargs):
+            self.partial = partial
+
+        def start(self):
+            partial.write_bytes(b"RIFF" + b"\0" * 2048)
+            return recorded
+
+        def stop(self):
+            partial.replace(recorded)
+            self.recording = False
+            return recorded
+
+    class FakeJob:
+        phase = "catchup"
+
+        def deleteLater(self):
+            pass
+
+    monkeypatch.setattr("samarizator.app.LiveRecorder", Recorder)
+    window = Window()
+    phases = []
+    monkeypatch.setattr(window, "start", phases.append)
+    monkeypatch.setattr(window, "start_catchup", lambda: None)
+    window.toggle_live()
+    window.job = FakeJob()
+    window.active_id = window.mid
+
+    window.toggle_live()
+    assert phases == []  # nothing started yet: catch-up is still running
+    assert window.pending_phase == "transcribe"
+
+    window.job_finished()
+    assert phases == ["transcribe"] and window.pending_phase == ""
     window.timer.stop()
     window.close()
     window.deleteLater()

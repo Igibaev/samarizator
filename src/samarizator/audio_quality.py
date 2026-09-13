@@ -71,11 +71,25 @@ def nearest_pause(path, target, radius=6):
     return min(candidates, key=lambda c: abs(c - target), default=target)
 
 
-def plan_chunks(source, duration, seconds, work, pauses=False):
-    bounds = [0.0]
-    # Anchor to original targets, so shifts cannot accumulate over long recordings.
+# A cut at `target` is decided from audio in [target - 6, target + 6], and the
+# acceptance test below also needs `duration - 5` to be past it. Once this much
+# audio exists, the cut is final: planning a prefix yields the same boundaries the
+# whole recording would, which is what lets live catch-up and the closing pass agree.
+SETTLED_MARGIN = 11
+
+
+def cut_points(source, duration, seconds, work, pauses=False, bounds=None, growing=False):
+    """Anchored boundaries between chunks, without the opening 0 and closing duration.
+
+    `bounds` carries boundaries already decided, so a growing recording keeps the
+    ones it settled earlier. `growing` holds back cuts too close to the end of what
+    has been recorded so far: they would be decided on incomplete audio.
+    """
+    bounds = list(bounds or [0.0])
     for index in range(1, math.ceil(duration / seconds)):
         target = index * seconds
+        if target <= bounds[-1] or (growing and target + SETTLED_MARGIN > duration):
+            continue
         cut = target
         if pauses:
             offset = max(0, target - 6)
@@ -85,7 +99,11 @@ def plan_chunks(source, duration, seconds, work, pauses=False):
             wav.unlink()
         if not pauses or bounds[-1] + 15 <= cut <= duration - 5:
             bounds.append(cut)
-    bounds.append(duration)
+    return bounds[1:]
+
+
+def plan_chunks(source, duration, seconds, work, pauses=False):
+    bounds = [0.0, *cut_points(source, duration, seconds, work, pauses), duration]
     return list(zip(bounds, bounds[1:]))
 
 
