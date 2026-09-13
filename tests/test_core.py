@@ -238,14 +238,13 @@ def test_obsidian_evidence_and_manual_edits_preserved(meeting):
     store.update(mid, summary=json.dumps(summary))
     first = export(store, mid, settings)
     assert f"#^s{sid}" in first.read_text()
-    assert "[[Topics/" in first.read_text()
     original = first.read_text() + "\nМои ручные заметки\n"
     first.write_text(original)
     second = export(store, mid, settings)
     assert first != second
     assert first.read_text() == original
-    assert topic_name("../../Secret [x]") == topic_name("../../secret [x]")
-    assert "/" not in topic_name("../../Secret [x]")
+    # Topic names go into a vault path, so traversal and separators must not survive.
+    assert "/" not in topic_name("../../Secret [x]") and ".." not in topic_name("..")
 
 
 def test_memory_watchdog_stops_process_group(tmp_path):

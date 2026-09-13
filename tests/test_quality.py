@@ -309,7 +309,8 @@ def test_detailed_summary_preserves_facts_dropped_from_brief_and_cancelled_tasks
     store.update(mid, summary=json.dumps(result))
     content = export(store, mid, settings).read_text()
     assert "## Кратко · тезисы" in content and "## Подробная сводка" in content
-    assert "17 млн" in content and "[[Topics/" in content
+    # A topic seen in one meeting stays a property, without spawning an orphan note.
+    assert "17 млн" in content and 'topics: ["Бюджет"]' in content
     assert "[отменено]" in content and "- [ ]" not in content
     cancelled["status"] = "made-up"
     with pytest.raises(ValueError, match="статус"):
