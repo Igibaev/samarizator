@@ -17,4 +17,4 @@ def build_label():
         revision = result.stdout.strip()
     except (OSError, subprocess.SubprocessError):
         revision = "архив"
-    return "Сводки 2.6 · Live MVP · " + revision
+    return "Сводки 2.6 · Live: две дорожки · " + revision
