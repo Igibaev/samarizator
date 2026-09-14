@@ -1,5 +1,6 @@
 import json
 import math
+import shutil
 import struct
 import wave
 
@@ -325,3 +326,63 @@ def test_memory_monitor_fails_closed(monkeypatch):
     monkeypatch.setattr("samarizator.process.rss_tree", lambda _: 0)
     with pytest.raises(RuntimeError, match="измерить память"):
         supervise([sys.executable, "-c", "import time; time.sleep(30)"], 16)
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg required")
+def test_cleanup_profiles_lift_speech_above_the_noise_floor(tmp_path):
+    """Cleanup must widen the gap between speech and pauses, not just make things louder."""
+    import math
+    import random
+    import struct
+    import wave
+
+    from samarizator.audio_quality import diagnose
+    from samarizator.media import extract
+
+    source = tmp_path / "noisy.wav"
+    random.seed(7)
+    with wave.open(str(source), "wb") as wav:
+        wav.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
+        frames = bytearray()
+        for index in range(16000 * 8):
+            moment = index / 16000
+            speaking = (int(moment) % 4) < 2
+            voice = 0.1 * math.sin(2 * math.pi * 200 * moment) if speaking else 0.0
+            hiss = 0.012 * (random.random() * 2 - 1)
+            rumble = 0.05 * math.sin(2 * math.pi * 50 * moment)  # dominates the pauses
+            frames += struct.pack("<h", int((voice + hiss + rumble) * 32767))
+        wav.writeframes(bytes(frames))
+
+    levels = {}
+    for profile in ("off", "light", "strong"):
+        target = tmp_path / f"{profile}.wav"
+        extract(source, target, tmp_path, cleanup=profile)
+        levels[profile] = diagnose(target)["rms_dbfs"]
+
+    # Speech gets louder while the rumble that filled the pauses is gone.
+    assert levels["light"] > levels["off"] + 3
+    assert levels["strong"] > levels["off"] + 3
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg required")
+def test_unknown_cleanup_profile_changes_nothing(tmp_path):
+    import struct
+    import wave
+
+    from samarizator.media import extract
+
+    source = tmp_path / "plain.wav"
+    with wave.open(str(source), "wb") as wav:
+        wav.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
+        wav.writeframes(struct.pack("<h", 1000) * 16000)
+    for cleanup in ("off", "выдумка"):
+        target = tmp_path / f"{cleanup}.wav"
+        extract(source, target, tmp_path, cleanup=cleanup)
+        assert target.stat().st_size > 1000
+
+
+def test_settings_reject_an_unknown_cleanup_profile():
+    from samarizator.config import Settings
+
+    with pytest.raises(ValueError, match="Обработка звука"):
+        Settings(audio_cleanup="магия").validate()

@@ -21,7 +21,8 @@ def transcribe_chunk(store, mid, settings, work, source, duration, index, lower,
     start = max(0, lower - 2)
     length = min(duration, upper + 2) - start
     wav = work / "chunk.wav"
-    extract(source, wav, work, start, length)
+    # Cleanup touches only what Whisper hears; the recording on disk stays untouched.
+    extract(source, wav, work, start, length, cleanup=settings.audio_cleanup)
     diagnostics = [dict(channel=None, **diagnose(wav))]
     result = whisper(
         wav,
@@ -195,7 +196,15 @@ def retry_uncertain(store, mid, settings, work, limit=20, pad=2.0):
         start = max(0, row["start"] - pad)
         length = min(duration, row["end"] + pad) - start
         wav = work / f"retry-{row['id']}.wav"
-        extract(source, wav, work, start, length, channel=row.get("source_channel"))
+        extract(
+            source,
+            wav,
+            work,
+            start,
+            length,
+            channel=row.get("source_channel"),
+            cleanup=settings.audio_cleanup,
+        )
         result = whisper(
             wav,
             settings.whisper_model,

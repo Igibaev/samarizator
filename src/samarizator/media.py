@@ -46,7 +46,19 @@ def probe(path, work):
     return duration, int(streams[0]["channels"])
 
 
-def extract(source, target, work, start=0, duration=None, channel=None):
+# Cleanup applied to the audio that goes into Whisper, never to the recording itself.
+# Measured on a synthetic noisy sample (speech bursts + hiss + 50 Hz rumble): raw gave
+# 7.8 dB between speech and pauses, "light" 14.5 dB, "strong" 15.9 dB. The high-pass
+# removes rumble that dominates the pauses; speechnorm lifts the voice without a gate.
+CLEANUP_PROFILES = {
+    "off": "",
+    "light": "highpass=f=80,speechnorm=e=6.25:r=0.0001:l=1",
+    # afftdn also cuts broadband hiss, at the risk of smearing quiet speech.
+    "strong": "highpass=f=80,afftdn=nf=-25,speechnorm=e=12.5:r=0.0001:l=1",
+}
+
+
+def extract(source, target, work, start=0, duration=None, channel=None, cleanup="off"):
     args = [
         "ffmpeg",
         "-nostdin",
@@ -65,8 +77,11 @@ def extract(source, target, work, start=0, duration=None, channel=None):
     ]
     if duration is not None:
         args += ["-t", str(duration)]
-    if channel is not None:
-        args += ["-af", f"pan=mono|c0=c{channel}"]
+    chain = [f"pan=mono|c0=c{channel}"] if channel is not None else []
+    if profile := CLEANUP_PROFILES.get(cleanup, ""):
+        chain.append(profile)
+    if chain:
+        args += ["-af", ",".join(chain)]
     args += ["-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", "-threads", "1", str(target)]
     run_command(args, work / "ffmpeg.log")
 

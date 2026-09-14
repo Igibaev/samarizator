@@ -524,6 +524,47 @@ def describe_tracks(path, tracks, names=(), seconds=TRACK_SAMPLE_SECONDS):
     return "\n".join(lines), silent
 
 
+def compare_cleanup(path, seconds=120, channel=None):
+    """Render the cleanup profiles from one recording and measure what each changed.
+
+    Numbers and files, not adjectives: the loud seconds are speech, the quiet ones are
+    pauses, and the gap between them is what decides whether cleanup helped.
+    """
+    from tempfile import TemporaryDirectory
+
+    from .audio_quality import level_profile
+    from .media import CLEANUP_PROFILES, extract
+
+    path = Path(path)
+    if not path.is_file():
+        print(f"Файл не найден: {path}")
+        return 1
+    with wave.open(str(path)) as wav:
+        if channel is None and wav.getnchannels() == 2:
+            channel = 0  # the microphone track is the one that needs cleaning
+    print(f"{path.name}: сравниваю обработку на первых {seconds:.0f} с")
+    print("(громкие секунды — речь, тихие — паузы; важна разница между ними)\n")
+    print(f"{'профиль':10s} {'речь':>9s} {'паузы':>9s} {'разница':>9s}   файл")
+    for name in CLEANUP_PROFILES:
+        rendered = path.with_suffix(f".{name}.wav")
+        extract(path, rendered, path.parent, duration=seconds, channel=channel, cleanup=name)
+        with TemporaryDirectory() as tmp:
+            levels = level_profile(rendered, (MICROPHONE,), tmp, seconds=seconds)[0]["levels"]
+        if not levels:
+            continue
+        ordered = sorted(levels)
+        third = max(1, len(ordered) // 3)
+        quiet = ordered[third // 2]
+        loud = ordered[-third // 2 - 1]
+        print(f"{name:10s} {loud:>8.1f}дБ {quiet:>8.1f}дБ {loud - quiet:>8.1f}дБ   {rendered.name}")
+    print("\nПослушайте и выберите на слух:")
+    for name in CLEANUP_PROFILES:
+        print(f'  afplay "{path.with_suffix(f".{name}.wav")}"')
+    print("\nВыбранный профиль ставится в Настройки → Качество и термины → «Обработка звука».")
+    print("Он влияет только на то, что слышит Whisper: запись на диске не меняется.")
+    return 0
+
+
 def profile_recording(path, seconds=180):
     """Print how loud each track was, second by second, and flag outside gain control."""
     from tempfile import TemporaryDirectory
@@ -616,6 +657,8 @@ def main():
 
     if len(sys.argv) > 2 and sys.argv[1] == "profile":
         return profile_recording(sys.argv[2])
+    if len(sys.argv) > 2 and sys.argv[1] == "clean":
+        return compare_cleanup(sys.argv[2])
     if len(sys.argv) > 1 and sys.argv[1] == "record":
         options = sys.argv[2:]
 
@@ -636,6 +679,7 @@ def main():
             "Использование:\n"
             "  python -m samarizator.live <файл-записи.wav>   — уровни по дорожкам\n"
             "  python -m samarizator.live profile <файл>       — уровень по секундам и пампинг\n"
+            "  python -m samarizator.live clean <файл>         — сравнить профили обработки\n"
             "  python -m samarizator.live record [--seconds N] [--mix ИМЯ] [--source both|microphone|system]"
         )
         return 2

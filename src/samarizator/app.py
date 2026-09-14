@@ -309,6 +309,23 @@ class SettingsDialog(QDialog):
             qform.addRow(label, field)
         self.fields["glossary"].setMaxLength(800)
         self.fields["glossary"].setPlaceholderText("Samarizator, Иванов, EBITDA, названия ваших проектов")
+        cleanup = QComboBox()
+        for value, label in [
+            ("off", "Без обработки — как записано"),
+            ("light", "Лёгкая — срез гула и выравнивание громкости"),
+            ("strong", "Сильная — плюс подавление шипения"),
+        ]:
+            cleanup.addItem(label, value)
+        cleanup.setCurrentIndex(max(0, cleanup.findData(settings.audio_cleanup)))
+        self.fields["audio_cleanup"] = cleanup
+        qform.addRow("Обработка звука перед Whisper", cleanup)
+        cleanup_hint = QLabel(
+            "Обрабатывается только то, что слышит Whisper: сама запись на диске не меняется, "
+            "и профиль можно поменять и распознать заново. Сравнить на своей записи:\n"
+            "python -m samarizator.live clean <файл записи>"
+        )
+        cleanup_hint.setWordWrap(True)
+        qform.addRow(cleanup_hint)
         beam = QSpinBox()
         beam.setRange(1, 8)
         beam.setValue(settings.beam_size)

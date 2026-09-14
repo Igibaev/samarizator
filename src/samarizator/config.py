@@ -33,6 +33,7 @@ class Settings:
     live_microphone_device: str = ""
     live_system_device: str = ""
     live_system_backend: str = "screencapturekit"
+    audio_cleanup: str = "off"
 
     def quality_profile(self):
         """Opt-in profile. Preserve the user's ASR model and corporate API configuration."""
@@ -61,6 +62,8 @@ class Settings:
             raise ValueError("Источник live-записи: микрофон, системный звук или оба.")
         if self.live_system_backend not in {"screencapturekit", "device"}:
             raise ValueError("Захват системного звука: ScreenCaptureKit или устройство петли.")
+        if self.audio_cleanup not in {"off", "light", "strong"}:
+            raise ValueError("Обработка звука перед распознаванием: off, light или strong.")
         if not 2 <= self.memory_gb <= 64:
             raise ValueError("Бюджет памяти должен быть от 2 до 64 ГиБ.")
         if not 1 <= self.threads <= 16 or not 30 <= self.chunk_seconds <= 300:
