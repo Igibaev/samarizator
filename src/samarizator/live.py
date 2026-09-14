@@ -45,9 +45,16 @@ SOURCE_LABELS = {
 # stretching audio, which is audible, so the default corrects gently and the rest are
 # kept for A/B on a real Mac via scripts/diagnose_dual_audio.sh.
 MIX_PROFILES = {
-    "default": "aresample=async=1:first_pts=0,aformat=channel_layouts=mono",
-    "hard-sync": "aresample=async=1000:first_pts=0,aformat=channel_layouts=mono",
+    # Measured on a real Mac: `async=1` leaves drift uncorrected until it crosses
+    # aresample's `min_hard_comp` (0.1 s by default), which is then filled with digital
+    # silence — audible as a ~107 ms interruption. `gentle` corrects continuously by a
+    # fraction of a percent, far below hearing, and only stuffs after a full second.
+    "gentle": "aresample=async=50:min_hard_comp=1:first_pts=0,aformat=channel_layouts=mono",
     "no-resample": "aformat=channel_layouts=mono",
+    # Kept as probes: "hard-stuff" is what produced the ~107 ms silences, "stretch"
+    # trades them for a slight, continuous change of tempo.
+    "hard-stuff": "aresample=async=1:first_pts=0,aformat=channel_layouts=mono",
+    "stretch": "aresample=async=1000:first_pts=0,aformat=channel_layouts=mono",
     "legacy-pan": "aresample=async=1000:first_pts=0,pan=mono|c0=c0",
 }
 
@@ -189,7 +196,7 @@ class LiveRecorder:
         system_device="",
         system_backend=NATIVE,
         helper=None,
-        mix="default",
+        mix="gentle",
     ):
         if not capture_supported():
             raise LiveCaptureError("Live-запись пока поддерживается только на macOS.")
@@ -524,6 +531,48 @@ def describe_tracks(path, tracks, names=(), seconds=TRACK_SAMPLE_SECONDS):
     return "\n".join(lines), silent
 
 
+def compare_mixes(seconds=20, profiles=None):
+    """Record the same room with each mixing profile and count the interruptions.
+
+    The choice is a trade-off — uncorrected drift against inserted silence — so it is
+    settled by measurement on the machine that has the problem, not by argument.
+    """
+    from tempfile import TemporaryDirectory
+
+    from .audio_quality import gaps
+    from .media import extract
+
+    profiles = profiles or list(MIX_PROFILES)
+    print(f"Каждый профиль пишет {seconds:.0f} с. Говорите в микрофон, держите звук из приложений.\n")
+    rows = []
+    for name in profiles:
+        print(f"  пишу «{name}»…")
+        try:
+            path, _ = record_sample(seconds=seconds, mix=name, source=BOTH)
+        except LiveCaptureError as exc:
+            print(f"    не удалось: {exc}")
+            continue
+        counts = []
+        for channel in (0, 1):
+            with TemporaryDirectory() as tmp:
+                mono = Path(tmp) / "track.wav"
+                extract(path, mono, Path(tmp), duration=seconds, channel=channel)
+                found = gaps(mono)
+            counts.append((len(found["dropouts"]), len(found["zeros"])))
+        rows.append((name, counts, path))
+    print(f"\n{'профиль':14s} {'микрофон: провалы/нули':>24s} {'система: провалы/нули':>24s}")
+    for name, counts, _ in rows:
+        mic, system = counts
+        print(f"{name:14s} {f'{mic[0]}/{mic[1]}':>24s} {f'{system[0]}/{system[1]}':>24s}")
+    if rows:
+        best = min(rows, key=lambda row: (row[1][0][0], row[1][0][1]))
+        print(f"\nМеньше всего прерываний микрофона: «{best[0]}».")
+        print("Поставьте его в настройках live-записи и запишите встречу целиком для проверки.")
+        for name, _, path in rows:
+            print(f'  afplay "{path}"   # {name}')
+    return 0
+
+
 def report_gaps(path, seconds=300):
     """Describe interruptions in numbers, because nobody can send a sound over text."""
     from tempfile import TemporaryDirectory
@@ -709,6 +758,9 @@ def main():
         return compare_cleanup(sys.argv[2])
     if len(sys.argv) > 2 and sys.argv[1] == "gaps":
         return report_gaps(sys.argv[2])
+    if len(sys.argv) > 1 and sys.argv[1] == "compare-mix":
+        rest = sys.argv[2:]
+        return compare_mixes(seconds=float(rest[rest.index("--seconds") + 1]) if "--seconds" in rest else 20)
     if len(sys.argv) > 1 and sys.argv[1] == "record":
         options = sys.argv[2:]
 
@@ -731,6 +783,7 @@ def main():
             "  python -m samarizator.live profile <файл>       — уровень по секундам и пампинг\n"
             "  python -m samarizator.live clean <файл>         — сравнить профили обработки\n"
             "  python -m samarizator.live gaps <файл>          — найти прерывания звука\n"
+            "  python -m samarizator.live compare-mix          — сравнить профили сведения по прерываниям\n"
             "  python -m samarizator.live record [--seconds N] [--mix ИМЯ] [--source both|microphone|system]"
         )
         return 2

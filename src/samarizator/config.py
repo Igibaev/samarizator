@@ -34,6 +34,7 @@ class Settings:
     live_system_device: str = ""
     live_system_backend: str = "screencapturekit"
     audio_cleanup: str = "off"
+    live_mix: str = "gentle"
 
     def quality_profile(self):
         """Opt-in profile. Preserve the user's ASR model and corporate API configuration."""
@@ -64,6 +65,9 @@ class Settings:
             raise ValueError("Захват системного звука: ScreenCaptureKit или устройство петли.")
         if self.audio_cleanup not in {"off", "light", "strong"}:
             raise ValueError("Обработка звука перед распознаванием: off, light или strong.")
+        # Names mirror live.MIX_PROFILES; kept literal so config does not import capture code.
+        if self.live_mix not in {"gentle", "no-resample", "hard-stuff", "stretch", "legacy-pan"}:
+            raise ValueError("Неизвестный профиль сведения дорожек live-записи.")
         if not 2 <= self.memory_gb <= 64:
             raise ValueError("Бюджет памяти должен быть от 2 до 64 ГиБ.")
         if not 1 <= self.threads <= 16 or not 30 <= self.chunk_seconds <= 300:

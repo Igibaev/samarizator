@@ -268,6 +268,26 @@ class SettingsDialog(QDialog):
             box.setCurrentIndex(max(0, found))
             self.fields[key] = box
             form.addRow(label, box)
+        mixing = QComboBox()
+        for value, label in [
+            ("gentle", "Мягкое выравнивание — по умолчанию"),
+            ("no-resample", "Без выравнивания — дорожки как есть"),
+            ("stretch", "Жёсткое выравнивание темпом"),
+            ("hard-stuff", "Выравнивание вставкой тишины"),
+            ("legacy-pan", "Старое поведение до 14.09.2026"),
+        ]:
+            mixing.addItem(label, value)
+        mixing.setCurrentIndex(max(0, mixing.findData(settings.live_mix)))
+        self.fields["live_mix"] = mixing
+        form.addRow("Сведение двух дорожек", mixing)
+        mix_hint = QLabel(
+            "Микрофон и системный звук идут от разных часов, и расхождение приходится "
+            "компенсировать. Вставка тишины слышна как прерывание, растяжение темпа — как "
+            "лёгкое плавание звука. Сравнить на своих устройствах:\n"
+            "python -m samarizator.live compare-mix"
+        )
+        mix_hint.setWordWrap(True)
+        form.addRow(mix_hint)
         live_hint = QLabel(
             "Штатный захват берёт системный звук через ScreenCaptureKit: сторонний драйвер не нужен, "
             "разрешение — «Запись экрана и системного звука», отдельное от микрофонного. Оно "
@@ -696,6 +716,7 @@ class Window(QMainWindow):
                 microphone_device=self.settings.live_microphone_device,
                 system_device=self.settings.live_system_device,
                 system_backend=self.settings.live_system_backend,
+                mix=self.settings.live_mix,
             )
             recorder.start()
         except LiveCaptureError as exc:

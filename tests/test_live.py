@@ -287,7 +287,10 @@ def test_dual_capture_merges_microphone_and_system_into_two_channels(tmp_path, m
     # channel 0 alone recorded the noise floor of a stereo input instead of the voice.
     assert graph.count("aformat=channel_layouts=mono") == 2
     assert "pan=mono|c0=c0" not in graph
-    assert graph.count("aresample=async=1:first_pts=0") == 2
+    # Gentle alignment: enough to hold two clocks together, far below what is audible,
+    # and no hard stuffing until a full second of drift — the 107 ms silences came from
+    # aresample filling a 0.1 s gap with digital silence.
+    assert graph.count("aresample=async=50:min_hard_comp=1:first_pts=0") == 2
     assert args[args.index("-ac") + 1] == "2"
     assert recorder.tracks == ("microphone", "system")
     assert recorder.stop().is_file()
@@ -801,3 +804,48 @@ def test_gaps_stay_quiet_on_a_clean_track(tmp_path):
     found = gaps(mono)
 
     assert found["dropouts"] == [] and found["zeros"] == []
+
+
+def test_settings_carry_the_mixing_profile_into_the_recorder(tmp_path, monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    monkeypatch.setenv("SAMARIZATOR_HOME", str(tmp_path / "home"))
+    from PySide6.QtWidgets import QApplication
+
+    from samarizator.app import Window
+
+    app = QApplication.instance() or QApplication([])
+    partial = tmp_path / "live-2026-09-14_10-00-00-aaaabbbb.partial.wav"
+
+    class Recorder:
+        recording = True
+        elapsed = 1
+        source = "both"
+        tracks = ("microphone", "system")
+        inputs = ()
+
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.partial = partial
+
+        def start(self):
+            partial.write_bytes(b"RIFF" + b"\0" * 2048)
+            return partial
+
+    monkeypatch.setattr("samarizator.app.LiveRecorder", Recorder)
+    window = Window()
+    monkeypatch.setattr(window, "start_catchup", lambda: None)
+    window.settings.live_mix = "no-resample"
+    window.toggle_live()
+    assert window.live_recorder.kwargs["mix"] == "no-resample"
+    window.live_recorder = None
+    window.timer.stop()
+    window.close()
+    window.deleteLater()
+    app.processEvents()
+
+
+def test_settings_reject_an_unknown_mixing_profile():
+    from samarizator.config import Settings
+
+    with pytest.raises(ValueError, match="профиль сведения"):
+        Settings(live_mix="как-нибудь").validate()
