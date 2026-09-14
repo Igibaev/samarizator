@@ -35,6 +35,22 @@ SOURCE_LABELS = {
     BOTH: "микрофон и системный звук",
 }
 
+# How each input is prepared before the two tracks are merged.
+#
+# `aformat=channel_layouts=mono` downmixes exactly like `-ac 1` on the single-source
+# path. `pan=mono|c0=c0` (used until 2026-09-14) instead kept channel 0 alone, so a
+# stereo input whose voice was not on the left gave its noise floor and nothing else.
+#
+# `aresample=async` aligns two independent device clocks. High values buy alignment by
+# stretching audio, which is audible, so the default corrects gently and the rest are
+# kept for A/B on a real Mac via scripts/diagnose_dual_audio.sh.
+MIX_PROFILES = {
+    "default": "aresample=async=1:first_pts=0,aformat=channel_layouts=mono",
+    "hard-sync": "aresample=async=1000:first_pts=0,aformat=channel_layouts=mono",
+    "no-resample": "aformat=channel_layouts=mono",
+    "legacy-pan": "aresample=async=1000:first_pts=0,pan=mono|c0=c0",
+}
+
 # Short form for record titles, which have to stay readable in a narrow list.
 SOURCE_TAGS = {MICROPHONE: "микрофон", SYSTEM: "система", BOTH: "микрофон + система"}
 
@@ -173,6 +189,7 @@ class LiveRecorder:
         system_device="",
         system_backend=NATIVE,
         helper=None,
+        mix="default",
     ):
         if not capture_supported():
             raise LiveCaptureError("Live-запись пока поддерживается только на macOS.")
@@ -180,6 +197,9 @@ class LiveRecorder:
             raise LiveCaptureError("Неизвестный источник live-записи.")
         if system_backend not in SYSTEM_BACKENDS:
             raise LiveCaptureError("Неизвестный способ захвата системного звука.")
+        if mix not in MIX_PROFILES:
+            raise LiveCaptureError("Неизвестный профиль сведения дорожек.")
+        self.mix = mix
         self.ffmpeg = ffmpeg or shutil.which("ffmpeg")
         if not self.ffmpeg:
             raise LiveCaptureError("FFmpeg не найден. Запустите ./start.sh для установки.")
@@ -249,9 +269,13 @@ class LiveRecorder:
         return max(0.0, time.monotonic() - self.started) if self.started is not None else 0.0
 
     def _args(self, pipe_fd=None):
-        args = [self.ffmpeg, "-hide_banner", "-loglevel", "error", "-nostats", "-y"]
+        # `warning`, not `error`: dropped packets from a full input queue are reported as
+        # warnings, and they are exactly what a crackling recording sounds like.
+        args = [self.ffmpeg, "-hide_banner", "-loglevel", "warning", "-nostats", "-y"]
         for entry in self.inputs:
-            args += ["-thread_queue_size", "512"]
+            # A live device cannot wait: if its queue fills while the other input is busy,
+            # FFmpeg drops packets and the track clicks.
+            args += ["-thread_queue_size", "4096"]
             if entry.native:
                 # Raw PCM from the ScreenCaptureKit helper; FFmpeg cannot probe a pipe,
                 # so the format is stated explicitly and must match the helper's output.
@@ -271,10 +295,8 @@ class LiveRecorder:
         if len(self.inputs) == 1:
             args += ["-ac", "1"]
         else:
-            # Each device runs on its own clock; aresample keeps the two tracks on one
-            # timeline instead of letting drift accumulate over a long meeting.
             chains = [
-                f"[{position}:a]aresample=async=1000:first_pts=0,pan=mono|c0=c0[t{position}]"
+                f"[{position}:a]{MIX_PROFILES[self.mix]}[t{position}]"
                 for position in range(len(self.inputs))
             ]
             merge = "".join(f"[t{position}]" for position in range(len(self.inputs)))
@@ -388,7 +410,9 @@ class LiveRecorder:
             self.partial.unlink(missing_ok=True)
             raise LiveCaptureError(self._silence_message(helper_detail))
         self.partial.replace(self.path)
-        self.log.unlink(missing_ok=True)
+        # Warnings survive a successful recording: they explain clicks and dropouts.
+        if not self.log.is_file() or not self.log.read_text(errors="replace").strip():
+            self.log.unlink(missing_ok=True)
         self.helper_log.unlink(missing_ok=True)  # only a good recording removes the evidence
         return self.path
 
@@ -522,11 +546,52 @@ def check_recording(path):
     return 0
 
 
+def record_sample(seconds=10, mix="default", source=BOTH, folder=None):
+    """Record a short sample with one mixing profile and report what each track got."""
+    from .config import Settings
+
+    settings = Settings.load()
+    recorder = LiveRecorder(
+        folder=folder,
+        source=source,
+        microphone_device=settings.live_microphone_device,
+        system_device=settings.live_system_device,
+        system_backend=settings.live_system_backend,
+        mix=mix,
+    )
+    recorder.start()
+    time.sleep(seconds)
+    path = recorder.stop()
+    report, _ = describe_tracks(
+        path, recorder.tracks, [entry.name for entry in recorder.inputs], seconds=seconds
+    )
+    return path, report
+
+
 def main():
     import sys
 
+    if len(sys.argv) > 1 and sys.argv[1] == "record":
+        options = sys.argv[2:]
+
+        def option(name, fallback):
+            return options[options.index(name) + 1] if name in options else fallback
+
+        path, report = record_sample(
+            seconds=float(option("--seconds", 10)),
+            mix=option("--mix", "default"),
+            source=option("--source", BOTH),
+            folder=option("--folder", None),
+        )
+        print(report)
+        print(path)
+        return 0
     if len(sys.argv) < 2:
-        print("Использование: python -m samarizator.live <файл-записи.wav>")
+        print(
+            "Использование:\n"
+            "  python -m samarizator.live <файл-записи.wav>   — уровни по дорожкам\n"
+            "  python -m samarizator.live record [--seconds N] [--mix ИМЯ] [--source both|microphone|system]"
+        )
         return 2
     return check_recording(sys.argv[1])
 

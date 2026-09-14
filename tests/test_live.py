@@ -283,7 +283,11 @@ def test_dual_capture_merges_microphone_and_system_into_two_channels(tmp_path, m
     assert [args[i + 1] for i, a in enumerate(args) if a == "-i"] == [":2", ":1"]
     graph = args[args.index("-filter_complex") + 1]
     assert graph.endswith("[t0][t1]amerge=inputs=2[live]")
-    assert graph.count("aresample=async=1000:first_pts=0") == 2
+    # Both inputs are downmixed the way `-ac 1` does on the single-source path: taking
+    # channel 0 alone recorded the noise floor of a stereo input instead of the voice.
+    assert graph.count("aformat=channel_layouts=mono") == 2
+    assert "pan=mono|c0=c0" not in graph
+    assert graph.count("aresample=async=1:first_pts=0") == 2
     assert args[args.index("-ac") + 1] == "2"
     assert recorder.tracks == ("microphone", "system")
     assert recorder.stop().is_file()
@@ -647,3 +651,44 @@ def test_check_recording_exit_code_flags_a_dead_track(tmp_path, capsys):
     assert "Пустые дорожки" in capsys.readouterr().out
     stereo_fixture(recording, left=1, right=1)
     assert check_recording(recording) == 0
+
+
+def test_mix_profiles_exist_for_ab_testing_on_a_real_mac(tmp_path, monkeypatch):
+    """The shipped default is one of several graphs; the rest stay available to compare."""
+    from samarizator.live import MIX_PROFILES
+
+    monkeypatch.setenv("SAMARIZATOR_DEV", "1")
+    binary = available_helper(monkeypatch, tmp_path)
+    stub_devices(monkeypatch)
+    for name, chain in MIX_PROFILES.items():
+        recorder = LiveRecorder(
+            folder=tmp_path,
+            ffmpeg="/usr/bin/ffmpeg",
+            popen_factory=native_popen(),
+            source="both",
+            helper=binary,
+            mix=name,
+        )
+        graph = recorder._args(7)[recorder._args(7).index("-filter_complex") + 1]
+        assert graph.count(chain) == 2
+
+    with pytest.raises(LiveCaptureError, match="профиль сведения"):
+        LiveRecorder(folder=tmp_path, ffmpeg="/usr/bin/ffmpeg", source="both", mix="выдумка")
+
+
+def test_live_log_is_kept_when_ffmpeg_warned(tmp_path, monkeypatch):
+    """Dropped packets are warnings: keep them, they explain a crackling recording."""
+    monkeypatch.setenv("SAMARIZATOR_DEV", "1")
+
+    class WarningProcess(SuccessfulProcess):
+        def __init__(self, args, **kwargs):
+            super().__init__(args, **kwargs)
+            kwargs["stderr"].write(b"Thread message queue blocking; consider raising\n")
+            kwargs["stderr"].flush()
+
+    recorder = LiveRecorder(
+        folder=tmp_path, ffmpeg="/usr/bin/ffmpeg", device_index=0, popen_factory=WarningProcess
+    )
+    recorder.start()
+    recorder.stop()
+    assert "Thread message queue blocking" in recorder.log.read_text()
