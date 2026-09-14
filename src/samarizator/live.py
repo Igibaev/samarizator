@@ -524,6 +524,54 @@ def describe_tracks(path, tracks, names=(), seconds=TRACK_SAMPLE_SECONDS):
     return "\n".join(lines), silent
 
 
+def report_gaps(path, seconds=300):
+    """Describe interruptions in numbers, because nobody can send a sound over text."""
+    from tempfile import TemporaryDirectory
+
+    from .audio_quality import gaps
+    from .media import extract
+
+    path = Path(path)
+    if not path.is_file():
+        print(f"Файл не найден: {path}")
+        return 1
+    with wave.open(str(path)) as wav:
+        channels = wav.getnchannels()
+        duration = wav.getnframes() / max(1, wav.getframerate())
+    tracks = (MICROPHONE, SYSTEM) if channels == 2 else (MICROPHONE,)
+    labels = {MICROPHONE: "микрофон", SYSTEM: "системный звук"}
+    print(f"{path.name}: {duration:.1f} с, каналов {channels}. Проверяю первые {seconds} с.\n")
+    for channel, track in enumerate(tracks):
+        with TemporaryDirectory() as tmp:
+            mono = Path(tmp) / "track.wav"
+            extract(path, mono, Path(tmp), duration=min(seconds, duration), channel=channel)
+            found = gaps(mono)
+        name = labels.get(track, track)
+        lengths = [item["ms"] for item in found["dropouts"]]
+        print(f"--- {name} ---")
+        print(f"  провалов внутри речи: {len(lengths)}")
+        if lengths:
+            ordered = sorted(lengths)
+            print(
+                f"  длительность, мс: минимум {ordered[0]}, медиана {ordered[len(ordered) // 2]}, "
+                f"максимум {ordered[-1]}"
+            )
+            print("  первые: " + ", ".join(f"{d['start']:.2f}с/{d['ms']}мс" for d in found["dropouts"][:8]))
+            if found["spacing"]:
+                rhythm = "регулярные" if found["regular"] else "нерегулярные"
+                print(f"  интервал между провалами: медиана {found['spacing']} с — {rhythm}")
+        print(f"  участков цифровой тишины (ровные нули): {len(found['zeros'])}")
+        if found["zeros"]:
+            print(
+                "  ровные нули означают потерянные сэмплы: живой микрофон всегда даёт хоть "
+                "какой-то шум. Это конвейер, а не комната."
+            )
+        print()
+    log = path.with_suffix(".log")
+    print(f"Журнал FFmpeg рядом с записью: {log}" if log.is_file() else "Журнала FFmpeg нет (записывался без предупреждений).")
+    return 0
+
+
 def compare_cleanup(path, seconds=120, channel=None):
     """Render the cleanup profiles from one recording and measure what each changed.
 
@@ -659,6 +707,8 @@ def main():
         return profile_recording(sys.argv[2])
     if len(sys.argv) > 2 and sys.argv[1] == "clean":
         return compare_cleanup(sys.argv[2])
+    if len(sys.argv) > 2 and sys.argv[1] == "gaps":
+        return report_gaps(sys.argv[2])
     if len(sys.argv) > 1 and sys.argv[1] == "record":
         options = sys.argv[2:]
 
@@ -680,6 +730,7 @@ def main():
             "  python -m samarizator.live <файл-записи.wav>   — уровни по дорожкам\n"
             "  python -m samarizator.live profile <файл>       — уровень по секундам и пампинг\n"
             "  python -m samarizator.live clean <файл>         — сравнить профили обработки\n"
+            "  python -m samarizator.live gaps <файл>          — найти прерывания звука\n"
             "  python -m samarizator.live record [--seconds N] [--mix ИМЯ] [--source both|microphone|system]"
         )
         return 2

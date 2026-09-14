@@ -175,3 +175,51 @@ def ducking(profile, quiet_gap=8.0, loud=-35.0):
         typical=round(typical, 1),
         quiet=len(quiet),
     )
+
+
+def gaps(path, floor_db=-60, min_ms=4, max_ms=800):
+    """Find dropouts: short silences sitting inside speech, and runs of exact zeros.
+
+    A microphone never produces digital silence — even a quiet room has a noise floor.
+    So a run of exact zeros is proof that samples were lost somewhere in the pipeline,
+    while a near-silent run between loud audio is a dropout you can hear as a stutter.
+    """
+    floor = 32768 * 10 ** (floor_db / 20)
+    rate, found, zeros = 16000, [], []
+    position = 0
+    quiet_from = zero_from = None
+    before = after = 0.0
+    for samples in frames(path):
+        for sample in samples:
+            value = abs(sample)
+            if value < floor:
+                if quiet_from is None:
+                    quiet_from, before = position, after
+            else:
+                if quiet_from is not None:
+                    length = (position - quiet_from) / rate * 1000
+                    # Only count it when there was sound on both sides: a pause between
+                    # phrases is not a dropout.
+                    if min_ms <= length <= max_ms and before > floor * 2:
+                        found.append(dict(start=quiet_from / rate, ms=round(length, 1)))
+                    quiet_from = None
+                after = value
+            if sample == 0:
+                if zero_from is None:
+                    zero_from = position
+            else:
+                if zero_from is not None:
+                    length = (position - zero_from) / rate * 1000
+                    if length >= min_ms:
+                        zeros.append(dict(start=zero_from / rate, ms=round(length, 1)))
+                    zero_from = None
+            position += 1
+    starts = [item["start"] for item in found]
+    spacing = sorted(round(b - a, 2) for a, b in zip(starts, starts[1:]))
+    return dict(
+        seconds=position / rate,
+        dropouts=found,
+        zeros=zeros,
+        spacing=spacing[len(spacing) // 2] if spacing else None,
+        regular=bool(spacing) and (spacing[-1] - spacing[0]) < 0.25 * max(spacing[-1], 0.01),
+    )

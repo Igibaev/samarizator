@@ -747,3 +747,57 @@ def test_ducking_needs_two_tracks_and_enough_speech():
         dict(track="system", channel=1, levels=[-70] * 4),
     ]
     assert ducking(quiet) is None  # nobody spoke on the far side: nothing to judge
+
+
+def dropout_fixture(path, gap_ms=25, period=1.0, exact_zeros=True, seconds=8):
+    """Speech with a short interruption every `period` seconds, as a lost buffer looks."""
+    import math
+    import random
+    import struct
+    import wave
+
+    rate = 16000
+    random.seed(3)
+    with wave.open(str(path), "wb") as wav:
+        wav.setparams((2, 2, rate, 0, "NONE", "not compressed"))
+        frames = bytearray()
+        for index in range(rate * seconds):
+            moment = index / rate
+            voice = 0.2 * math.sin(2 * math.pi * 200 * moment) + 0.01 * (random.random() * 2 - 1)
+            dropping = (index % int(rate * period)) < int(gap_ms / 1000 * rate) and index > rate
+            mic = 0 if (dropping and exact_zeros) else voice
+            system = 0.25 * math.sin(2 * math.pi * 330 * moment)
+            frames += struct.pack("<hh", int(mic * 32767), int(system * 32767))
+        wav.writeframes(bytes(frames))
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg required")
+def test_gaps_finds_regular_dropouts_and_names_them_lost_samples(tmp_path):
+    from samarizator.audio_quality import gaps
+    from samarizator.media import extract
+
+    recording = tmp_path / "dropouts.wav"
+    dropout_fixture(recording)
+    mono = tmp_path / "mic.wav"
+    extract(recording, mono, tmp_path, channel=0)
+    found = gaps(mono)
+
+    assert len(found["dropouts"]) >= 5
+    assert 20 <= found["dropouts"][0]["ms"] <= 30
+    assert found["spacing"] == 1.0 and found["regular"]
+    # Exact zeros cannot come from a real microphone: they prove samples were lost.
+    assert found["zeros"]
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg required")
+def test_gaps_stay_quiet_on_a_clean_track(tmp_path):
+    from samarizator.audio_quality import gaps
+    from samarizator.media import extract
+
+    recording = tmp_path / "clean.wav"
+    dropout_fixture(recording, gap_ms=0, exact_zeros=False)
+    mono = tmp_path / "system.wav"
+    extract(recording, mono, tmp_path, channel=1)
+    found = gaps(mono)
+
+    assert found["dropouts"] == [] and found["zeros"] == []
