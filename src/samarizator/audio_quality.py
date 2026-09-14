@@ -121,3 +121,57 @@ def track_levels(path, tracks, work, seconds=None):
         levels.append(dict(track=name, channel=channel, **diagnose(mono)))
         mono.unlink(missing_ok=True)
     return levels
+
+
+def level_profile(path, tracks, work, seconds=180, step=1.0):
+    """Per-second loudness of each track, to see pumping instead of guessing at it.
+
+    Automatic gain control and echo cancellation live outside this app, in macOS mic
+    modes and in the meeting client. Their signature is a level that drops in step
+    with the other side speaking — visible here, inaudible in a single number.
+    """
+    profile = []
+    for channel, name in enumerate(tracks):
+        mono = Path(work) / f"profile-{channel}.wav"
+        extract(path, mono, Path(work), duration=seconds, channel=channel)
+        window = int(16000 * step)
+        levels, block, total = [], 0, 0
+        for samples in frames(mono):
+            for sample in samples:
+                block += sample * sample
+                total += 1
+                if total >= window:
+                    levels.append(20 * math.log10(max(math.sqrt(block / total), 1e-8) / 32768))
+                    block, total = 0, 0
+        if total:
+            levels.append(20 * math.log10(max(math.sqrt(block / total), 1e-8) / 32768))
+        mono.unlink(missing_ok=True)
+        profile.append(dict(track=name, channel=channel, levels=[round(x, 1) for x in levels]))
+    return profile
+
+
+def ducking(profile, quiet_gap=8.0, loud=-35.0):
+    """Share of seconds where one track dips while the other is loud.
+
+    A high share is the fingerprint of gain control reacting to the far side: the
+    microphone is turned down exactly while somebody else speaks.
+    """
+    if len(profile) < 2:
+        return None
+    mic, system = profile[0]["levels"], profile[1]["levels"]
+    pairs = list(zip(mic, system))
+    speaking = [(m, s) for m, s in pairs if s > loud]
+    if len(speaking) < 5:
+        return None
+    quiet = [m for m, _ in pairs if m <= loud]
+    reference = sorted(m for m, s in pairs if s <= loud)
+    if not reference:
+        return None
+    typical = reference[len(reference) // 2]
+    dips = sum(1 for m, _ in speaking if typical - m >= quiet_gap)
+    return dict(
+        share=dips / len(speaking),
+        seconds=len(speaking),
+        typical=round(typical, 1),
+        quiet=len(quiet),
+    )

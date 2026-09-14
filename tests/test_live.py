@@ -692,3 +692,58 @@ def test_live_log_is_kept_when_ffmpeg_warned(tmp_path, monkeypatch):
     recorder.start()
     recorder.stop()
     assert "Thread message queue blocking" in recorder.log.read_text()
+
+
+def pumping_fixture(path, duck_db=12.0, seconds=12):
+    """Two tracks where the microphone dips exactly while the far side speaks."""
+    import math
+    import struct
+    import wave
+
+    rate = 16000
+    with wave.open(str(path), "wb") as wav:
+        wav.setparams((2, 2, rate, 0, "NONE", "not compressed"))
+        frames = bytearray()
+        for index in range(rate * seconds):
+            moment = index / rate
+            far_side = (int(moment) // 3) % 2 == 1
+            gain = 0.25 * (10 ** (-duck_db / 20)) if far_side else 0.25
+            mic = int(gain * 32767 * math.sin(2 * math.pi * 180 * moment))
+            system = int((0.3 if far_side else 0.0005) * 32767 * math.sin(2 * math.pi * 300 * moment))
+            frames += struct.pack("<hh", mic, system)
+        wav.writeframes(bytes(frames))
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg required")
+def test_level_profile_and_ducking_detect_outside_gain_control(tmp_path):
+    from samarizator.audio_quality import ducking, level_profile
+
+    recording = tmp_path / "pumping.wav"
+    pumping_fixture(recording)
+    profile = level_profile(recording, ("microphone", "system"), tmp_path, seconds=12)
+
+    assert [track["track"] for track in profile] == ["microphone", "system"]
+    assert len(profile[0]["levels"]) >= 11
+    verdict = ducking(profile)
+    assert verdict["share"] > 0.9  # the microphone is turned down whenever the far side talks
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg required")
+def test_steady_microphone_is_not_reported_as_ducking(tmp_path):
+    from samarizator.audio_quality import ducking, level_profile
+
+    recording = tmp_path / "steady.wav"
+    pumping_fixture(recording, duck_db=0.0)
+    verdict = ducking(level_profile(recording, ("microphone", "system"), tmp_path, seconds=12))
+    assert verdict["share"] == 0
+
+
+def test_ducking_needs_two_tracks_and_enough_speech():
+    from samarizator.audio_quality import ducking
+
+    assert ducking([dict(track="microphone", channel=0, levels=[-20, -20])]) is None
+    quiet = [
+        dict(track="microphone", channel=0, levels=[-20] * 4),
+        dict(track="system", channel=1, levels=[-70] * 4),
+    ]
+    assert ducking(quiet) is None  # nobody spoke on the far side: nothing to judge

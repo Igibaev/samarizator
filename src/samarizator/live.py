@@ -524,6 +524,49 @@ def describe_tracks(path, tracks, names=(), seconds=TRACK_SAMPLE_SECONDS):
     return "\n".join(lines), silent
 
 
+def profile_recording(path, seconds=180):
+    """Print how loud each track was, second by second, and flag outside gain control."""
+    from tempfile import TemporaryDirectory
+
+    from .audio_quality import ducking, level_profile
+
+    path = Path(path)
+    if not path.is_file():
+        print(f"Файл не найден: {path}")
+        return 1
+    with wave.open(str(path)) as wav:
+        channels = wav.getnchannels()
+    tracks = (MICROPHONE, SYSTEM) if channels == 2 else (MICROPHONE,)
+    labels = {MICROPHONE: "микрофон", SYSTEM: "система"}
+    with TemporaryDirectory() as tmp:
+        profile = level_profile(path, tracks, tmp, seconds=seconds)
+    print(f"{path.name}: уровень по секундам, dBFS (тише −60 — тишина)\n")
+    print(f"{'сек':>4}  " + "  ".join(f"{labels.get(t['track'], t['track']):>26}" for t in profile))
+    for index in range(max(len(t["levels"]) for t in profile)):
+        row = f"{index:>4}  "
+        for track in profile:
+            value = track["levels"][index] if index < len(track["levels"]) else None
+            if value is None:
+                row += " " * 28
+                continue
+            bar = "█" * max(0, min(18, int((value + 60) / 3)))
+            row += f"{value:>7.1f} {bar:<18}  "
+        print(row)
+    verdict = ducking(profile)
+    if verdict:
+        print(
+            f"\nМикрофон проседает в {verdict['share']:.0%} секунд, когда говорит другая сторона "
+            f"(обычный уровень {verdict['typical']} dBFS, проверено {verdict['seconds']} с)."
+        )
+        if verdict["share"] > 0.4:
+            print(
+                "Это подавление эха или автоусиление вне приложения: macOS Mic Mode либо "
+                "автогромкость в Zoom/Teams. Приложение так не умеет — в его цепочке нет "
+                "ни гейта, ни компрессора."
+            )
+    return 0
+
+
 def check_recording(path):
     """CLI: report what actually landed in each channel of a live recording."""
     path = Path(path)
@@ -571,6 +614,8 @@ def record_sample(seconds=10, mix="default", source=BOTH, folder=None):
 def main():
     import sys
 
+    if len(sys.argv) > 2 and sys.argv[1] == "profile":
+        return profile_recording(sys.argv[2])
     if len(sys.argv) > 1 and sys.argv[1] == "record":
         options = sys.argv[2:]
 
@@ -590,6 +635,7 @@ def main():
         print(
             "Использование:\n"
             "  python -m samarizator.live <файл-записи.wav>   — уровни по дорожкам\n"
+            "  python -m samarizator.live profile <файл>       — уровень по секундам и пампинг\n"
             "  python -m samarizator.live record [--seconds N] [--mix ИМЯ] [--source both|microphone|system]"
         )
         return 2
