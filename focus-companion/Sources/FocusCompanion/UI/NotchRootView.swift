@@ -14,13 +14,24 @@ struct NotchRootView: View {
     // дыхания и глобальный монитор мыши внутри него живут, пока жива вью.
     @State private var eyesModel = EyesViewModel()
 
+    /// Подложка капсулы: матовое стекло плюс затемняющая тонировка.
+    /// В debug-режиме — плоский красный, иначе капсулу не разглядеть.
+    @ViewBuilder
+    private var capsuleBackground: some View {
+        if AppearanceConfig.isDebug {
+            AppearanceConfig.capsuleColor
+        } else {
+            ZStack {
+                VisualEffectBackground(material: AppearanceConfig.capsuleMaterial)
+                AppearanceConfig.capsuleColor
+                    .opacity(AppearanceConfig.capsuleTintOpacity)
+            }
+        }
+    }
+
     var body: some View {
         ZStack {
-            NotchShape(
-                topCornerRadius: AppearanceConfig.topCornerRadius,
-                bottomCornerRadius: AppearanceConfig.bottomCornerRadius
-            )
-            .fill(AppearanceConfig.capsuleColor.opacity(AppearanceConfig.capsuleOpacity))
+            capsuleBackground
 
             EyesView(model: eyesModel)
                 // Debug-режим: персонаж увеличен и сдвинут ниже, чтобы
