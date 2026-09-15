@@ -36,6 +36,13 @@ mkdir -p "$RESOURCES_DIR"
 cp "$BIN_PATH" "$MACOS_DIR/$APP_NAME"
 cp "$SCRIPT_DIR/Resources/Info.plist" "$CONTENTS_DIR/Info.plist"
 
+# Ad-hoc подпись. На Apple Silicon бинарник, скопированный в бандл, может
+# потерять валидность подписи, и система убьёт процесс на старте без внятного
+# сообщения. Подпись "-" (ad-hoc) снимает этот класс проблем; для распространения
+# нужна настоящая подпись, но для локального запуска этого достаточно.
+echo "==> Подпись (ad-hoc)"
+codesign --force --deep --sign - "$APP_BUNDLE"
+
 echo "==> Запуск"
 open "$APP_BUNDLE"
 
