@@ -32,13 +32,12 @@ final class NotchWindowController {
 
     /// Хранилище задач — Фаза 4а. Живёт здесь по той же причине, что и
     /// `stateMachine`/`hoverDetector`: не должно пересоздаваться при переезде
-    /// панели между экранами (пересоздание `ModelContext` на каждый чих
-    /// экрана — ненужный риск, а не оптимизация).
+    /// панели между экранами: перечитывать файл задач на каждый чих экрана
+    /// незачем.
     let taskPanel: TaskPanelController
 
     init() {
-        let container = PersistenceConfig.makeContainer()
-        let store = TaskStore(container: container)
+        let store = TaskStore()
         self.taskPanel = TaskPanelController(store: store, stateMachine: stateMachine)
 
         hoverDetector.onExpansionChange = { [weak self] expanded in

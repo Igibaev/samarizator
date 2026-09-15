@@ -51,11 +51,7 @@ struct ExpandedPanelView: View {
                     .font(.system(size: 10))
                     .foregroundStyle(.white.opacity(0.45))
             } else {
-                // `id: \.persistentModelID`, а не полагаемся на неявный
-                // `Identifiable` от `@Model` — не проверено компилятором
-                // (см. отчёт), а `persistentModelID` гарантированно есть у
-                // любого `PersistentModel`.
-                ForEach(taskPanel.store.activeTasks, id: \.persistentModelID) { task in
+                ForEach(taskPanel.store.activeTasks) { task in
                     taskRow(task)
                 }
             }
