@@ -30,10 +30,18 @@ final class MouseTracker {
     /// Вызывается при каждом обновлении позиции, уже на главном акторе.
     var onMove: ((CGPoint) -> Void)?
 
-    private var monitor: Any?
+    /// Токен монитора лежит в отдельной Sendable-коробке по той же причине,
+    /// что и таймеры в `TaskBag`: `deinit` у @MainActor-класса выполняется вне
+    /// актора и не может читать изолированные свойства, а снимать монитор при
+    /// освобождении обязательно — иначе он переживёт объект.
+    private final class MonitorBox: @unchecked Sendable {
+        var monitor: Any?
+    }
+
+    private let monitorBox = MonitorBox()
 
     init() {
-        monitor = NSEvent.addGlobalMonitorForEvents(
+        monitorBox.monitor = NSEvent.addGlobalMonitorForEvents(
             matching: [.mouseMoved, .leftMouseDragged, .rightMouseDragged]
         ) { [weak self] _ in
             // Документация Apple не гарантирует явно, что обработчик глобального
@@ -49,7 +57,7 @@ final class MouseTracker {
     }
 
     deinit {
-        if let monitor {
+        if let monitor = monitorBox.monitor {
             NSEvent.removeMonitor(monitor)
         }
     }

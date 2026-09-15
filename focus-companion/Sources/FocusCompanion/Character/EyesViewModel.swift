@@ -36,9 +36,10 @@ final class EyesViewModel {
     /// а не наоборот.
     private var restOffset: CGPoint = .zero
 
-    private var blinkTask: Task<Void, Never>?
-    private var saccadeLoopTask: Task<Void, Never>?
-    private var breathTask: Task<Void, Never>?
+    /// Таймеры моргания, саккад и дыхания. Лежат в `TaskBag`, а не в
+    /// обычных свойствах, потому что их надо отменять в `deinit` — а тот у
+    /// @MainActor-класса не имеет доступа к изолированным свойствам.
+    private let taskBag = TaskBag()
 
     init() {
         mouseTracker.onMove = { [weak self] location in
@@ -50,9 +51,7 @@ final class EyesViewModel {
     }
 
     deinit {
-        blinkTask?.cancel()
-        saccadeLoopTask?.cancel()
-        breathTask?.cancel()
+        taskBag.cancelAll()
     }
 
     // MARK: - Слежение за курсором
@@ -95,14 +94,13 @@ final class EyesViewModel {
     // MARK: - Моргание
 
     private func scheduleNextBlink() {
-        blinkTask?.cancel()
         let delay = Double.random(in: CharacterConfig.blinkMinInterval...CharacterConfig.blinkMaxInterval)
-        blinkTask = Task { [weak self] in
+        taskBag.replace(.blink, with: Task { [weak self] in
             try? await Task.sleep(nanoseconds: Self.nanoseconds(delay))
             guard !Task.isCancelled, let self else { return }
             await self.performBlinkCycle()
             self.scheduleNextBlink()
-        }
+        })
     }
 
     private func performBlinkCycle() async {
@@ -137,8 +135,7 @@ final class EyesViewModel {
     /// сложнее и не даёт выигрыша: саккада — редкое и не батарее-критичное
     /// событие.
     private func startSaccadeLoop() {
-        saccadeLoopTask?.cancel()
-        saccadeLoopTask = Task { [weak self] in
+        taskBag.replace(.saccade, with: Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 500_000_000)
                 guard !Task.isCancelled, let self else { return }
@@ -157,7 +154,7 @@ final class EyesViewModel {
                     try? await Task.sleep(nanoseconds: Self.nanoseconds(pause))
                 }
             }
-        }
+        })
     }
 
     private func performSaccade() async {
@@ -199,8 +196,7 @@ final class EyesViewModel {
     /// саккады, и одинаково надёжно подхватывается @Observable-свойством
     /// вне тела `View`.
     private func startBreathing() {
-        breathTask?.cancel()
-        breathTask = Task { [weak self] in
+        taskBag.replace(.breath, with: Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
                 let half = CharacterConfig.breathPeriod / 2
@@ -214,7 +210,7 @@ final class EyesViewModel {
                 }
                 try? await Task.sleep(nanoseconds: Self.nanoseconds(half))
             }
-        }
+        })
     }
 
     // MARK: - Мелкие утилиты
