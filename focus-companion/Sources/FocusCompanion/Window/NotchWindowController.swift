@@ -35,7 +35,7 @@ final class NotchWindowController {
 
         let frame = targetScreen.capsulePanelFrame
         let newPanel = NotchPanel(contentRect: frame)
-        newPanel.contentView = Self.makeContentView(size: frame.size)
+        newPanel.contentView = NSHostingView(rootView: NotchRootView())
 
         // Повторно после contentView: NSHostingView добавляет свои tracking-области,
         // и флаг важнее любых настроек содержимого — меню-бар под капсулой обязан
@@ -64,44 +64,11 @@ final class NotchWindowController {
         } else {
             // Тот же экран, но его геометрия могла измениться (например,
             // сменилось разрешение) — просто обновляем фрейм панели.
-            let newFrame = targetScreen.capsulePanelFrame
-            panel?.setFrame(newFrame, display: true)
-            // Маска стекла нарисована под конкретный размер — при смене
-            // разрешения её надо перерисовать, иначе форма разъедется.
-            if let effectView = panel?.contentView as? NSVisualEffectView {
-                effectView.maskImage = NotchShapeMask.image(size: newFrame.size)
-            }
+            panel?.setFrame(targetScreen.capsulePanelFrame, display: true)
         }
     }
 
     func moveToScreen(_ screen: NSScreen) {
         show(on: screen)
-    }
-
-    /// Собирает содержимое панели: матовое стекло снизу, SwiftUI-персонаж сверху.
-    ///
-    /// Стекло — это `NSVisualEffectView` в роли contentView, а не подложка
-    /// внутри SwiftUI. Причина: `blendingMode = .behindWindow` размывает то,
-    /// что позади окна, и работает только пока вью рисуется самим оконным
-    /// сервером. Любая обрезка средствами SwiftUI (`clipShape`) уводит его в
-    /// отдельный слой, размытие пропадает и остаётся плоская заливка. Поэтому
-    /// форму стеклу задаёт его собственный `maskImage`.
-    private static func makeContentView(size: NSSize) -> NSView {
-        let effectView = NSVisualEffectView(frame: NSRect(origin: .zero, size: size))
-        effectView.material = AppearanceConfig.capsuleMaterial
-        effectView.blendingMode = .behindWindow
-        // .active явно: панель никогда не бывает key-окном (canBecomeKey = false),
-        // и в автоматическом режиме стекло навсегда осталось бы "неактивным".
-        effectView.state = .active
-        effectView.isEmphasized = false
-        effectView.maskImage = NotchShapeMask.image(size: size)
-        effectView.autoresizingMask = [.width, .height]
-
-        let hostingView = NSHostingView(rootView: NotchRootView())
-        hostingView.frame = effectView.bounds
-        hostingView.autoresizingMask = [.width, .height]
-        effectView.addSubview(hostingView)
-
-        return effectView
     }
 }
