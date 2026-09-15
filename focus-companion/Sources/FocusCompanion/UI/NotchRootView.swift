@@ -100,7 +100,7 @@ struct NotchRootView: View {
                     // состояниях: смещение задано относительно центра окна,
                     // а капсула под ними при раскрытии ездит сама. Отсюда и
                     // вычитание её собственного смещения.
-                    .offset(x: hoverDetector.eyesOffsetX - currentCapsuleOffsetX)
+                    .offset(x: currentEyesOffsetX - currentCapsuleOffsetX)
                     // Debug-режим: персонаж увеличен и сдвинут ниже, чтобы
                     // моргание и саккады было видно в деталях — сама капсула
                     // в этом же режиме тоже вытянута вниз.
@@ -132,6 +132,13 @@ struct NotchRootView: View {
         .allowsHitTesting(hoverDetector.isExpanded)
     }
 
+    /// Положение глаз относительно центра окна в текущем состоянии.
+    /// В раскрытом добавляется сдвиг влево от края (см. конфиг).
+    private var currentEyesOffsetX: CGFloat {
+        hoverDetector.eyesOffsetX
+            + (hoverDetector.isExpanded ? CharacterConfig.eyesExpandedXShift : 0)
+    }
+
     /// Смещение капсулы относительно центра окна в текущем состоянии.
     private var currentCapsuleOffsetX: CGFloat {
         hoverDetector.isExpanded ? 0 : hoverDetector.collapsedOffsetX
@@ -148,7 +155,7 @@ struct NotchRootView: View {
             .frame(width: CharacterConfig.highlightGlowSize, height: CharacterConfig.highlightGlowSize)
             .blur(radius: CharacterConfig.highlightBlurRadius)
             .opacity(stateMachine.appearance.highlightIntensity * (0.6 + 0.4 * eyesModel.breathPulse))
-            .offset(x: hoverDetector.eyesOffsetX, y: CharacterConfig.eyesYOffset)
+            .offset(x: currentEyesOffsetX, y: CharacterConfig.eyesYOffset)
             .allowsHitTesting(false)
     }
 }
