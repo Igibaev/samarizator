@@ -17,6 +17,10 @@ final class TaskBag: @unchecked Sendable {
         case blink
         case saccade
         case breath
+        /// Опрос `NSEvent.mouseLocation` в `HoverDetector` (Фаза 3) — тот же
+        /// generic-контейнер, что и у циклов персонажа, чтобы не заводить
+        /// под таймеры новую инфраструктуру отмены.
+        case hoverPoll
     }
 
     private let lock = NSLock()

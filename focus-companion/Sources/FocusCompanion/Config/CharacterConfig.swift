@@ -139,6 +139,27 @@ enum CharacterConfig {
     /// дыхание бросается в глаза, амплитуда слишком велика (ориентир 2-3%).
     static let breathAmplitude: CGFloat = 0.025
 
+    // MARK: - Состояния (Фаза 3)
+
+    /// Длительность анимации перехода между `StateAppearance` двух состояний
+    /// (форма/наклон глаз, цвет и интенсивность подсветки) в
+    /// `CompanionStateMachine.setState`.
+    static let stateTransitionDuration: Double = 0.4
+
+    /// Размер и сила блюра мягкого свечения-подсветки позади глаз
+    /// (`NotchRootView.highlightGlow`). Цвет и интенсивность задаёт
+    /// `StateAppearance` конкретного состояния — эти два числа управляют
+    /// только "пятном" как таковым, одинаковым для всех состояний.
+    static let highlightGlowSize: CGFloat = 40
+    static let highlightBlurRadius: CGFloat = 18
+
+    /// Базовая амплитуда "подпрыгивания" в pt при
+    /// `StateAppearance.bobAmplitudeMultiplier == 1`. Переиспользует уже
+    /// идущий цикл дыхания в `EyesViewModel.startBreathing` — отдельного
+    /// таймера под это нет (см. PHASE-3-PROMPT.md: "без второго набора
+    /// таймеров").
+    static let bobAmplitude: CGFloat = 4
+
     // MARK: - Debug-отображение
 
     /// Во сколько раз увеличивать персонажа в debug-режиме — иначе на

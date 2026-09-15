@@ -11,6 +11,11 @@ import Observation
 /// так вся физика (`interactiveSpring`, `easeOut`...) остаётся стандартной
 /// логикой SwiftUI, а не самодельным кодом, который здесь физически нельзя
 /// ни разу собрать и посмотреть глазами.
+///
+/// Фаза 3: класс получает `CompanionStateMachine` и на каждом шаге своих же
+/// циклов читает её `appearance` — множители к интервалам/амплитудам. Так
+/// машина состояний ВЛИЯЕТ на уже существующие таймеры, не заводя вторых
+/// (см. PHASE-3-PROMPT.md, раздел про `CompanionStateMachine`).
 @MainActor
 @Observable
 final class EyesViewModel {
@@ -28,7 +33,22 @@ final class EyesViewModel {
     /// её форма жёстко привязана к физическому вырезу (см. PHASE-2-PROMPT.md).
     private(set) var breathScale: CGFloat = 1
 
+    /// Нормированная (0...1) фаза дыхания: 0 на выдохе, 1 на пике вдоха.
+    /// Используется как готовый источник плавной пульсации для подсветки
+    /// состояния (`.reminding`) — второй таймер под "мягкую пульсацию" не
+    /// заводим, переиспользуем уже идущий цикл дыхания.
+    private(set) var breathPulse: Double = 0
+
+    /// Доп. вертикальный сдвиг пары глаз от "подпрыгивания" `.celebrating`
+    /// (`StateAppearance.bobAmplitudeMultiplier`). Синхронно с дыханием, тем
+    /// же циклом — см. `startBreathing`.
+    private(set) var bobOffsetY: CGFloat = 0
+
     private let mouseTracker = MouseTracker()
+
+    /// Машина состояний — источник множителей к циклам ниже. Ссылка общая с
+    /// `NotchRootView`/`EyesView` (та же инстанция), не собственная копия.
+    private let stateMachine: CompanionStateMachine
 
     /// Точка, куда зрачок "должен" смотреть в состоянии покоя — то есть
     /// нормированное смещение, посчитанное из реальной позиции курсора.
@@ -41,7 +61,8 @@ final class EyesViewModel {
     /// @MainActor-класса не имеет доступа к изолированным свойствам.
     private let taskBag = TaskBag()
 
-    init() {
+    init(stateMachine: CompanionStateMachine) {
+        self.stateMachine = stateMachine
         mouseTracker.onMove = { [weak self] location in
             self?.handleMouseMove(to: location)
         }
@@ -56,8 +77,18 @@ final class EyesViewModel {
 
     // MARK: - Слежение за курсором
 
+    /// Публичная точка входа для слежения, питаемая ЛИБО глобальным
+    /// монитором (`MouseTracker`, свёрнутое состояние панели), ЛИБО 20 Гц
+    /// опросом `HoverDetector` (раскрытое состояние, где монитор слепнет —
+    /// см. PHASE-3-PROMPT.md, решение №1). Вызывающая сторона сама решает,
+    /// какой источник сейчас актуален — здесь оба ведут к одной и той же
+    /// логике.
+    func updateGaze(from location: CGPoint) {
+        handleMouseMove(to: location)
+    }
+
     private func handleMouseMove(to location: CGPoint) {
-        let target = Self.normalizedOffset(mouseLocation: location)
+        let target = normalizedOffset(mouseLocation: location)
         restOffset = target
         withAnimation(
             .interactiveSpring(
@@ -71,8 +102,14 @@ final class EyesViewModel {
 
     /// Переводит глобальную позицию курсора в нормированное -1...1 смещение
     /// относительно центра персонажа на экране, где он сейчас находится.
-    private static func normalizedOffset(mouseLocation: CGPoint) -> CGPoint {
-        guard let screen = NSScreen.screenWithMouse ?? NSScreen.main else { return .zero }
+    /// Добавляет `StateAppearance.gazeBiasX` текущего состояния поверх
+    /// обычного слежения — источник "взгляда вбок" у `.thinking`, заметного
+    /// даже когда курсор прямо перед персонажем (внутри мёртвой зоны).
+    private func normalizedOffset(mouseLocation: CGPoint) -> CGPoint {
+        let bias = stateMachine.appearance.gazeBiasX
+        guard let screen = NSScreen.screenWithMouse ?? NSScreen.main else {
+            return CGPoint(x: bias, y: 0)
+        }
         let notch = screen.notchFrameWithFallback
         let center = CGPoint(x: notch.midX, y: notch.midY)
 
@@ -80,21 +117,24 @@ final class EyesViewModel {
         let dy = mouseLocation.y - center.y
         let distance = (dx * dx + dy * dy).squareRoot()
 
-        guard distance > CharacterConfig.trackingDeadZoneRadius else { return .zero }
+        guard distance > CharacterConfig.trackingDeadZoneRadius else {
+            return CGPoint(x: Self.clamp(bias, to: -1...1), y: 0)
+        }
 
         let range = CharacterConfig.trackingRange
-        let nx = clamp(dx / range, to: -1...1)
+        let nx = Self.clamp(dx / range + bias, to: -1...1)
         // В AppKit Y растёт вверх; в нашей нормировке "вниз" (курсор ниже
         // персонажа) должно быть положительным смещением зрачка вниз —
         // поэтому знак инвертируем.
-        let ny = clamp(-dy / range, to: -1...1)
+        let ny = Self.clamp(-dy / range, to: -1...1)
         return CGPoint(x: nx, y: ny)
     }
 
     // MARK: - Моргание
 
     private func scheduleNextBlink() {
-        let delay = Double.random(in: CharacterConfig.blinkMinInterval...CharacterConfig.blinkMaxInterval)
+        let rateMultiplier = max(stateMachine.appearance.blinkRateMultiplier, 0.05)
+        let delay = Double.random(in: CharacterConfig.blinkMinInterval...CharacterConfig.blinkMaxInterval) / rateMultiplier
         taskBag.replace(.blink, with: Task { [weak self] in
             try? await Task.sleep(nanoseconds: Self.nanoseconds(delay))
             guard !Task.isCancelled, let self else { return }
@@ -139,8 +179,9 @@ final class EyesViewModel {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 500_000_000)
                 guard !Task.isCancelled, let self else { return }
+                let freqMultiplier = max(self.stateMachine.appearance.saccadeFrequencyMultiplier, 0.05)
                 let idleFor = Date().timeIntervalSince(self.mouseTracker.lastMovementDate)
-                if idleFor >= CharacterConfig.saccadeIdleThreshold {
+                if idleFor >= CharacterConfig.saccadeIdleThreshold / freqMultiplier {
                     await self.performSaccade()
                     guard !Task.isCancelled else { return }
 
@@ -150,7 +191,7 @@ final class EyesViewModel {
                     // читался бы как тревожный, а не как живой.
                     let pause = Double.random(
                         in: CharacterConfig.saccadeMinPause...CharacterConfig.saccadeMaxPause
-                    )
+                    ) / freqMultiplier
                     try? await Task.sleep(nanoseconds: Self.nanoseconds(pause))
                 }
             }
@@ -158,8 +199,10 @@ final class EyesViewModel {
     }
 
     private func performSaccade() async {
+        let appearance = stateMachine.appearance
         let angle = Double.random(in: 0..<(2 * Double.pi))
-        let amplitude = CharacterConfig.saccadeAmplitude
+        let amplitude = CharacterConfig.saccadeAmplitude * appearance.saccadeAmplitudeMultiplier
+        let speedMultiplier = max(appearance.saccadeSpeedMultiplier, 0.05)
         let jump = CGPoint(
             x: Self.clamp(restOffset.x + CGFloat(cos(angle)) * amplitude, to: -1...1),
             y: Self.clamp(restOffset.y + CGFloat(sin(angle)) * amplitude, to: -1...1)
@@ -169,11 +212,13 @@ final class EyesViewModel {
         // медленнее и мягче. Несимметрично специально: настоящая саккада —
         // это почти мгновенный скачок глаза с плавным "остыванием" после,
         // а не одинаково плавное движение туда-обратно (то читалось бы как
-        // "плавающий", заторможенный взгляд).
-        withAnimation(.easeOut(duration: CharacterConfig.saccadeJumpDuration)) {
+        // "плавающий", заторможенный взгляд). `saccadeSpeedMultiplier` > 1
+        // растягивает обе фазы — источник "медленных саккад" у `.thinking`.
+        let jumpDuration = CharacterConfig.saccadeJumpDuration * speedMultiplier
+        withAnimation(.easeOut(duration: jumpDuration)) {
             pupilOffset = jump
         }
-        try? await Task.sleep(nanoseconds: Self.nanoseconds(CharacterConfig.saccadeJumpDuration))
+        try? await Task.sleep(nanoseconds: Self.nanoseconds(jumpDuration))
         guard !Task.isCancelled else { return }
 
         let hold = Double.random(
@@ -182,10 +227,11 @@ final class EyesViewModel {
         try? await Task.sleep(nanoseconds: Self.nanoseconds(hold))
         guard !Task.isCancelled else { return }
 
-        withAnimation(.easeInOut(duration: CharacterConfig.saccadeReturnDuration)) {
+        let returnDuration = CharacterConfig.saccadeReturnDuration * speedMultiplier
+        withAnimation(.easeInOut(duration: returnDuration)) {
             pupilOffset = restOffset
         }
-        try? await Task.sleep(nanoseconds: Self.nanoseconds(CharacterConfig.saccadeReturnDuration))
+        try? await Task.sleep(nanoseconds: Self.nanoseconds(returnDuration))
     }
 
     // MARK: - Дыхание
@@ -195,18 +241,31 @@ final class EyesViewModel {
     /// понятными сегментами `withAnimation` + `Task.sleep`, что моргание и
     /// саккады, и одинаково надёжно подхватывается @Observable-свойством
     /// вне тела `View`.
+    ///
+    /// Фаза 3: тот же цикл заодно двигает `breathPulse` (для пульсации
+    /// подсветки `.reminding`) и `bobOffsetY` (для "подпрыгивания"
+    /// `.celebrating`) — специально не заводим под них отдельные таймеры.
     private func startBreathing() {
         taskBag.replace(.breath, with: Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
-                let half = CharacterConfig.breathPeriod / 2
+                let appearance = self.stateMachine.appearance
+                let rateMultiplier = max(appearance.breathRateMultiplier, 0.05)
+                let half = (CharacterConfig.breathPeriod / 2) / rateMultiplier
+                let amplitude = CharacterConfig.breathAmplitude * appearance.breathAmplitudeMultiplier
+                let bobPeak = -CharacterConfig.bobAmplitude * appearance.bobAmplitudeMultiplier
+
                 withAnimation(.easeInOut(duration: half)) {
-                    self.breathScale = 1 + CharacterConfig.breathAmplitude
+                    self.breathScale = 1 + amplitude
+                    self.breathPulse = 1
+                    self.bobOffsetY = bobPeak
                 }
                 try? await Task.sleep(nanoseconds: Self.nanoseconds(half))
                 guard !Task.isCancelled else { return }
                 withAnimation(.easeInOut(duration: half)) {
                     self.breathScale = 1
+                    self.breathPulse = 0
+                    self.bobOffsetY = 0
                 }
                 try? await Task.sleep(nanoseconds: Self.nanoseconds(half))
             }

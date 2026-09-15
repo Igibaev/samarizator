@@ -12,11 +12,35 @@ final class NotchWindowController {
     /// переезде.
     private var currentScreen: NSScreen?
 
+    /// Машина состояний персонажа — Фаза 3. Живёт здесь, а не внутри
+    /// `NotchRootView`, специально: `show()` пересоздаёт панель и вью при
+    /// смене экрана, а текущая эмоция должна это пережить (иначе она
+    /// сбрасывалась бы в `.idle` при каждом подключении/отключении
+    /// монитора). `AppDelegate` обращается сюда напрямую для debug-меню.
+    let stateMachine = CompanionStateMachine()
+
+    /// Определитель наведения — тоже персистентен и по той же причине, но
+    /// вдобавок он должен пережить пересоздание панели, чтобы его
+    /// единственный `onExpansionChange` не пришлось перевешивать на новую
+    /// панель при каждом переезде: колбэк ниже всегда обращается к
+    /// `self.panel`, то есть к АКТУАЛЬНОЙ панели на момент срабатывания.
+    private let hoverDetector = HoverDetector()
+
     /// Действительно ли панель существует и показана — для отладочного вывода.
     var isPanelVisible: Bool { panel?.isVisible ?? false }
 
     /// Пропускает ли панель клики насквозь — для отладочного вывода.
     var panelIgnoresMouseEvents: Bool? { panel?.ignoresMouseEvents }
+
+    init() {
+        hoverDetector.onExpansionChange = { [weak self] expanded in
+            // Раскрыто → панель обязана перехватывать мышь (чекбоксы задач
+            // появятся в Фазе 4); свёрнуто → снова пропускать клики насквозь,
+            // чтобы меню-бар под капсулой оставался кликабельным (критерий
+            // приёмки Фазы 1).
+            self?.panel?.ignoresMouseEvents = !expanded
+        }
+    }
 
     /// Создаёт и показывает панель на переданном экране (или на экране с
     /// курсором мыши, если экран не передан).
@@ -35,12 +59,15 @@ final class NotchWindowController {
 
         let frame = targetScreen.capsulePanelFrame
         let newPanel = NotchPanel(contentRect: frame)
-        newPanel.contentView = NSHostingView(rootView: NotchRootView())
+        newPanel.contentView = NSHostingView(
+            rootView: NotchRootView(stateMachine: stateMachine, hoverDetector: hoverDetector)
+        )
 
         // Повторно после contentView: NSHostingView добавляет свои tracking-области,
-        // и флаг важнее любых настроек содержимого — меню-бар под капсулой обязан
-        // остаться кликабельным.
-        newPanel.ignoresMouseEvents = true
+        // и порядок важнее любых настроек содержимого. Значение — по текущему
+        // состоянию раскрытия, а не жёстко true: `hoverDetector` персистентен и
+        // мог быть раскрыт уже до переезда панели на другой экран.
+        newPanel.ignoresMouseEvents = !hoverDetector.isExpanded
 
         // orderFrontRegardless(), а не makeKeyAndOrderFront(_:) — панель не
         // должна становиться key-окном и красть фокус у того, с чем работает

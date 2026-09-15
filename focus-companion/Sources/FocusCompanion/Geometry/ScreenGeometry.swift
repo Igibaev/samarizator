@@ -69,7 +69,7 @@ extension NSScreen {
         )
     }
 
-    /// Фрейм самой панели-капсулы — шире и глубже выреза.
+    /// Фрейм капсулы в СВЁРНУТОМ состоянии — шире и глубже физического выреза.
     ///
     /// Ширина: базовое расширение на `topCornerRadius` с каждой стороны —
     /// верхние углы `NotchShape` вогнутые "загибы", которые съедают по
@@ -86,7 +86,13 @@ extension NSScreen {
     ///
     /// Центрирование по X не ломается: `insetBy` симметричен, а
     /// `notchFrameWithFallback` и так уже центрирован по `frame.midX`.
-    var capsulePanelFrame: NSRect {
+    ///
+    /// До Фазы 3 это был фрейм самой панели (`NSPanel`). С Фазы 3 панель
+    /// ВСЕГДА в размере раскрытого состояния (см. `capsulePanelFrame` ниже),
+    /// а это — размер и позиция капсулы ВНУТРИ окна, когда она не раскрыта
+    /// (используется `HoverDetector` для проверки наведения и `NotchRootView`
+    /// для размера отрисовки).
+    var collapsedCapsuleFrame: NSRect {
         let extraWidth = AppearanceConfig.topCornerRadius + AppearanceConfig.capsuleExtraWidthPerSide
         var result = notchFrameWithFallback.insetBy(dx: -extraWidth, dy: 0)
 
@@ -105,6 +111,27 @@ extension NSScreen {
         return result
     }
 
+    /// Фрейм самой панели (`NSPanel`) — Фаза 3, решение автора №2: окно
+    /// ВСЕГДА в размере раскрытого состояния, морфится только содержимое
+    /// внутри него (`NotchShape`/глаза), а не сам `NSPanel.setFrame`. Два
+    /// независимых механизма анимации (AppKit-фрейм и SwiftUI-переход) с
+    /// разными таймингами дают рывки — поэтому фрейм окна теперь константный
+    /// на время его жизни.
+    ///
+    /// Верхний край, как и у `collapsedCapsuleFrame`, совпадает с верхним
+    /// краем экрана (иначе верх капсулы в любом из состояний "оторвётся" от
+    /// выреза); по горизонтали окно центрировано на экране.
+    var capsulePanelFrame: NSRect {
+        let width = AppearanceConfig.expandedWidth
+        let height = AppearanceConfig.expandedHeight
+        return NSRect(
+            x: frame.midX - width / 2,
+            y: frame.maxY - height,
+            width: width,
+            height: height
+        )
+    }
+
     /// Метрики экрана одной строкой — для отладочного вывода при запуске.
     var geometryDescription: String {
         let notch = notchSize.map { "\($0.width)x\($0.height)" } ?? "НЕТ"
@@ -114,6 +141,7 @@ extension NSScreen {
             + "  вырез: \(notch), safeAreaInsets.top=\(safeAreaInsets.top), menubarHeight=\(menubarHeight)\n"
             + "  auxTopLeft=\(String(describing: auxiliaryTopLeftArea))\n"
             + "  auxTopRight=\(String(describing: auxiliaryTopRightArea))\n"
-            + "  фрейм панели=\(capsulePanelFrame)"
+            + "  фрейм капсулы (свёрнуто)=\(collapsedCapsuleFrame)\n"
+            + "  фрейм панели (=капсула раскрыто)=\(capsulePanelFrame)"
     }
 }

@@ -2,49 +2,132 @@ import SwiftUI
 
 /// Корневая вью персонажа.
 ///
-/// Фаза 1 отрисовывала только статичную капсулу. Фаза 2 добавляет поверх неё
-/// пару живых глаз (`EyesView`): слежение за курсором, моргание, саккады,
-/// едва заметное дыхание. Сама капсула по-прежнему статична геометрически —
-/// дыхание масштабирует только глаза, не форму (см. решение №2 в
-/// PHASE-2-PROMPT.md): она жёстко привязана к физическому вырезу, и любая
-/// пульсация формы немедленно сломала бы стык с краем экрана.
+/// Фаза 1 отрисовывала только статичную капсулу. Фаза 2 добавила живые
+/// глаза. Фаза 3 добавляет раскрытие по ховеру и машину состояний эмоций —
+/// окно `NSPanel` теперь ВСЕГДА в размере раскрытой панели (решение автора
+/// №2 в PHASE-3-PROMPT.md), а морфится только то, что рисуется внутри:
+/// размер и радиусы капсулы (`NotchShape.animatableData`) и положение/
+/// масштаб глаз. `matchedGeometryEffect` сознательно не используется — глаза
+/// существуют в одном экземпляре и никуда не "переезжают" между иерархиями,
+/// им достаточно анимировать значения (см. решение №3 в PHASE-3-PROMPT.md).
 struct NotchRootView: View {
+    var stateMachine: CompanionStateMachine
+    var hoverDetector: HoverDetector
+
     // @State, а не let: ViewModel должен пережить перерисовки этой вью
     // (не пересоздаваться на каждый re-render), а таймеры моргания/саккад/
-    // дыхания и глобальный монитор мыши внутри него живут, пока жива вью.
-    @State private var eyesModel = EyesViewModel()
+    // дыхания внутри него живут, пока жива вью. `stateMachine`/`hoverDetector`
+    // сюда не попадают — они персистентны на уровне NotchWindowController и
+    // переживают даже пересоздание САМОЙ этой вью (переезд между экранами).
+    @State private var eyesModel: EyesViewModel
+
+    init(stateMachine: CompanionStateMachine, hoverDetector: HoverDetector) {
+        self.stateMachine = stateMachine
+        self.hoverDetector = hoverDetector
+
+        let eyes = EyesViewModel(stateMachine: stateMachine)
+        _eyesModel = State(initialValue: eyes)
+
+        // Глобальный монитор мыши (`MouseTracker` внутри `EyesViewModel`)
+        // слепнет, как только панель раскрывается и начинает перехватывать
+        // клики (`ignoresMouseEvents = false`) — курсор в этот момент часто
+        // находится как раз над собственным окном приложения. Поэтому во
+        // время раскрытия слежение глаз питается тем же 20 Гц опросом,
+        // которым `HoverDetector` и так уже определяет наведение (решение
+        // автора №1 в PHASE-3-PROMPT.md). Замыкание переустанавливается при
+        // каждом пересоздании этой вью (переезд на другой экран), поэтому
+        // всегда указывает на актуальный `eyesModel`; `[weak eyes]` защищает
+        // от вызова в уже освобождённый объект, если вью успела исчезнуть
+        // раньше следующего тика опроса.
+        hoverDetector.onMouseLocation = { [weak eyes] location in
+            guard let eyes, hoverDetector.isExpanded else { return }
+            eyes.updateGaze(from: location)
+        }
+    }
 
     var body: some View {
-        ZStack {
-            NotchShape(
-                topCornerRadius: AppearanceConfig.topCornerRadius,
-                bottomCornerRadius: AppearanceConfig.bottomCornerRadius
-            )
-            .fill(AppearanceConfig.capsuleColor)
-
-            EyesView(model: eyesModel)
-                // Debug-режим: персонаж увеличен и сдвинут ниже, чтобы
-                // моргание и саккады было видно в деталях — сама капсула в
-                // этом же режиме тоже вытянута вниз.
-                .scaleEffect(AppearanceConfig.isDebug ? CharacterConfig.debugScale : 1)
-                .offset(
-                    y: CharacterConfig.eyesYOffset
-                        + (AppearanceConfig.isDebug ? CharacterConfig.debugYOffset : 0)
-                )
+        ZStack(alignment: .top) {
+            capsuleGroup
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        // Персонаж обязан жить ВНУТРИ формы капсулы. Без обрезки глаза,
-        // вылезшие за её край, срезаются прямоугольной границей окна — это
-        // выглядит как обрубок, а не как лицо.
-        .clipShape(
-            NotchShape(
-                topCornerRadius: AppearanceConfig.topCornerRadius,
-                bottomCornerRadius: AppearanceConfig.bottomCornerRadius
-            )
+        // Окно всегда в размере раскрытой панели — эта вью заполняет его
+        // целиком, а `capsuleGroup` внутри занимает только текущий (collapsed
+        // или expanded) размер, прижатый к верху и центрированный по X.
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        // Здесь намеренно НЕТ заливки/фона на весь фрейм: пустые поля вокруг
+        // capsuleGroup — это буквально ничего не нарисованное, а значит и не
+        // hit-testable по умолчанию. `capsuleGroup` ниже всё равно явно
+        // ограничивает попадания своей формой и включает hit-testing только
+        // когда панель раскрыта — это защита от рассинхронизации на случай
+        // правок, а не единственная линия обороны.
+    }
+
+    /// Капсула (фон + подсветка + голова персонажа + заготовка контента
+    /// раскрытой панели), сама по себе — без внешнего выравнивания.
+    private var capsuleGroup: some View {
+        let shape = NotchShape(
+            topCornerRadius: hoverDetector.isExpanded
+                ? AppearanceConfig.expandedTopCornerRadius
+                : AppearanceConfig.topCornerRadius,
+            bottomCornerRadius: hoverDetector.isExpanded
+                ? AppearanceConfig.expandedBottomCornerRadius
+                : AppearanceConfig.bottomCornerRadius
         )
-        // Окно и так ignoresMouseEvents, но на всякий случай дублируем на уровне
-        // вью — эта вью не должна становиться кликабельной ни при каких правках.
-        .allowsHitTesting(false)
+        let size = hoverDetector.isExpanded ? hoverDetector.expandedSize : hoverDetector.collapsedSize
+
+        return ZStack(alignment: .top) {
+            shape.fill(AppearanceConfig.capsuleColor)
+
+            highlightGlow
+
+            // "Головная" зона — фиксированной высоты, равной высоте
+            // СВЁРНУТОЙ капсулы, всегда прижата к верху. Она нужна, чтобы
+            // положение глаз (принятое в Фазе 2, трогать нельзя) не
+            // зависело от того, насколько сейчас разрослась капсула вниз —
+            // без этой развязки глаза при раскрытии "уезжали" бы к центру
+            // увеличенного фрейма вслед за стандартным центрированием ZStack.
+            ZStack {
+                EyesView(model: eyesModel, appearance: stateMachine.appearance)
+                    // Debug-режим: персонаж увеличен и сдвинут ниже, чтобы
+                    // моргание и саккады было видно в деталях — сама капсула
+                    // в этом же режиме тоже вытянута вниз.
+                    .scaleEffect(AppearanceConfig.isDebug ? CharacterConfig.debugScale : 1)
+                    .offset(
+                        y: CharacterConfig.eyesYOffset
+                            + (AppearanceConfig.isDebug ? CharacterConfig.debugYOffset : 0)
+                    )
+            }
+            .frame(width: size.width, height: hoverDetector.collapsedSize.height)
+
+            ExpandedPanelView(stateMachine: stateMachine)
+                .padding(.top, hoverDetector.collapsedSize.height)
+                .opacity(hoverDetector.isExpanded ? 1 : 0)
+        }
+        .frame(width: size.width, height: size.height)
+        .clipShape(shape)
+        // Хит-тест ограничен точной формой капсулы, а не прямоугольником
+        // фрейма — иначе прозрачные "уши" вокруг вогнутых верхних углов
+        // тоже ловили бы клики. Включаем интерактивность только когда
+        // панель реально раскрыта: `NotchPanel.ignoresMouseEvents` и так уже
+        // это гарантирует на уровне AppKit, но дублируем на уровне SwiftUI —
+        // окно в Фазе 3 заметно больше самой капсулы, и ошибка здесь
+        // заблокировала бы существенный кусок экрана (см. PHASE-3-PROMPT.md).
+        .contentShape(shape)
+        .allowsHitTesting(hoverDetector.isExpanded)
+    }
+
+    /// Мягкая цветная подсветка состояния позади глаз. Цвет и базовую силу
+    /// задаёт `StateAppearance.highlightColor/highlightIntensity`, а
+    /// собственно "мягкая пульсация" (нужна для `.reminding`) — это не
+    /// отдельная анимация, а модуляция уже идущим циклом дыхания
+    /// (`EyesViewModel.breathPulse`) — второй таймер под неё не заводили.
+    private var highlightGlow: some View {
+        Circle()
+            .fill(stateMachine.appearance.highlightColor)
+            .frame(width: CharacterConfig.highlightGlowSize, height: CharacterConfig.highlightGlowSize)
+            .blur(radius: CharacterConfig.highlightBlurRadius)
+            .opacity(stateMachine.appearance.highlightIntensity * (0.6 + 0.4 * eyesModel.breathPulse))
+            .offset(y: CharacterConfig.eyesYOffset)
+            .allowsHitTesting(false)
     }
 }
 

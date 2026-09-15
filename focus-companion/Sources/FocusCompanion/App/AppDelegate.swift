@@ -56,6 +56,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         item.isVisible = true
 
         let menu = NSMenu()
+        menu.addItem(makeStateSubmenuItem())
+        menu.addItem(.separator())
         menu.addItem(
             withTitle: "Выход",
             action: #selector(quit),
@@ -68,6 +70,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func quit() {
         NSApp.terminate(nil)
+    }
+
+    /// Debug-подменю переключения состояний персонажа — критерий приёмки
+    /// Фазы 3. Текущее состояние отмечено галочкой; выбор пункта переключает
+    /// `CompanionStateMachine` (живёт в `NotchWindowController`, переживает
+    /// переезды между экранами) с анимацией.
+    private func makeStateSubmenuItem() -> NSMenuItem {
+        let parent = NSMenuItem(title: "Состояние (debug)", action: nil, keyEquivalent: "")
+        let submenu = NSMenu()
+        let currentState = windowController.stateMachine.state
+
+        for state in CompanionState.allCases {
+            let item = NSMenuItem(
+                title: state.displayName,
+                action: #selector(selectState(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = state
+            item.state = (state == currentState) ? .on : .off
+            submenu.addItem(item)
+        }
+
+        parent.submenu = submenu
+        return parent
+    }
+
+    @objc private func selectState(_ sender: NSMenuItem) {
+        guard let state = sender.representedObject as? CompanionState else { return }
+        windowController.stateMachine.setState(state)
+
+        // NSMenu не обновляет галочки соседних пунктов сам — проходим по
+        // всему подменю и выставляем `.on` только у выбранного.
+        sender.menu?.items.forEach { menuItem in
+            let itemState = menuItem.representedObject as? CompanionState
+            menuItem.state = (itemState == state) ? .on : .off
+        }
     }
 
     /// Отладочный вывод при старте.
@@ -86,6 +125,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         print("панель показана: \(windowController.isPanelVisible ? "да" : "НЕТ")")
         print("панель пропускает клики (ignoresMouseEvents): \(windowController.panelIgnoresMouseEvents.map(String.init(describing:)) ?? "панели нет")")
+        print("стартовое состояние персонажа: \(windowController.stateMachine.state.displayName)")
         print("экранов: \(NSScreen.screens.count)")
         for screen in NSScreen.screens {
             print(screen.geometryDescription)
@@ -98,7 +138,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
               + "+\(AppearanceConfig.capsuleExtraDepth)pt в глубину"
               + (AppearanceConfig.isDebug ? " (+\(AppearanceConfig.debugExtraHeight)pt debug-довесок)" : ""))
         if let screen = NSScreen.screenWithMouse ?? NSScreen.main {
-            print("итоговый фрейм капсулы: \(screen.capsulePanelFrame)")
+            // Фаза 3: окно панели теперь ВСЕГДА в размере раскрытого
+            // состояния (capsulePanelFrame) — печатаем отдельно от размера
+            // самой капсулы в свёрнутом виде (collapsedCapsuleFrame), иначе
+            // цифры легко перепутать при подборе AppearanceConfig.expandedWidth/Height.
+            print("фрейм окна панели (раскрытый размер): \(screen.capsulePanelFrame)")
+            print("фрейм капсулы (свёрнутый размер): \(screen.collapsedCapsuleFrame)")
         }
         print("=======================")
         fflush(stdout)
