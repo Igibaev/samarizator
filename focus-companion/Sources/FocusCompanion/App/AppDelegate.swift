@@ -1,5 +1,11 @@
 import AppKit
 
+/// `@MainActor` на всём классе: делегат напрямую владеет и пользуется
+/// изолированными объектами (`CompanionStateMachine`, `HoverDetector`,
+/// `NotchWindowController`), а весь его жизненный цикл и так протекает на
+/// главном потоке. Без этой пометки каждое обращение к ним — обращение из
+/// nonisolated-контекста, то есть ошибка компиляции.
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private let windowController = NotchWindowController()

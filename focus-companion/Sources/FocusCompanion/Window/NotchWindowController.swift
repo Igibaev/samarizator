@@ -3,6 +3,10 @@ import SwiftUI
 
 /// Управляет жизненным циклом единственной панели-капсулы: создание,
 /// позиционирование над вырезом и переезд между экранами.
+/// `@MainActor` по той же причине, что и у `AppDelegate`: контроллер держит
+/// `CompanionStateMachine` и `HoverDetector` (оба изолированы) и работает с
+/// `NSPanel`, то есть в любом случае обязан жить на главном потоке.
+@MainActor
 final class NotchWindowController {
 
     private var panel: NotchPanel?
