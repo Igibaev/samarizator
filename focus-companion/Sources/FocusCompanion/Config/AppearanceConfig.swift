@@ -24,11 +24,11 @@ enum AppearanceConfig {
     /// и глубже выреза, чтобы глаза нормально помещались и смотрелись —
     /// компактный вариант, совпадающий с реальным вырезом, сделаем позже.
     /// Поэтому это параметр конфига, а не константа в геометрии.
-    static let capsuleExtraWidthPerSide: CGFloat = 40
+    static let capsuleExtraWidthPerSide: CGFloat = 6
 
     /// Насколько капсула свисает НИЖЕ физического выреза (обычный режим,
     /// без учёта `debugExtraHeight`).
-    static let capsuleExtraDepth: CGFloat = 32
+    static let capsuleExtraDepth: CGFloat = 18
 
     // MARK: - Виртуальная капсула (для машин без выреза)
 

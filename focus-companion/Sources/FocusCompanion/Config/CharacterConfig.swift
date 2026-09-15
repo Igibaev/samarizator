@@ -18,26 +18,26 @@ enum CharacterConfig {
     /// пугающе, а не дружелюбно.
 
     /// Ширина одной щели (её короткая ось).
-    static let eyeWidth: CGFloat = 7
+    static let eyeWidth: CGFloat = 5
 
     /// Высота одной щели (её длинная ось). Отношение высоты к ширине задаёт
     /// характер: около 2.5-4 — спокойный внимательный взгляд, ближе к 1 —
     /// округлый удивлённый, меньше 1 — прищур.
-    static let eyeHeight: CGFloat = 20
+    static let eyeHeight: CGFloat = 13
 
     /// Зазор между щелями.
-    static let eyeSpacing: CGFloat = 9
+    static let eyeSpacing: CGFloat = 7
 
-    /// Наклон щелей в градусах. Обе наклонены в одну сторону — это придаёт
-    /// взгляду характер и убирает эффект симметричной маски. 0 — строго
-    /// вертикально.
-    static let eyeTilt: Double = 18
+    /// Наклон щелей в градусах. 0 — строго вертикально (текущий выбор
+    /// автора). Ненулевой наклон уводит лицо от строгой симметрии и добавляет
+    /// характера, но и читается как гримаса — включать осознанно.
+    static let eyeTilt: Double = 0
 
     /// Насколько пара глаз смещается по телу при максимальном отклонении
     /// взгляда, в pt. Взгляд здесь передаётся не движением зрачка внутри
     /// глаза, а сдвигом самой пары по "лицу" — как у минималистичных
     /// персонажей без склеры.
-    static let gazeMaxShift: CGFloat = 9
+    static let gazeMaxShift: CGFloat = 5
 
     static let eyeColor: Color = .white
 
@@ -47,7 +47,7 @@ enum CharacterConfig {
     /// попросту не видно (чёрное на чёрном). Поэтому лицо смещается в нижнюю,
     /// видимую часть. Ориентир: половина высоты выреза (на MacBook автора
     /// вырез 32pt, значит около 16).
-    static let eyesYOffset: CGFloat = 16
+    static let eyesYOffset: CGFloat = 10
 
     // MARK: - Слежение за курсором
 
@@ -150,5 +150,5 @@ enum CharacterConfig {
     /// перекрывался краем физического выреза и был виден целиком (работает
     /// вместе с `AppearanceConfig.debugExtraHeight`, который вытягивает саму
     /// капсулу вниз).
-    static let debugYOffset: CGFloat = 22
+    static let debugYOffset: CGFloat = 10
 }
