@@ -29,6 +29,17 @@ struct NotchShape: Shape {
     }
 
     func path(in rect: CGRect) -> Path {
+        // Радиусы зажимаются по размеру капсулы. Без этого достаточно
+        // задать нижний радиус больше половины высоты — и скругления с двух
+        // сторон встречаются, съедая боковые стенки: форма перестаёт быть
+        // капсулой и превращается в бесформенное пятно.
+        let topCornerRadius = max(0, min(self.topCornerRadius, rect.width / 2, rect.height / 2))
+        let bottomCornerRadius = max(0, min(
+            self.bottomCornerRadius,
+            rect.height - topCornerRadius,
+            rect.width / 2 - topCornerRadius
+        ))
+
         var path = Path()
 
         // Начинаем от верхнего левого угла и идём по часовой стрелке.

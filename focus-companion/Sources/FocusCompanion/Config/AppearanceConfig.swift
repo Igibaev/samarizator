@@ -16,7 +16,7 @@ enum AppearanceConfig {
 
     /// Радиус скругления нижних углов капсулы (обычное скругление внутрь,
     /// продолжающее форму выреза вниз).
-    static let bottomCornerRadius: CGFloat = 19
+    static let bottomCornerRadius: CGFloat = 14
 
     /// Насколько тело свёрнутой капсулы продолжается ВПРАВО за правый край
     /// выреза.

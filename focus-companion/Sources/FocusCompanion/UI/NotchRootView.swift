@@ -129,6 +129,7 @@ struct NotchRootView: View {
     /// В раскрытом добавляется сдвиг влево от края (см. конфиг).
     private var currentEyesOffsetX: CGFloat {
         hoverDetector.eyesOffsetX
+            + CharacterConfig.eyesXNudge
             + (hoverDetector.isExpanded ? CharacterConfig.eyesExpandedXShift : 0)
     }
 
