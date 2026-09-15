@@ -18,8 +18,6 @@ struct NotchRootView: View {
     }
 }
 
-#Preview {
-    NotchRootView()
-        .frame(width: 220, height: 32)
-        .background(Color.gray)
-}
+// #Preview здесь намеренно нет: макрос Preview реализован плагином Xcode
+// (PreviewsMacros), которого нет при сборке через `swift build` из терминала —
+// любой #Preview в исходниках валит нашу сборку. Смотреть результат — запуском.
