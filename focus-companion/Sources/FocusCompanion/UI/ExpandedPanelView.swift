@@ -1,10 +1,12 @@
 import SwiftUI
 
-/// Содержимое раскрытой панели ниже "головы" персонажа — Фаза 4а.
+/// Содержимое раскрытой панели ниже "головы" персонажа — Фаза 4а, фитиль —
+/// Фаза 4б.
 ///
-/// Список активных задач с чекбоксом выполнения, поле ввода новой задачи,
-/// заботливое сообщение при заполненных трёх слотах и короткая сводка по
-/// выполненным (без самого списка — не копится, см. `TaskStore`).
+/// Список активных задач с чекбоксом выполнения и управлением фитилем,
+/// поле ввода новой задачи, заботливое сообщение при заполненных трёх
+/// слотах и короткая сводка по выполненным (без самого списка — не
+/// копится, см. `TaskStore`).
 struct ExpandedPanelView: View {
     var hoverDetector: HoverDetector
     var taskPanel: TaskPanelController
@@ -59,24 +61,96 @@ struct ExpandedPanelView: View {
     }
 
     private func taskRow(_ task: CompanionTask) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Button {
-                taskPanel.complete(task)
-            } label: {
-                Image(systemName: "circle")
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Button {
+                    taskPanel.complete(task)
+                } label: {
+                    Image(systemName: "circle")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.white.opacity(0.65))
+                }
+                .buttonStyle(.plain)
+
+                Text(task.text)
                     .font(.system(size: 11))
-                    .foregroundStyle(.white.opacity(0.65))
+                    .foregroundStyle(.white.opacity(0.9))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+
+                Spacer(minLength: 0)
+
+                fuseControl(for: task)
+            }
+
+            // Полоска остатка фитиля — только когда он горит. Без цифр
+            // секунд/минут: см. HANDOFF.md, «Рамка смысла» — счётчик
+            // обратного отсчёта читается как надвигающийся дедлайн, а
+            // отпускание задачи это не дедлайн.
+            if let fraction = taskPanel.remainingFuseFraction(for: task) {
+                fuseProgressBar(fraction: fraction)
+            }
+        }
+    }
+
+    /// Управление фитилем задачи — Фаза 4б.
+    ///
+    /// Негорящая задача: значок открывает МЕНЮ трёх пресетов длительности —
+    /// поджиг идёт только через явный выбор пункта, не одиночный клик,
+    /// потому что финал (в отличие от самого поджига) необратим, и
+    /// случайное нажатие не должно его запускать.
+    ///
+    /// Горящая задача: тот же значок, но одиночный тап сразу гасит фитиль —
+    /// "передумал" не требует подтверждения, необратим только момент, когда
+    /// фитиль догорит сам, а не решение его зажечь.
+    @ViewBuilder
+    private func fuseControl(for task: CompanionTask) -> some View {
+        if task.fuseDate != nil {
+            Button {
+                taskPanel.extinguishFuse(task)
+            } label: {
+                Image(systemName: "flame.fill")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.orange.opacity(0.85))
             }
             .buttonStyle(.plain)
-
-            Text(task.text)
-                .font(.system(size: 11))
-                .foregroundStyle(.white.opacity(0.9))
-                .lineLimit(1)
-                .truncationMode(.tail)
-
-            Spacer(minLength: 0)
+        } else {
+            Menu {
+                ForEach(FusePreset.allCases) { preset in
+                    Button(preset.label) {
+                        taskPanel.igniteFuse(task, preset: preset)
+                    }
+                }
+            } label: {
+                Image(systemName: "flame")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.white.opacity(0.35))
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
         }
+    }
+
+    /// Визуальный остаток фитиля — тающая слева направо полоска, без единой
+    /// цифры. Ширина полоски внутри `GeometryReader` читает актуальную
+    /// ширину строки, поэтому не зависит от `AppearanceConfig.expandedWidth`
+    /// напрямую.
+    private func fuseProgressBar(fraction: Double) -> some View {
+        GeometryReader { proxy in
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(Color.white.opacity(0.08))
+                Capsule()
+                    .fill(Color.orange.opacity(0.55))
+                    .frame(width: proxy.size.width * fraction)
+            }
+        }
+        .frame(height: 2)
+        // Отступ слева выравнивает полоску под текстом задачи, после
+        // чекбокса и зазора (не под самим чекбоксом) — число ориентировочное,
+        // сборка не проверялась, подгонка на живой машине (см. отчёт).
+        .padding(.leading, 17)
+        .padding(.trailing, 16)
     }
 
     // MARK: - Ввод новой задачи
@@ -98,9 +172,10 @@ struct ExpandedPanelView: View {
 
             if let message = taskPanel.slotsFullMessage {
                 // Заботливый тон, не предупреждение об ошибке — см.
-                // HANDOFF.md, раздел «Тон персонажа». Сознательно не
-                // упоминает никакой кнопки отпускания задачи: механики
-                // отпускания ещё нет (Фаза 4б).
+                // HANDOFF.md, раздел «Тон персонажа». Текст сознательно не
+                // трогали в Фазе 4б: он не обещает конкретного действия и
+                // остаётся верным и теперь, когда отпустить задачу (значок
+                // фитиля у каждой строки) уже можно.
                 Text(message)
                     .font(.system(size: 9))
                     .foregroundStyle(.white.opacity(0.6))

@@ -187,6 +187,21 @@ enum CharacterConfig {
     /// Сколько секунд держится короткая реакция на добавление задачи.
     static let taskAddedReactionDuration: Double = 1.2
 
+    // MARK: - Фитиль (Фаза 4б)
+
+    /// Длительности пресетов поджига, секунды. "До конца дня" сюда не
+    /// входит — она зависит от момента поджига и считается на лету
+    /// (`FusePreset.duration`), а не хранится готовым числом.
+    static let fuseShortDuration: Double = 15 * 60
+    static let fuseLongDuration: Double = 60 * 60
+
+    /// Период общего таймера горения (`TaskPanelController`, ключ
+    /// `TaskBag.Key.burnTicker`) — один таймер на ВСЕ горящие задачи разом,
+    /// не по таймеру на задачу (прямое требование PHASE-4B-PROMPT.md). Раз
+    /// в секунду достаточно и для полоски прогресса без цифр, и для
+    /// своевременного отпускания догоревших.
+    static let burnTickInterval: Double = 1.0
+
     // MARK: - Debug-отображение
 
     /// Во сколько раз увеличивать персонажа в debug-режиме — иначе на

@@ -29,7 +29,7 @@ enum CompanionState: String, CaseIterable {
         case .reminding: return "Напоминает"
         case .annoyed: return "Скучает"
         case .celebrating: return "Радуется"
-        case .burning: return "Сжигание (Фаза 4)"
+        case .burning: return "Горит фитиль"
         }
     }
 }

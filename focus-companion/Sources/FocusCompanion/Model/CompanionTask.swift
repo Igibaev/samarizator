@@ -23,10 +23,17 @@ struct CompanionTask: Identifiable, Codable, Equatable {
     /// Момент выполнения. `nil`, пока задача активна.
     var completedAt: Date?
 
-    /// Поле под будущий «фитиль» (Фаза 4б: механика сжигания — осознанное
-    /// отпускание задачи без вины). Заложено сейчас, чтобы потом не менять
-    /// формат файла: старые записи без этого поля декодируются как `nil`.
+    /// Момент, когда догоревший фитиль отпустит задачу саму. `nil`, пока
+    /// фитиль не подожжён. Фаза 4б: механика сжигания — осознанное
+    /// отпускание задачи без вины (см. HANDOFF.md, «Тон персонажа»).
     var fuseDate: Date?
+
+    /// Момент поджига — нужен только чтобы посчитать ДОЛЮ оставшегося
+    /// фитиля для полоски прогресса в строке задачи (`ExpandedPanelView`):
+    /// одного `fuseDate` достаточно, чтобы понять, сколько СЕКУНД осталось,
+    /// но не сколько это в процентах от исходной длительности пресета.
+    /// `nil` вместе с `fuseDate == nil` — фитиль не горит.
+    var fuseStartedAt: Date?
 
     init(
         id: UUID = UUID(),
@@ -34,7 +41,8 @@ struct CompanionTask: Identifiable, Codable, Equatable {
         createdAt: Date = Date(),
         isDone: Bool = false,
         completedAt: Date? = nil,
-        fuseDate: Date? = nil
+        fuseDate: Date? = nil,
+        fuseStartedAt: Date? = nil
     ) {
         self.id = id
         self.text = text
@@ -42,5 +50,6 @@ struct CompanionTask: Identifiable, Codable, Equatable {
         self.isDone = isDone
         self.completedAt = completedAt
         self.fuseDate = fuseDate
+        self.fuseStartedAt = fuseStartedAt
     }
 }
