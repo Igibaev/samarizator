@@ -10,7 +10,11 @@ import Observation
 /// зависеть от жизненного цикла SwiftUI-вью, которая пересоздаётся при
 /// переезде панели между экранами (тот же принцип, что у
 /// `EyesViewModel`/`TaskBag`, см. HANDOFF.md). Фаза 4б добавляет второй
-/// такой же отменяемый таймер — общий тик горения всех фитилей разом.
+/// такой же отменяемый таймер — общий тик горения всех фитилей разом. Фаза
+/// 4в добавляет третий — опрос детектора бездействия (`IdleTimeProvider`)
+/// для напоминаний, переиспользующий `.reminding` и уже существующий
+/// `scheduleReturnToRestingState`, а не заводящий параллельную механику
+/// возврата в фон.
 ///
 /// Живёт в `NotchWindowController` рядом со `stateMachine` — персистентно,
 /// не в `@State` вью.
@@ -25,6 +29,19 @@ final class TaskPanelController {
     /// Заботливое сообщение о занятых трёх слотах — НЕ ошибка и не выговор
     /// (см. HANDOFF.md, раздел «Тон персонажа»).
     private(set) var slotsFullMessage: String?
+
+    // MARK: - Напоминания (Фаза 4в)
+
+    /// Был ли на ПРЕДЫДУЩЕМ тике детектора бездействия зафиксирован простой
+    /// не короче `CharacterConfig.reminderIdleThreshold`. Хранится между
+    /// тиками, чтобы ловить не сам факт "сейчас бездействие", а ДВА
+    /// конкретных момента перехода — см. `tickReminder`.
+    private var wasIdleBeyondThreshold = false
+
+    /// Момент последнего показанного напоминания — обязательный кулдаун
+    /// (`CharacterConfig.reminderCooldown`), прямое требование
+    /// PHASE-4C-PROMPT.md.
+    private var lastReminderAt: Date?
 
     /// Текущий момент, обновляется общим таймером горения раз в секунду
     /// (`startBurnTicker`). Единственная причина, по которой
@@ -50,6 +67,7 @@ final class TaskPanelController {
         // эмоций не будет — только ровный переход в уже идущее горение.
         syncAmbientState()
         startBurnTicker()
+        startReminderTicker()
     }
 
     /// Добавляет задачу и включает короткую заметную реакцию персонажа.
@@ -140,14 +158,23 @@ final class TaskPanelController {
         syncAmbientState()
     }
 
-    /// Фоновое (не временное, в отличие от `.celebrating`/`.listening`)
-    /// состояние персонажа: `.burning`, пока горит хотя бы одна задача,
-    /// иначе `.idle`. НЕ перекрывает идущую временную реакцию — та сама
-    /// вернётся сюда по своему таймеру (`scheduleReturnToRestingState`),
+    /// Фоновое (не временное, в отличие от `.celebrating`/`.listening`/
+    /// `.reminding`) состояние персонажа: `.burning`, пока горит хотя бы одна
+    /// задача, иначе `.idle`. НЕ перекрывает идущую временную реакцию — та
+    /// сама вернётся сюда по своему таймеру (`scheduleReturnToRestingState`),
     /// пересчитав то же правило заново в момент срабатывания, а не то,
     /// каким оно было на момент запуска таймера.
+    ///
+    /// `.reminding` в списке исключений с Фазы 4в: без него `handleBurnTick`
+    /// (тикающий раз в секунду) срывал бы напоминание почти сразу после
+    /// показа — оно должно продержаться свои
+    /// `CharacterConfig.reminderDisplayDuration` секунд целиком.
     private func syncAmbientState() {
-        guard stateMachine.state != .celebrating, stateMachine.state != .listening else { return }
+        guard
+            stateMachine.state != .celebrating,
+            stateMachine.state != .listening,
+            stateMachine.state != .reminding
+        else { return }
         stateMachine.setState(store.hasBurningTasks ? .burning : .idle)
     }
 
@@ -177,5 +204,92 @@ final class TaskPanelController {
             guard !Task.isCancelled, let self else { return }
             self.stateMachine.setState(self.store.hasBurningTasks ? .burning : .idle)
         })
+    }
+
+    // MARK: - Напоминания с учётом бездействия (Фаза 4в)
+
+    /// Общий (не по задаче) таймер опроса детектора бездействия — та же
+    /// инфраструктура отмены (`TaskBag`), что у `startBurnTicker`, но
+    /// отдельный ключ и заметно реже: `CharacterConfig.reminderTickInterval`
+    /// (30 сек) против `burnTickInterval` (1 сек) — прямой ориентир
+    /// PHASE-4C-PROMPT.md, напоминаниям такая частота не нужна.
+    private func startReminderTicker() {
+        taskBag.replace(.reminderTicker, with: Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: UInt64(CharacterConfig.reminderTickInterval * 1_000_000_000))
+                guard !Task.isCancelled, let self else { return }
+                self.tickReminder(now: Date())
+            }
+        })
+    }
+
+    /// Решает, пора ли напомнить о задачах, и если да — включает
+    /// `.reminding` на `CharacterConfig.reminderDisplayDuration` секунд,
+    /// после чего персонаж сам возвращается в фоновое состояние
+    /// (`scheduleReturnToRestingState`, та же механика, что у
+    /// `.celebrating`/`.listening`).
+    ///
+    /// Момент показа — не голый факт "бездействие превысило порог", а один
+    /// из ДВУХ переходов между тиками (ориентир PHASE-4C-PROMPT.md: «отошёл
+    /// и вернулся или просто залип»):
+    /// - `justStuck` — бездействие ТОЛЬКО ЧТО впервые превысило порог (для
+    ///   случая "залип": сидит и смотрит в экран, не трогая ввод);
+    /// - `justReturned` — на ПРЕДЫДУЩЕМ тике бездействие уже было выше
+    ///   порога, а сейчас — почти ноль: только что было какое-то движение
+    ///   мыши/клавиатуры (для случая "отошёл и вернулся" — момент, когда
+    ///   человек точно смотрит на экран).
+    ///
+    /// Голая проверка "бездействие ⩾ порог" на каждом тике вместо этого не
+    /// подходит: она бы держала право на срабатывание открытым все 30-
+    /// секундные тики подряд, пока человек не шевельнётся, и как только
+    /// кулдаун истечёт где-то посреди долгого отсутствия — напоминание
+    /// покажется в пустоту, пока никто не смотрит.
+    private func tickReminder(now: Date) {
+        // Нет активных задач — молчать всегда, прямое правило
+        // PHASE-4C-PROMPT.md. Латч сбрасываем, чтобы появление первой новой
+        // задачи не унаследовало случайно устаревшее "залипание".
+        guard !store.activeTasks.isEmpty else {
+            wasIdleBeyondThreshold = false
+            return
+        }
+
+        let idleSeconds = IdleTimeProvider.secondsSinceLastEvent()
+        let isIdleNow = idleSeconds >= CharacterConfig.reminderIdleThreshold
+        defer { wasIdleBeyondThreshold = isIdleNow }
+
+        let justStuck = isIdleNow && !wasIdleBeyondThreshold
+        let justReturned = !isIdleNow && wasIdleBeyondThreshold
+        guard justStuck || justReturned else { return }
+
+        // Ночная тишина — переход как таковой мы всё равно зафиксировали
+        // (через `defer` выше), просто не показываем напоминание, чтобы
+        // утром не выстрелить мгновенно на первом же движении мыши без
+        // нового захода за порог.
+        guard !isQuietHour(now) else { return }
+
+        // Не встревать поверх уже идущей другой временной реакции
+        // (`.celebrating`/`.listening`) — напоминание не должно её обрывать.
+        guard stateMachine.state == .idle || stateMachine.state == .burning else { return }
+
+        if let lastReminderAt, now.timeIntervalSince(lastReminderAt) < CharacterConfig.reminderCooldown {
+            return
+        }
+
+        lastReminderAt = now
+        stateMachine.setState(.reminding)
+        scheduleReturnToRestingState(after: CharacterConfig.reminderDisplayDuration)
+    }
+
+    /// Ночная тишина (`CharacterConfig.reminderQuietHourStart/End`),
+    /// с оборачиванием через полночь: интервал 23:00-08:00 значит
+    /// `start > end`, и час либо не меньше начала, либо меньше конца.
+    private func isQuietHour(_ date: Date) -> Bool {
+        let hour = Calendar.current.component(.hour, from: date)
+        let start = CharacterConfig.reminderQuietHourStart
+        let end = CharacterConfig.reminderQuietHourEnd
+        if start > end {
+            return hour >= start || hour < end
+        }
+        return hour >= start && hour < end
     }
 }

@@ -29,6 +29,12 @@ final class TaskBag: @unchecked Sendable {
         /// горящие задачи разом, не по таймеру на задачу (Фаза 4б,
         /// `TaskPanelController`).
         case burnTicker
+        /// Опрос детектора бездействия для напоминаний, тик раз в 30 секунд
+        /// (Фаза 4в, `TaskPanelController`) — заметно реже `burnTicker`:
+        /// порог бездействия считается в минутах, а кулдаун между
+        /// напоминаниями — в десятках минут, секундная частота здесь не
+        /// нужна (прямой ориентир PHASE-4C-PROMPT.md).
+        case reminderTicker
     }
 
     private let lock = NSLock()
