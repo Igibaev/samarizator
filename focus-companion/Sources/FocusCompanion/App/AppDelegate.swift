@@ -44,10 +44,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func setUpStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        item.button?.image = NSImage(
-            systemSymbolName: "circle.fill",
-            accessibilityDescription: "Focus Companion"
-        )
+
+        // Текстовый заголовок, а не SF Symbol: символ мог не отрисоваться и дать
+        // кнопку нулевой ширины — то есть невидимый пункт меню-бара. Текст
+        // виден гарантированно. Иконку вернём, когда убедимся, что пункт на месте.
+        item.button?.title = "FC"
+        item.button?.toolTip = "Focus Companion"
+
+        // Пункт не должен прятаться под вырез, если в меню-баре много иконок.
+        item.behavior = []
+        item.isVisible = true
 
         let menu = NSMenu()
         menu.addItem(
@@ -72,8 +78,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func logDiagnostics() {
         print("=== Focus Companion ===")
         print("debug-режим: \(AppearanceConfig.isDebug ? "ВКЛ (капсула красная и вытянута вниз)" : "выкл")")
-        print("иконка в меню-баре: \(statusItem?.button != nil ? "создана" : "НЕ СОЗДАНА")")
+        if let button = statusItem?.button {
+            print("иконка в меню-баре: создана, isVisible=\(statusItem?.isVisible ?? false), "
+                  + "ширина кнопки=\(button.frame.width), окно кнопки=\(String(describing: button.window?.frame))")
+        } else {
+            print("иконка в меню-баре: НЕ СОЗДАНА")
+        }
         print("панель показана: \(windowController.isPanelVisible ? "да" : "НЕТ")")
+        print("панель пропускает клики (ignoresMouseEvents): \(windowController.panelIgnoresMouseEvents.map(String.init(describing:)) ?? "панели нет")")
         print("экранов: \(NSScreen.screens.count)")
         for screen in NSScreen.screens {
             print(screen.geometryDescription)

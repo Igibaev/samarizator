@@ -15,6 +15,9 @@ final class NotchWindowController {
     /// Действительно ли панель существует и показана — для отладочного вывода.
     var isPanelVisible: Bool { panel?.isVisible ?? false }
 
+    /// Пропускает ли панель клики насквозь — для отладочного вывода.
+    var panelIgnoresMouseEvents: Bool? { panel?.ignoresMouseEvents }
+
     /// Создаёт и показывает панель на переданном экране (или на экране с
     /// курсором мыши, если экран не передан).
     func show(on screen: NSScreen? = nil) {
@@ -33,6 +36,11 @@ final class NotchWindowController {
         let frame = targetScreen.capsulePanelFrame
         let newPanel = NotchPanel(contentRect: frame)
         newPanel.contentView = NSHostingView(rootView: NotchRootView())
+
+        // Повторно после contentView: NSHostingView добавляет свои tracking-области,
+        // и флаг важнее любых настроек содержимого — меню-бар под капсулой обязан
+        // остаться кликабельным.
+        newPanel.ignoresMouseEvents = true
 
         // orderFrontRegardless(), а не makeKeyAndOrderFront(_:) — панель не
         // должна становиться key-окном и красть фокус у того, с чем работает
