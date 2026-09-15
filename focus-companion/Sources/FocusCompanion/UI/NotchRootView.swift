@@ -87,43 +87,40 @@ struct NotchRootView: View {
         )
         let size = hoverDetector.isExpanded ? hoverDetector.expandedSize : hoverDetector.collapsedSize
 
-        return ZStack(alignment: .top) {
-            shape.fill(AppearanceConfig.capsuleColor)
-
-            highlightGlow
-
-            // Глаза кладутся с отступом от ВЕРХА капсулы (ZStack выше
-            // выровнен по .top). Раньше здесь была "головная зона"
-            // фиксированной высоты с центрированием внутри — она зависела от
-            // того, какой высоты контейнер получился, и глаза уезжали вверх.
-            EyesView(model: eyesModel, appearance: stateMachine.appearance)
-                .scaleEffect(AppearanceConfig.isDebug ? CharacterConfig.debugScale : 1)
-                .offset(x: currentEyesOffsetX - currentCapsuleOffsetX)
-                .padding(.top, CharacterConfig.eyesTopInset
-                    + (AppearanceConfig.isDebug ? CharacterConfig.debugYOffset : 0))
-
-            ExpandedPanelView(
-                hoverDetector: hoverDetector,
-                taskPanel: taskPanel
-            )
-            // Жёстко по ширине капсулы: иначе контент раздвигает ZStack шире
-            // формы, обрезается по ней, и текст уезжает за левый край.
-            .frame(width: size.width)
-            .padding(.top, hoverDetector.collapsedSize.height)
-            .opacity(hoverDetector.isExpanded ? 1 : 0)
-        }
-        .frame(width: size.width, height: size.height)
-        .clipShape(shape)
-        // Свёрнутая капсула стоит правее центра окна (окно центрировано по
-        // вырезу), раскрытая занимает окно целиком и смещения не требует.
-        .offset(x: currentCapsuleOffsetX)
-        // Хит-тест ограничен точной формой капсулы, а не прямоугольником
-        // фрейма — иначе прозрачные "уши" вокруг вогнутых верхних углов
-        // тоже ловили бы клики. Включаем интерактивность только когда
-        // панель реально раскрыта: `NotchPanel.ignoresMouseEvents` и так уже
-        // это гарантирует на уровне AppKit, но дублируем на уровне SwiftUI —
-        // окно в Фазе 3 заметно больше самой капсулы, и ошибка здесь
-        // заблокировала бы существенный кусок экрана (см. PHASE-3-PROMPT.md).
+        return shape.fill(AppearanceConfig.capsuleColor)
+            // Размер капсулы задаётся ЗДЕСЬ и только формой.
+            //
+            // Раньше всё лежало в общем ZStack: подсветка (круг фиксированного
+            // размера) и содержимое раскрытой панели делали его собственную
+            // высоту заметно больше капсулы, а внешний .frame сжимал его
+            // обратно и при этом ЦЕНТРИРОВАЛ — из-за чего верхнее выравнивание
+            // переставало работать и глаза уезжали вверх. Именно это, а не
+            // числа отступов, я правил три раза подряд.
+            //
+            // Теперь всё остальное — оверлеи: они рисуются поверх, но на
+            // размер базового слоя не влияют вообще.
+            .frame(width: size.width, height: size.height)
+            .overlay(alignment: .top) { highlightGlow }
+            .overlay(alignment: .top) {
+                EyesView(model: eyesModel, appearance: stateMachine.appearance)
+                    .scaleEffect(AppearanceConfig.isDebug ? CharacterConfig.debugScale : 1)
+                    .offset(x: currentEyesOffsetX - currentCapsuleOffsetX)
+                    .padding(.top, CharacterConfig.eyesTopInset
+                        + (AppearanceConfig.isDebug ? CharacterConfig.debugYOffset : 0))
+            }
+            .overlay(alignment: .top) {
+                ExpandedPanelView(
+                    hoverDetector: hoverDetector,
+                    taskPanel: taskPanel
+                )
+                .frame(width: size.width)
+                .padding(.top, hoverDetector.collapsedSize.height)
+                .opacity(hoverDetector.isExpanded ? 1 : 0)
+            }
+            .clipShape(shape)
+            // Свёрнутая капсула стоит правее центра окна (окно центрировано по
+            // вырезу), раскрытая занимает окно целиком и смещения не требует.
+            .offset(x: currentCapsuleOffsetX)
         .contentShape(shape)
         .allowsHitTesting(hoverDetector.isExpanded)
     }
@@ -151,7 +148,7 @@ struct NotchRootView: View {
             .frame(width: CharacterConfig.highlightGlowSize, height: CharacterConfig.highlightGlowSize)
             .blur(radius: CharacterConfig.highlightBlurRadius)
             .opacity(stateMachine.appearance.highlightIntensity * (0.6 + 0.4 * eyesModel.breathPulse))
-            .offset(x: currentEyesOffsetX, y: CharacterConfig.eyesTopInset)
+            .offset(x: currentEyesOffsetX - currentCapsuleOffsetX, y: CharacterConfig.eyesTopInset)
             .allowsHitTesting(false)
     }
 }
