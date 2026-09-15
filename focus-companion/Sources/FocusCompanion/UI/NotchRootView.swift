@@ -27,22 +27,6 @@ struct NotchRootView: View {
 
         let eyes = EyesViewModel(stateMachine: stateMachine)
         _eyesModel = State(initialValue: eyes)
-
-        // Глобальный монитор мыши (`MouseTracker` внутри `EyesViewModel`)
-        // слепнет, как только панель раскрывается и начинает перехватывать
-        // клики (`ignoresMouseEvents = false`) — курсор в этот момент часто
-        // находится как раз над собственным окном приложения. Поэтому во
-        // время раскрытия слежение глаз питается тем же 20 Гц опросом,
-        // которым `HoverDetector` и так уже определяет наведение (решение
-        // автора №1 в PHASE-3-PROMPT.md). Замыкание переустанавливается при
-        // каждом пересоздании этой вью (переезд на другой экран), поэтому
-        // всегда указывает на актуальный `eyesModel`; `[weak eyes]` защищает
-        // от вызова в уже освобождённый объект, если вью успела исчезнуть
-        // раньше следующего тика опроса.
-        hoverDetector.onMouseLocation = { [weak eyes] location in
-            guard let eyes, hoverDetector.isExpanded else { return }
-            eyes.updateGaze(from: location)
-        }
     }
 
     var body: some View {
@@ -59,6 +43,31 @@ struct NotchRootView: View {
         // ограничивает попадания своей формой и включает hit-testing только
         // когда панель раскрыта — это защита от рассинхронизации на случай
         // правок, а не единственная линия обороны.
+        .onAppear(perform: connectGazeToHoverPolling)
+    }
+
+    /// Подключает слежение глаз к опросу курсора, которым `HoverDetector` и
+    /// так определяет наведение.
+    ///
+    /// Зачем это нужно: глобальный монитор мыши (`MouseTracker` внутри
+    /// `EyesViewModel`) слепнет, как только панель раскрывается и начинает
+    /// перехватывать клики — курсор в этот момент как раз над собственным
+    /// окном приложения. Без этой связки взгляд замирал бы ровно тогда, когда
+    /// пользователь смотрит на раскрытого персонажа.
+    ///
+    /// Делается в `onAppear`, а не в `init`: структура-вью может быть создана
+    /// повторно, и тогда замыкание указывало бы на выброшенную копию модели,
+    /// а не на ту, что реально живёт в `@State`.
+    ///
+    /// Обе ссылки слабые. `detector` — потому что замыкание хранится внутри
+    /// самого детектора, и сильная ссылка замкнула бы цикл.
+    private func connectGazeToHoverPolling() {
+        let eyes = eyesModel
+        let detector = hoverDetector
+        detector.onMouseLocation = { [weak eyes, weak detector] location in
+            guard let eyes, let detector, detector.isExpanded else { return }
+            eyes.updateGaze(from: location)
+        }
     }
 
     /// Капсула (фон + подсветка + голова персонажа + заготовка контента
