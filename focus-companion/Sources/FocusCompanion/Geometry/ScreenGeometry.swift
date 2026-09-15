@@ -95,23 +95,24 @@ extension NSScreen {
     var collapsedCapsuleFrame: NSRect {
         let notch = notchFrameWithFallback
 
-        // Высота — ровно в вырез: капсула не свисает под меню-бар, а сидит в
-        // той же полосе, что и сам вырез.
+        // Высота — ровно в вырез: капсула сидит в той же полосе, что и он.
         let height = notch.height
             + AppearanceConfig.capsuleExtraDepth
             + AppearanceConfig.debugExtraHeight
 
-        // Капсула примыкает к вырезу СПРАВА и читается как его продолжение
-        // вбок. Загибы формы (topCornerRadius) торчат за пределы видимого
-        // тела с обеих сторон, поэтому левый край окна сдвинут на их ширину
-        // влево — чтобы само тело начиналось точно у края выреза.
+        // Тело начинается от ЛЕВОГО края выреза и тянется вправо, поглощая
+        // сам вырез. Если начинать от правого края, у стыка видно скругление
+        // капсулы — шов между вырезом и персонажем.
+        //
+        // Загибы формы (topCornerRadius) торчат за пределы тела с обеих
+        // сторон, поэтому фрейм окна шире тела на их удвоенную ширину.
         let flare = AppearanceConfig.topCornerRadius
-        let bodyOriginX = notch.maxX + AppearanceConfig.collapsedGapFromNotch
+        let bodyWidth = notch.width + AppearanceConfig.collapsedExtensionRight
 
         return NSRect(
-            x: bodyOriginX - flare,
+            x: notch.minX - flare,
             y: frame.maxY - height,
-            width: AppearanceConfig.collapsedWidth + flare * 2,
+            width: bodyWidth + flare * 2,
             height: height
         )
     }
@@ -123,15 +124,31 @@ extension NSScreen {
         let width = AppearanceConfig.expandedWidth
         let height = AppearanceConfig.expandedHeight
 
-        // Окно центрируется по СВЁРНУТОЙ капсуле, а не по экрану: капсула
-        // больше не стоит по центру, и раскрытие должно расти вокруг неё,
-        // иначе персонаж прыгал бы вбок в момент раскрытия.
-        var x = collapsedCapsuleFrame.midX - width / 2
-
-        // Но не вылезая за края экрана.
+        // Окно центрируется по ВЫРЕЗУ: раскрытие должно расти симметрично
+        // вокруг него, как будто вырез — центр персонажа.
+        var x = notchFrameWithFallback.midX - width / 2
         x = min(max(x, frame.minX), frame.maxX - width)
 
         return NSRect(x: x, y: frame.maxY - height, width: width, height: height)
+    }
+
+    /// Горизонтальное смещение центра СВЁРНУТОЙ капсулы относительно центра
+    /// окна. Нужно потому, что окно центрировано по вырезу, а свёрнутая
+    /// капсула уходит вправо.
+    var collapsedOffsetXInPanel: CGFloat {
+        collapsedCapsuleFrame.midX - capsulePanelFrame.midX
+    }
+
+    /// Горизонтальное положение глаз относительно центра окна.
+    ///
+    /// Глаза сидят по центру той части капсулы, что торчит СПРАВА от выреза —
+    /// то есть там же, где они видны в свёрнутом состоянии. Значение общее
+    /// для обоих состояний: окно центрировано по вырезу и не переезжает, а
+    /// значит и глаза при раскрытии не должны смещаться по горизонтали.
+    var eyesOffsetXInPanel: CGFloat {
+        let notch = notchFrameWithFallback
+        let eyesCenterX = notch.maxX + AppearanceConfig.collapsedExtensionRight / 2
+        return eyesCenterX - capsulePanelFrame.midX
     }
 
     /// Метрики экрана одной строкой — для отладочного вывода при запуске.

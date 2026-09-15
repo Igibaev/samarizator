@@ -38,6 +38,14 @@ final class HoverDetector {
     /// состояния).
     private(set) var expandedSize: CGSize = .zero
 
+    /// Смещение центра свёрнутой капсулы относительно центра окна: окно
+    /// центрировано по вырезу, а капсула уходит вправо.
+    private(set) var collapsedOffsetX: CGFloat = 0
+
+    /// Смещение глаз относительно центра окна. Одно и то же в обоих
+    /// состояниях — по горизонтали персонаж при раскрытии не ездит.
+    private(set) var eyesOffsetX: CGFloat = 0
+
     /// Вызывается на каждом тике опроса с текущей глобальной позицией
     /// курсора — используется `EyesViewModel` для слежения глаз, пока
     /// раскрыто (см. комментарий в шапке файла).
@@ -120,6 +128,8 @@ final class HoverDetector {
         guard let screen = screen ?? NSScreen.screenWithMouse ?? NSScreen.main else { return }
         collapsedSize = screen.collapsedCapsuleFrame.size
         expandedSize = screen.capsulePanelFrame.size
+        collapsedOffsetX = screen.collapsedOffsetXInPanel
+        eyesOffsetX = screen.eyesOffsetXInPanel
     }
 
     private static func nanoseconds(_ seconds: Double) -> UInt64 {

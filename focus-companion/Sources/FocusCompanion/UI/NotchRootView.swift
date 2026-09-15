@@ -96,6 +96,11 @@ struct NotchRootView: View {
             // увеличенного фрейма вслед за стандартным центрированием ZStack.
             ZStack {
                 EyesView(model: eyesModel, appearance: stateMachine.appearance)
+                    // Глаза держатся на одном и том же месте экрана в обоих
+                    // состояниях: смещение задано относительно центра окна,
+                    // а капсула под ними при раскрытии ездит сама. Отсюда и
+                    // вычитание её собственного смещения.
+                    .offset(x: hoverDetector.eyesOffsetX - currentCapsuleOffsetX)
                     // Debug-режим: персонаж увеличен и сдвинут ниже, чтобы
                     // моргание и саккады было видно в деталях — сама капсула
                     // в этом же режиме тоже вытянута вниз.
@@ -113,6 +118,9 @@ struct NotchRootView: View {
         }
         .frame(width: size.width, height: size.height)
         .clipShape(shape)
+        // Свёрнутая капсула стоит правее центра окна (окно центрировано по
+        // вырезу), раскрытая занимает окно целиком и смещения не требует.
+        .offset(x: currentCapsuleOffsetX)
         // Хит-тест ограничен точной формой капсулы, а не прямоугольником
         // фрейма — иначе прозрачные "уши" вокруг вогнутых верхних углов
         // тоже ловили бы клики. Включаем интерактивность только когда
@@ -122,6 +130,11 @@ struct NotchRootView: View {
         // заблокировала бы существенный кусок экрана (см. PHASE-3-PROMPT.md).
         .contentShape(shape)
         .allowsHitTesting(hoverDetector.isExpanded)
+    }
+
+    /// Смещение капсулы относительно центра окна в текущем состоянии.
+    private var currentCapsuleOffsetX: CGFloat {
+        hoverDetector.isExpanded ? 0 : hoverDetector.collapsedOffsetX
     }
 
     /// Мягкая цветная подсветка состояния позади глаз. Цвет и базовую силу
@@ -135,7 +148,7 @@ struct NotchRootView: View {
             .frame(width: CharacterConfig.highlightGlowSize, height: CharacterConfig.highlightGlowSize)
             .blur(radius: CharacterConfig.highlightBlurRadius)
             .opacity(stateMachine.appearance.highlightIntensity * (0.6 + 0.4 * eyesModel.breathPulse))
-            .offset(y: CharacterConfig.eyesYOffset)
+            .offset(x: hoverDetector.eyesOffsetX, y: CharacterConfig.eyesYOffset)
             .allowsHitTesting(false)
     }
 }
