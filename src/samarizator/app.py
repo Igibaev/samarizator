@@ -10,6 +10,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QLockFile, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import (
+    QAction,
     QColor,
     QDesktopServices,
     QKeySequence,
@@ -32,11 +33,14 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QSizePolicy,
     QSpinBox,
     QSplitter,
+    QStyle,
+    QSystemTrayIcon,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
@@ -46,6 +50,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import obsidian, screencapture
+from .companion_ui import CompanionWindow
 from .config import Settings, data_dir, set_api_key
 from .knowledge import stamp
 from .live import (
@@ -360,6 +365,41 @@ class SettingsDialog(QDialog):
         )
         hint.setWordWrap(True)
         qform.addRow(hint)
+        assistant = QWidget()
+        aform = QFormLayout(assistant)
+        tabs.addTab(assistant, "ИИ-помощник · локально")
+        assistant_intro = QLabel(
+            "Помощник читает только Markdown внутри выбранной папки Obsidian. "
+            "Запросы идут в локальный Ollama; облачный API сводок для него не используется."
+        )
+        assistant_intro.setWordWrap(True)
+        aform.addRow(assistant_intro)
+        assistant_url = QLineEdit(settings.assistant_url)
+        assistant_url.setPlaceholderText("http://localhost:11434")
+        self.fields["assistant_url"] = assistant_url
+        aform.addRow("Адрес Ollama", assistant_url)
+        assistant_model = QLineEdit(settings.assistant_model)
+        assistant_model.setPlaceholderText("qwen3:4b")
+        self.fields["assistant_model"] = assistant_model
+        aform.addRow("Фоновая модель", assistant_model)
+        keep_alive = QComboBox()
+        for value, label in [
+            ("0", "Выгружать сразу — меньше нагрев"),
+            ("2m", "Держать 2 минуты"),
+            ("5m", "Держать 5 минут"),
+            ("15m", "Держать 15 минут"),
+        ]:
+            keep_alive.addItem(label, value)
+        keep_alive.setCurrentIndex(max(0, keep_alive.findData(settings.assistant_keep_alive)))
+        self.fields["assistant_keep_alive"] = keep_alive
+        aform.addRow("После ответа", keep_alive)
+        assistant_hint = QLabel(
+            "Для постоянного режима рекомендуется qwen3:4b, thinking выключен. "
+            "Тяжёлая 27B-модель остаётся ручным режимом и не запускается фоновыми проверками. "
+            "Помощник не изменяет заметки: найденные чекбоксы копируются в отдельную локальную базу задач."
+        )
+        assistant_hint.setWordWrap(True)
+        aform.addRow(assistant_hint)
         corporate = QWidget()
         api = QFormLayout(corporate)
         tabs.addTab(corporate, "Облачная модель · сводки")
@@ -488,6 +528,7 @@ class Window(QMainWindow):
         self.playback_total = 0
         self.playback_mid = None
         self.live_recorder = None
+        self.companion = None
         from .build import build_label
 
         self.build_label = build_label()
@@ -502,6 +543,9 @@ class Window(QMainWindow):
         top.addWidget(title)
         top.addWidget(QLabel("Локальное аудио  ·  Кратко + подробно  ·  " + self.build_label))
         top.addStretch()
+        self.companion_button = QPushButton("✦ Помощник")
+        self.companion_button.clicked.connect(self.show_companion)
+        top.addWidget(self.companion_button)
         self.settings_button = QPushButton("Настройки")
         self.settings_button.clicked.connect(self.configure)
         top.addWidget(self.settings_button)
@@ -690,6 +734,16 @@ class Window(QMainWindow):
         if dialog.exec():
             self.settings = dialog.settings
             self.ram.setText(f"Бюджет: {self.settings.memory_gb:g} ГиБ · CPU")
+            if self.companion:
+                self.companion.reconfigure(self.settings)
+
+    def create_companion(self):
+        if self.companion is None:
+            self.companion = CompanionWindow(self.settings)
+        return self.companion
+
+    def show_companion(self):
+        self.create_companion().show_and_raise()
 
     def add_file(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -1427,6 +1481,8 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("Samarizator")
     app.setStyle("Fusion")
+    tray_available = QSystemTrayIcon.isSystemTrayAvailable()
+    app.setQuitOnLastWindowClosed(not tray_available)
     lock = QLockFile(str(data_dir() / "app.lock"))
     lock.setStaleLockTime(0)
     if not lock.tryLock(100):
@@ -1434,7 +1490,53 @@ def main():
         return 0
     apply_theme(app)
     window = Window()
+    companion = window.create_companion()
+    tray = QSystemTrayIcon(
+        app.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon), app
+    )
+    menu = QMenu()
+    show_main = QAction("Открыть Samarizator", menu)
+    show_main.triggered.connect(lambda: (window.show(), window.raise_(), window.activateWindow()))
+    menu.addAction(show_main)
+    show_assistant = QAction("Показать помощника", menu)
+    show_assistant.triggered.connect(companion.show_and_raise)
+    menu.addAction(show_assistant)
+    menu.addSeparator()
+    quit_action = QAction("Выйти", menu)
+
+    def quit_all():
+        if companion.job or companion.sync_job:
+            tray.showMessage(
+                "Samarizator",
+                "Дождитесь завершения ответа или обновления Obsidian.",
+                QSystemTrayIcon.MessageIcon.Information,
+                4000,
+            )
+            return
+        companion.allow_close = True
+        companion.close()
+        if window.close():
+            tray.hide()
+            app.quit()
+
+    quit_action.triggered.connect(quit_all)
+    menu.addAction(quit_action)
+    tray.setContextMenu(menu)
+    tray.setToolTip("Samarizator · локальный помощник")
+    tray.activated.connect(
+        lambda reason: companion.show_and_raise()
+        if reason == QSystemTrayIcon.ActivationReason.Trigger
+        else None
+    )
+    companion.reminder.connect(
+        lambda title, body: tray.showMessage(
+            title, body, QSystemTrayIcon.MessageIcon.Information, 8000
+        )
+    )
+    if tray_available:
+        tray.show()
     window.show()
+    companion.show_and_raise()
     code = app.exec()
     lock.unlock()
     return code

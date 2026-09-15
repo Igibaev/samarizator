@@ -35,6 +35,9 @@ class Settings:
     live_system_backend: str = "screencapturekit"
     audio_cleanup: str = "off"
     live_mix: str = "gentle"
+    assistant_url: str = "http://localhost:11434"
+    assistant_model: str = "qwen3:4b"
+    assistant_keep_alive: str = "0"
 
     def quality_profile(self):
         """Opt-in profile. Preserve the user's ASR model and corporate API configuration."""
@@ -68,6 +71,19 @@ class Settings:
         # Names mirror live.MIX_PROFILES; kept literal so config does not import capture code.
         if self.live_mix not in {"gentle", "no-resample", "hard-stuff", "stretch", "legacy-pan"}:
             raise ValueError("Неизвестный профиль сведения дорожек live-записи.")
+        assistant = urlparse(self.assistant_url.strip())
+        if (
+            assistant.scheme not in {"http", "https"}
+            or assistant.hostname not in {"localhost", "127.0.0.1", "::1"}
+            or assistant.username
+            or assistant.password
+            or assistant.fragment
+        ):
+            raise ValueError("ИИ-помощник может подключаться только к локальному Ollama на этом Mac.")
+        if not self.assistant_model.strip() or len(self.assistant_model) > 200:
+            raise ValueError("Укажите название локальной модели ИИ-помощника.")
+        if self.assistant_keep_alive not in {"0", "2m", "5m", "15m"}:
+            raise ValueError("Некорректное время удержания модели в памяти.")
         if not 2 <= self.memory_gb <= 64:
             raise ValueError("Бюджет памяти должен быть от 2 до 64 ГиБ.")
         if not 1 <= self.threads <= 16 or not 30 <= self.chunk_seconds <= 300:
