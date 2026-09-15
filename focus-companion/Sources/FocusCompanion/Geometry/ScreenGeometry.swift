@@ -69,30 +69,40 @@ extension NSScreen {
         )
     }
 
-    /// Фрейм самой панели-капсулы — шире выреза на `topCornerRadius` с каждой
-    /// стороны.
+    /// Фрейм самой панели-капсулы — шире и глубже выреза.
     ///
-    /// Зачем: верхние углы `NotchShape` — вогнутые "загибы", которые съедают по
-    /// `topCornerRadius` слева и справа от прямоугольника. Если дать панели
-    /// ровно `notchFrame`, чёрное тело капсулы окажется УЖЕ выреза, и по краям
-    /// выреза проступят два светлых клина — ровно тот шов, которого мы избегаем.
-    /// Расширяем фрейм так, чтобы боковые рёбра тела совпали с краями выреза,
-    /// а загибы легли поверх меню-бара (кликам это не мешает — панель
-    /// `ignoresMouseEvents`).
+    /// Ширина: базовое расширение на `topCornerRadius` с каждой стороны —
+    /// верхние углы `NotchShape` вогнутые "загибы", которые съедают по
+    /// `topCornerRadius` слева и справа от прямоугольника; без этого запаса
+    /// чёрное тело капсулы оказалось бы УЖЕ выреза, и по краям проступили бы
+    /// два светлых клина — ровно тот шов, которого мы избегаем. Поверх этого
+    /// добавляется `capsuleExtraWidthPerSide` — решение автора для Фазы 2
+    /// сделать персонажа шире выреза (см. AppearanceConfig).
+    ///
+    /// Глубина: капсула дополнительно свисает вниз на `capsuleExtraDepth`
+    /// (и ещё на `debugExtraHeight` в debug-режиме). Верхний край при этом
+    /// НЕ трогаем — он обязан остаться прижат к краю экрана, иначе загибы
+    /// перестанут стыковаться с физическим вырезом без шва.
+    ///
+    /// Центрирование по X не ломается: `insetBy` симметричен, а
+    /// `notchFrameWithFallback` и так уже центрирован по `frame.midX`.
     var capsulePanelFrame: NSRect {
-        let flared = notchFrameWithFallback.insetBy(dx: -AppearanceConfig.topCornerRadius, dy: 0)
+        let extraWidth = AppearanceConfig.topCornerRadius + AppearanceConfig.capsuleExtraWidthPerSide
+        var result = notchFrameWithFallback.insetBy(dx: -extraWidth, dy: 0)
 
-        // В debug-режиме вытягиваем капсулу вниз: координаты AppKit растут
-        // вверх, поэтому "вниз" — это сдвинуть origin.y и увеличить высоту.
-        let extra = AppearanceConfig.debugExtraHeight
-        guard extra > 0 else { return flared }
+        // Координаты AppKit растут вверх, поэтому "свисание вниз" — это
+        // уменьшение origin.y и увеличение высоты на ту же величину, при
+        // неизменном maxY (верхнем крае).
+        let extraDepth = AppearanceConfig.capsuleExtraDepth + AppearanceConfig.debugExtraHeight
+        guard extraDepth > 0 else { return result }
 
-        return NSRect(
-            x: flared.minX,
-            y: flared.minY - extra,
-            width: flared.width,
-            height: flared.height + extra
+        result = NSRect(
+            x: result.minX,
+            y: result.minY - extraDepth,
+            width: result.width,
+            height: result.height + extraDepth
         )
+        return result
     }
 
     /// Метрики экрана одной строкой — для отладочного вывода при запуске.

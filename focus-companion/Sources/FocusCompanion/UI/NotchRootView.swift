@@ -2,15 +2,35 @@ import SwiftUI
 
 /// Корневая вью персонажа.
 ///
-/// Фаза 1: статичная чёрная капсула на весь доступный размер окна, без какого-
-/// либо содержимого внутри — глаза, моргание и раскрытие появятся на Фазах 2-3.
+/// Фаза 1 отрисовывала только статичную капсулу. Фаза 2 добавляет поверх неё
+/// пару живых глаз (`EyesView`): слежение за курсором, моргание, саккады,
+/// едва заметное дыхание. Сама капсула по-прежнему статична геометрически —
+/// дыхание масштабирует только глаза, не форму (см. решение №2 в
+/// PHASE-2-PROMPT.md): она жёстко привязана к физическому вырезу, и любая
+/// пульсация формы немедленно сломала бы стык с краем экрана.
 struct NotchRootView: View {
+    // @State, а не let: ViewModel должен пережить перерисовки этой вью
+    // (не пересоздаваться на каждый re-render), а таймеры моргания/саккад/
+    // дыхания и глобальный монитор мыши внутри него живут, пока жива вью.
+    @State private var eyesModel = EyesViewModel()
+
     var body: some View {
-        NotchShape(
-            topCornerRadius: AppearanceConfig.topCornerRadius,
-            bottomCornerRadius: AppearanceConfig.bottomCornerRadius
-        )
-        .fill(AppearanceConfig.capsuleColor)
+        ZStack {
+            NotchShape(
+                topCornerRadius: AppearanceConfig.topCornerRadius,
+                bottomCornerRadius: AppearanceConfig.bottomCornerRadius
+            )
+            .fill(AppearanceConfig.capsuleColor)
+
+            EyesView(model: eyesModel)
+                // Debug-режим: персонаж увеличен (ориентир ×3) и сдвинут
+                // вниз, чтобы моргание и саккады было видно в деталях —
+                // сама капсула в этом же режиме уже вытянута вниз через
+                // AppearanceConfig.debugExtraHeight, так что глазам есть
+                // куда сместиться, не вылезая за её пределы.
+                .scaleEffect(AppearanceConfig.isDebug ? CharacterConfig.debugScale : 1)
+                .offset(y: AppearanceConfig.isDebug ? CharacterConfig.debugYOffset : 0)
+        }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         // Окно и так ignoresMouseEvents, но на всякий случай дублируем на уровне
         // вью — эта вью не должна становиться кликабельной ни при каких правках.
@@ -20,4 +40,5 @@ struct NotchRootView: View {
 
 // #Preview здесь намеренно нет: макрос Preview реализован плагином Xcode
 // (PreviewsMacros), которого нет при сборке через `swift build` из терминала —
-// любой #Preview в исходниках валит нашу сборку. Смотреть результат — запуском.
+// любой #Preview в исходниках валит нашу сборку. Смотреть результат — запуском,
+// желательно с FOCUS_DEBUG=1 (см. README).

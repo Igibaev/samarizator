@@ -90,6 +90,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for screen in NSScreen.screens {
             print(screen.geometryDescription)
         }
+        // Фаза 2: капсула теперь шире и глубже физического выреза
+        // (AppearanceConfig.capsuleExtraWidthPerSide/capsuleExtraDepth) —
+        // печатаем итоговый фрейм отдельной строкой, чтобы цифры не терялись
+        // среди остальной геометрии экрана.
+        print("расширение капсулы: +\(AppearanceConfig.capsuleExtraWidthPerSide)pt на сторону по ширине, "
+              + "+\(AppearanceConfig.capsuleExtraDepth)pt в глубину"
+              + (AppearanceConfig.isDebug ? " (+\(AppearanceConfig.debugExtraHeight)pt debug-довесок)" : ""))
+        if let screen = NSScreen.screenWithMouse ?? NSScreen.main {
+            print("итоговый фрейм капсулы: \(screen.capsulePanelFrame)")
+        }
         print("=======================")
         fflush(stdout)
     }
