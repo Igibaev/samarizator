@@ -145,6 +145,16 @@ final class EyesViewModel {
                 let idleFor = Date().timeIntervalSince(self.mouseTracker.lastMovementDate)
                 if idleFor >= CharacterConfig.saccadeIdleThreshold {
                     await self.performSaccade()
+                    guard !Task.isCancelled else { return }
+
+                    // Пауза до следующей саккады. Без неё цикл, пока курсор
+                    // неподвижен, запускал бы саккаду каждые ~0.9 сек без
+                    // остановки: глаза дёргались бы непрерывно, и персонаж
+                    // читался бы как тревожный, а не как живой.
+                    let pause = Double.random(
+                        in: CharacterConfig.saccadeMinPause...CharacterConfig.saccadeMaxPause
+                    )
+                    try? await Task.sleep(nanoseconds: Self.nanoseconds(pause))
                 }
             }
         }
@@ -169,7 +179,10 @@ final class EyesViewModel {
         try? await Task.sleep(nanoseconds: Self.nanoseconds(CharacterConfig.saccadeJumpDuration))
         guard !Task.isCancelled else { return }
 
-        try? await Task.sleep(nanoseconds: Self.nanoseconds(CharacterConfig.saccadeHoldDuration))
+        let hold = Double.random(
+            in: CharacterConfig.saccadeMinHold...CharacterConfig.saccadeMaxHold
+        )
+        try? await Task.sleep(nanoseconds: Self.nanoseconds(hold))
         guard !Task.isCancelled else { return }
 
         withAnimation(.easeInOut(duration: CharacterConfig.saccadeReturnDuration)) {
