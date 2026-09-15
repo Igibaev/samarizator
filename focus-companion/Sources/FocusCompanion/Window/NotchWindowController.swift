@@ -27,7 +27,7 @@ final class NotchWindowController {
             panel.close()
         }
 
-        let frame = targetScreen.notchFrameWithFallback
+        let frame = targetScreen.capsulePanelFrame
         let newPanel = NotchPanel(contentRect: frame)
         newPanel.contentView = NSHostingView(rootView: NotchRootView())
 
@@ -53,7 +53,7 @@ final class NotchWindowController {
         } else {
             // Тот же экран, но его геометрия могла измениться (например,
             // сменилось разрешение) — просто обновляем фрейм панели.
-            panel?.setFrame(targetScreen.notchFrameWithFallback, display: true)
+            panel?.setFrame(targetScreen.capsulePanelFrame, display: true)
         }
     }
 
