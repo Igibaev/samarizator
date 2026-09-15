@@ -1,30 +1,18 @@
 import SwiftUI
 
-/// Один глаз: склера (белок) и зрачок со смещением внутри неё.
+/// Один глаз — светлая щель (капсула со скруглением по короткой стороне).
 ///
-/// Моргание реализовано как схлопывание высоты всего глаза (`scaleEffect`
-/// по Y), а не наложением прямоугольника-века поверх — так закрытие выглядит
-/// органично (веко как бы "часть" самого глаза), а не как отдельный слой,
-/// наезжающий сверху.
+/// Моргание реализовано как схлопывание щели по её длинной оси: щель
+/// сжимается в тонкую чёрточку и раскрывается обратно. Именно так закрывается
+/// глаз у минималистичных персонажей — накладывать сверху прямоугольник-веко
+/// здесь нечего, тело персонажа и так однотонное.
 struct EyeView: View {
-    var pupilOffset: CGPoint
     var eyeScaleY: CGFloat
 
     var body: some View {
-        let size = CharacterConfig.eyeSize
-        let pupilSize = CharacterConfig.pupilSize
-        let maxShift = (size - pupilSize) / 2 * CharacterConfig.pupilMaxShiftFraction
-
-        ZStack {
-            Circle()
-                .fill(CharacterConfig.scleraColor)
-
-            Circle()
-                .fill(CharacterConfig.pupilColor)
-                .frame(width: pupilSize, height: pupilSize)
-                .offset(x: pupilOffset.x * maxShift, y: pupilOffset.y * maxShift)
-        }
-        .frame(width: size, height: size)
-        .scaleEffect(x: 1, y: eyeScaleY, anchor: .center)
+        Capsule(style: .continuous)
+            .fill(CharacterConfig.eyeColor)
+            .frame(width: CharacterConfig.eyeWidth, height: CharacterConfig.eyeHeight)
+            .scaleEffect(x: 1, y: eyeScaleY, anchor: .center)
     }
 }

@@ -2,10 +2,13 @@ import SwiftUI
 
 /// Пара глаз персонажа.
 ///
-/// Отступ между глазами берётся из `CharacterConfig`, дыхание (`breathScale`)
-/// масштабирует пару целиком как один узел — капсулу под ней это не
-/// затрагивает (см. решение №2 в PHASE-2-PROMPT.md: форма капсулы статична,
-/// потому что жёстко привязана к физическому вырезу).
+/// Взгляд передаётся сдвигом пары целиком по телу персонажа, а не движением
+/// зрачков внутри склер: у минималистичного лица без белка это единственный
+/// способ показать направление взгляда, и он же читается как лёгкий поворот
+/// головы.
+///
+/// Наклон применяется к паре целиком, а не к каждой щели отдельно — иначе
+/// глаза расходятся веером и лицо теряет собранность.
 struct EyesView: View {
     // Обычная (не @Bindable) ссылка: двусторонний биндинг сюда не нужен,
     // а простого чтения @Observable-свойств в body достаточно, чтобы
@@ -14,9 +17,14 @@ struct EyesView: View {
 
     var body: some View {
         HStack(spacing: CharacterConfig.eyeSpacing) {
-            EyeView(pupilOffset: model.pupilOffset, eyeScaleY: model.eyeScaleY)
-            EyeView(pupilOffset: model.pupilOffset, eyeScaleY: model.eyeScaleY)
+            EyeView(eyeScaleY: model.eyeScaleY)
+            EyeView(eyeScaleY: model.eyeScaleY)
         }
+        .rotationEffect(.degrees(CharacterConfig.eyeTilt))
+        .offset(
+            x: model.pupilOffset.x * CharacterConfig.gazeMaxShift,
+            y: model.pupilOffset.y * CharacterConfig.gazeMaxShift
+        )
         .scaleEffect(model.breathScale)
         .allowsHitTesting(false)
     }

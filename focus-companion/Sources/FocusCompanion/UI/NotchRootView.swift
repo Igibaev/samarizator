@@ -23,15 +23,25 @@ struct NotchRootView: View {
             .fill(AppearanceConfig.capsuleColor)
 
             EyesView(model: eyesModel)
-                // Debug-режим: персонаж увеличен (ориентир ×3) и сдвинут
-                // вниз, чтобы моргание и саккады было видно в деталях —
-                // сама капсула в этом же режиме уже вытянута вниз через
-                // AppearanceConfig.debugExtraHeight, так что глазам есть
-                // куда сместиться, не вылезая за её пределы.
+                // Debug-режим: персонаж увеличен и сдвинут ниже, чтобы
+                // моргание и саккады было видно в деталях — сама капсула в
+                // этом же режиме тоже вытянута вниз.
                 .scaleEffect(AppearanceConfig.isDebug ? CharacterConfig.debugScale : 1)
-                .offset(y: AppearanceConfig.isDebug ? CharacterConfig.debugYOffset : 0)
+                .offset(
+                    y: CharacterConfig.eyesYOffset
+                        + (AppearanceConfig.isDebug ? CharacterConfig.debugYOffset : 0)
+                )
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // Персонаж обязан жить ВНУТРИ формы капсулы. Без обрезки глаза,
+        // вылезшие за её край, срезаются прямоугольной границей окна — это
+        // выглядит как обрубок, а не как лицо.
+        .clipShape(
+            NotchShape(
+                topCornerRadius: AppearanceConfig.topCornerRadius,
+                bottomCornerRadius: AppearanceConfig.bottomCornerRadius
+            )
+        )
         // Окно и так ignoresMouseEvents, но на всякий случай дублируем на уровне
         // вью — эта вью не должна становиться кликабельной ни при каких правках.
         .allowsHitTesting(false)
