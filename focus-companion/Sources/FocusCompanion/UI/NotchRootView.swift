@@ -92,34 +92,23 @@ struct NotchRootView: View {
 
             highlightGlow
 
-            // "Головная" зона — фиксированной высоты, равной высоте
-            // СВЁРНУТОЙ капсулы, всегда прижата к верху. Она нужна, чтобы
-            // положение глаз (принятое в Фазе 2, трогать нельзя) не
-            // зависело от того, насколько сейчас разрослась капсула вниз —
-            // без этой развязки глаза при раскрытии "уезжали" бы к центру
-            // увеличенного фрейма вслед за стандартным центрированием ZStack.
-            ZStack {
-                EyesView(model: eyesModel, appearance: stateMachine.appearance)
-                    // Глаза держатся на одном и том же месте экрана в обоих
-                    // состояниях: смещение задано относительно центра окна,
-                    // а капсула под ними при раскрытии ездит сама. Отсюда и
-                    // вычитание её собственного смещения.
-                    .offset(x: currentEyesOffsetX - currentCapsuleOffsetX)
-                    // Debug-режим: персонаж увеличен и сдвинут ниже, чтобы
-                    // моргание и саккады было видно в деталях — сама капсула
-                    // в этом же режиме тоже вытянута вниз.
-                    .scaleEffect(AppearanceConfig.isDebug ? CharacterConfig.debugScale : 1)
-                    .offset(
-                        y: CharacterConfig.eyesYOffset
-                            + (AppearanceConfig.isDebug ? CharacterConfig.debugYOffset : 0)
-                    )
-            }
-            .frame(width: size.width, height: hoverDetector.collapsedSize.height)
+            // Глаза кладутся с отступом от ВЕРХА капсулы (ZStack выше
+            // выровнен по .top). Раньше здесь была "головная зона"
+            // фиксированной высоты с центрированием внутри — она зависела от
+            // того, какой высоты контейнер получился, и глаза уезжали вверх.
+            EyesView(model: eyesModel, appearance: stateMachine.appearance)
+                .scaleEffect(AppearanceConfig.isDebug ? CharacterConfig.debugScale : 1)
+                .offset(x: currentEyesOffsetX - currentCapsuleOffsetX)
+                .padding(.top, CharacterConfig.eyesTopInset
+                    + (AppearanceConfig.isDebug ? CharacterConfig.debugYOffset : 0))
 
             ExpandedPanelView(
                 hoverDetector: hoverDetector,
                 taskPanel: taskPanel
             )
+            // Жёстко по ширине капсулы: иначе контент раздвигает ZStack шире
+            // формы, обрезается по ней, и текст уезжает за левый край.
+            .frame(width: size.width)
             .padding(.top, hoverDetector.collapsedSize.height)
             .opacity(hoverDetector.isExpanded ? 1 : 0)
         }
@@ -162,7 +151,7 @@ struct NotchRootView: View {
             .frame(width: CharacterConfig.highlightGlowSize, height: CharacterConfig.highlightGlowSize)
             .blur(radius: CharacterConfig.highlightBlurRadius)
             .opacity(stateMachine.appearance.highlightIntensity * (0.6 + 0.4 * eyesModel.breathPulse))
-            .offset(x: currentEyesOffsetX, y: CharacterConfig.eyesYOffset)
+            .offset(x: currentEyesOffsetX, y: CharacterConfig.eyesTopInset)
             .allowsHitTesting(false)
     }
 }
