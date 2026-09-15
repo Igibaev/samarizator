@@ -76,7 +76,7 @@ extension NSScreen {
     /// `topCornerRadius` слева и справа от прямоугольника; без этого запаса
     /// чёрное тело капсулы оказалось бы УЖЕ выреза, и по краям проступили бы
     /// два светлых клина — ровно тот шов, которого мы избегаем. Поверх этого
-    /// добавляется `capsuleExtraWidthPerSide` — решение автора для Фазы 2
+    /// ширина берётся из `collapsedWidth`
     /// сделать персонажа шире выреза (см. AppearanceConfig).
     ///
     /// Глубина: капсула дополнительно свисает вниз на `capsuleExtraDepth`
@@ -93,43 +93,45 @@ extension NSScreen {
     /// (используется `HoverDetector` для проверки наведения и `NotchRootView`
     /// для размера отрисовки).
     var collapsedCapsuleFrame: NSRect {
-        let extraWidth = AppearanceConfig.topCornerRadius + AppearanceConfig.capsuleExtraWidthPerSide
-        var result = notchFrameWithFallback.insetBy(dx: -extraWidth, dy: 0)
+        let notch = notchFrameWithFallback
 
-        // Координаты AppKit растут вверх, поэтому "свисание вниз" — это
-        // уменьшение origin.y и увеличение высоты на ту же величину, при
-        // неизменном maxY (верхнем крае).
-        let extraDepth = AppearanceConfig.capsuleExtraDepth + AppearanceConfig.debugExtraHeight
-        guard extraDepth > 0 else { return result }
+        // Высота — ровно в вырез: капсула не свисает под меню-бар, а сидит в
+        // той же полосе, что и сам вырез.
+        let height = notch.height
+            + AppearanceConfig.capsuleExtraDepth
+            + AppearanceConfig.debugExtraHeight
 
-        result = NSRect(
-            x: result.minX,
-            y: result.minY - extraDepth,
-            width: result.width,
-            height: result.height + extraDepth
+        // Капсула примыкает к вырезу СПРАВА и читается как его продолжение
+        // вбок. Загибы формы (topCornerRadius) торчат за пределы видимого
+        // тела с обеих сторон, поэтому левый край окна сдвинут на их ширину
+        // влево — чтобы само тело начиналось точно у края выреза.
+        let flare = AppearanceConfig.topCornerRadius
+        let bodyOriginX = notch.maxX + AppearanceConfig.collapsedGapFromNotch
+
+        return NSRect(
+            x: bodyOriginX - flare,
+            y: frame.maxY - height,
+            width: AppearanceConfig.collapsedWidth + flare * 2,
+            height: height
         )
-        return result
     }
 
-    /// Фрейм самой панели (`NSPanel`) — Фаза 3, решение автора №2: окно
-    /// ВСЕГДА в размере раскрытого состояния, морфится только содержимое
-    /// внутри него (`NotchShape`/глаза), а не сам `NSPanel.setFrame`. Два
-    /// независимых механизма анимации (AppKit-фрейм и SwiftUI-переход) с
-    /// разными таймингами дают рывки — поэтому фрейм окна теперь константный
-    /// на время его жизни.
-    ///
     /// Верхний край, как и у `collapsedCapsuleFrame`, совпадает с верхним
     /// краем экрана (иначе верх капсулы в любом из состояний "оторвётся" от
     /// выреза); по горизонтали окно центрировано на экране.
     var capsulePanelFrame: NSRect {
         let width = AppearanceConfig.expandedWidth
         let height = AppearanceConfig.expandedHeight
-        return NSRect(
-            x: frame.midX - width / 2,
-            y: frame.maxY - height,
-            width: width,
-            height: height
-        )
+
+        // Окно центрируется по СВЁРНУТОЙ капсуле, а не по экрану: капсула
+        // больше не стоит по центру, и раскрытие должно расти вокруг неё,
+        // иначе персонаж прыгал бы вбок в момент раскрытия.
+        var x = collapsedCapsuleFrame.midX - width / 2
+
+        // Но не вылезая за края экрана.
+        x = min(max(x, frame.minX), frame.maxX - width)
+
+        return NSRect(x: x, y: frame.maxY - height, width: width, height: height)
     }
 
     /// Метрики экрана одной строкой — для отладочного вывода при запуске.
