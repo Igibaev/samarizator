@@ -20,7 +20,7 @@ struct NotchRootView: View {
                 topCornerRadius: AppearanceConfig.topCornerRadius,
                 bottomCornerRadius: AppearanceConfig.bottomCornerRadius
             )
-            .fill(AppearanceConfig.capsuleColor)
+            .fill(AppearanceConfig.capsuleColor.opacity(AppearanceConfig.capsuleOpacity))
 
             EyesView(model: eyesModel)
                 // Debug-режим: персонаж увеличен и сдвинут ниже, чтобы

@@ -47,7 +47,7 @@ enum CharacterConfig {
     /// попросту не видно (чёрное на чёрном). Поэтому лицо смещается в нижнюю,
     /// видимую часть. Ориентир: половина высоты выреза (на MacBook автора
     /// вырез 32pt, значит около 16).
-    static let eyesYOffset: CGFloat = 10
+    static let eyesYOffset: CGFloat = 14
 
     // MARK: - Слежение за курсором
 
