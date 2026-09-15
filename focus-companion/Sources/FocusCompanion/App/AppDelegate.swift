@@ -15,6 +15,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         windowController.show()
 
+        logDiagnostics()
+
         // У приложения без Dock-иконки и без стандартного меню Cmd+Q не работает
         // "из коробки" — единственный способ выйти без Activity Monitor это
         // пункт меню в NSStatusItem, который мы и заводим выше.
@@ -60,5 +62,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func quit() {
         NSApp.terminate(nil)
+    }
+
+    /// Отладочный вывод при старте.
+    ///
+    /// Нужен потому, что в обычном режиме работающее приложение внешне
+    /// неотличимо от незапустившегося: капсула чёрная и точно по размеру выреза.
+    /// Видно только при запуске бинарника из терминала.
+    private func logDiagnostics() {
+        print("=== Focus Companion ===")
+        print("debug-режим: \(AppearanceConfig.isDebug ? "ВКЛ (капсула красная и вытянута вниз)" : "выкл")")
+        print("иконка в меню-баре: \(statusItem?.button != nil ? "создана" : "НЕ СОЗДАНА")")
+        print("панель показана: \(windowController.isPanelVisible ? "да" : "НЕТ")")
+        print("экранов: \(NSScreen.screens.count)")
+        for screen in NSScreen.screens {
+            print(screen.geometryDescription)
+        }
+        print("=======================")
+        fflush(stdout)
     }
 }

@@ -80,6 +80,30 @@ extension NSScreen {
     /// а загибы легли поверх меню-бара (кликам это не мешает — панель
     /// `ignoresMouseEvents`).
     var capsulePanelFrame: NSRect {
-        notchFrameWithFallback.insetBy(dx: -AppearanceConfig.topCornerRadius, dy: 0)
+        let flared = notchFrameWithFallback.insetBy(dx: -AppearanceConfig.topCornerRadius, dy: 0)
+
+        // В debug-режиме вытягиваем капсулу вниз: координаты AppKit растут
+        // вверх, поэтому "вниз" — это сдвинуть origin.y и увеличить высоту.
+        let extra = AppearanceConfig.debugExtraHeight
+        guard extra > 0 else { return flared }
+
+        return NSRect(
+            x: flared.minX,
+            y: flared.minY - extra,
+            width: flared.width,
+            height: flared.height + extra
+        )
+    }
+
+    /// Метрики экрана одной строкой — для отладочного вывода при запуске.
+    var geometryDescription: String {
+        let notch = notchSize.map { "\($0.width)x\($0.height)" } ?? "НЕТ"
+        return "экран \(localizedName)\n"
+            + "  frame=\(frame)\n"
+            + "  visibleFrame=\(visibleFrame)\n"
+            + "  вырез: \(notch), safeAreaInsets.top=\(safeAreaInsets.top), menubarHeight=\(menubarHeight)\n"
+            + "  auxTopLeft=\(String(describing: auxiliaryTopLeftArea))\n"
+            + "  auxTopRight=\(String(describing: auxiliaryTopRightArea))\n"
+            + "  фрейм панели=\(capsulePanelFrame)"
     }
 }

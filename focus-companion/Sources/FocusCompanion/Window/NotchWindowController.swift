@@ -12,6 +12,9 @@ final class NotchWindowController {
     /// переезде.
     private var currentScreen: NSScreen?
 
+    /// Действительно ли панель существует и показана — для отладочного вывода.
+    var isPanelVisible: Bool { panel?.isVisible ?? false }
+
     /// Создаёт и показывает панель на переданном экране (или на экране с
     /// курсором мыши, если экран не передан).
     func show(on screen: NSScreen? = nil) {
