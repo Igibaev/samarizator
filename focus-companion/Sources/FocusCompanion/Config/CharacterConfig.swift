@@ -167,6 +167,17 @@ enum CharacterConfig {
     /// таймеров").
     static let bobAmplitude: CGFloat = 4
 
+    // MARK: - Реакции на задачи (Фаза 4а)
+
+    /// Сколько секунд держится `.celebrating` после выполнения задачи, прежде
+    /// чем персонаж сам вернётся в `.idle` (`TaskPanelController`). Заметно
+    /// дольше `taskAddedReactionDuration` — позитив ярче и заметнее негатива,
+    /// прямое требование автора (см. HANDOFF.md).
+    static let taskCompletedCelebrationDuration: Double = 2.5
+
+    /// Сколько секунд держится короткая реакция на добавление задачи.
+    static let taskAddedReactionDuration: Double = 1.2
+
     // MARK: - Debug-отображение
 
     /// Во сколько раз увеличивать персонажа в debug-режиме — иначе на

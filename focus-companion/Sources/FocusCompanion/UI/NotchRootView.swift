@@ -13,6 +13,9 @@ import SwiftUI
 struct NotchRootView: View {
     var stateMachine: CompanionStateMachine
     var hoverDetector: HoverDetector
+    /// Данные и реакции задач — Фаза 4а. Персистентен на уровне
+    /// `NotchWindowController`, как и `stateMachine`/`hoverDetector`.
+    var taskPanel: TaskPanelController
 
     // @State, а не let: ViewModel должен пережить перерисовки этой вью
     // (не пересоздаваться на каждый re-render), а таймеры моргания/саккад/
@@ -21,9 +24,10 @@ struct NotchRootView: View {
     // переживают даже пересоздание САМОЙ этой вью (переезд между экранами).
     @State private var eyesModel: EyesViewModel
 
-    init(stateMachine: CompanionStateMachine, hoverDetector: HoverDetector) {
+    init(stateMachine: CompanionStateMachine, hoverDetector: HoverDetector, taskPanel: TaskPanelController) {
         self.stateMachine = stateMachine
         self.hoverDetector = hoverDetector
+        self.taskPanel = taskPanel
 
         let eyes = EyesViewModel(stateMachine: stateMachine)
         _eyesModel = State(initialValue: eyes)
@@ -112,9 +116,12 @@ struct NotchRootView: View {
             }
             .frame(width: size.width, height: hoverDetector.collapsedSize.height)
 
-            ExpandedPanelView(stateMachine: stateMachine)
-                .padding(.top, hoverDetector.collapsedSize.height)
-                .opacity(hoverDetector.isExpanded ? 1 : 0)
+            ExpandedPanelView(
+                hoverDetector: hoverDetector,
+                taskPanel: taskPanel
+            )
+            .padding(.top, hoverDetector.collapsedSize.height)
+            .opacity(hoverDetector.isExpanded ? 1 : 0)
         }
         .frame(width: size.width, height: size.height)
         .clipShape(shape)

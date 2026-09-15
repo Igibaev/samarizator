@@ -21,6 +21,9 @@ final class TaskBag: @unchecked Sendable {
         /// generic-контейнер, что и у циклов персонажа, чтобы не заводить
         /// под таймеры новую инфраструктуру отмены.
         case hoverPoll
+        /// Отложенный возврат в `.idle` после реакции на событие задачи
+        /// (добавлена/выполнена) — `TaskPanelController` (Фаза 4а).
+        case stateReset
     }
 
     private let lock = NSLock()

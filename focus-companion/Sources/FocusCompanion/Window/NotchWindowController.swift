@@ -30,21 +30,43 @@ final class NotchWindowController {
     /// `self.panel`, то есть к АКТУАЛЬНОЙ панели на момент срабатывания.
     private let hoverDetector = HoverDetector()
 
+    /// Хранилище задач — Фаза 4а. Живёт здесь по той же причине, что и
+    /// `stateMachine`/`hoverDetector`: не должно пересоздаваться при переезде
+    /// панели между экранами (пересоздание `ModelContext` на каждый чих
+    /// экрана — ненужный риск, а не оптимизация).
+    let taskPanel: TaskPanelController
+
+    init() {
+        let container = PersistenceConfig.makeContainer()
+        let store = TaskStore(container: container)
+        self.taskPanel = TaskPanelController(store: store, stateMachine: stateMachine)
+
+        hoverDetector.onExpansionChange = { [weak self] expanded in
+            // Раскрыто → панель обязана перехватывать мышь (чекбоксы и поле
+            // ввода задач, Фаза 4а); свёрнуто → снова пропускать клики
+            // насквозь, чтобы меню-бар под капсулой оставался кликабельным
+            // (критерий приёмки Фазы 1).
+            self?.panel?.ignoresMouseEvents = !expanded
+            self?.panel?.allowsKeyWhenExpanded = expanded
+
+            if !expanded {
+                // Сворачивание обязано забрать фокус обратно: если в этот
+                // момент шёл ввод текста, панель могла быть key-окном
+                // (`becomesKeyOnlyIfNeeded`, см. NotchPanel) — отдаём
+                // клавиатурный фокус явно, не полагаясь на то, что просто
+                // выключенный `canBecomeKey` сам по себе тут же снимет
+                // key-статус с уже key-окна.
+                self?.panel?.resignKey()
+                self?.panel?.makeFirstResponder(nil)
+            }
+        }
+    }
+
     /// Действительно ли панель существует и показана — для отладочного вывода.
     var isPanelVisible: Bool { panel?.isVisible ?? false }
 
     /// Пропускает ли панель клики насквозь — для отладочного вывода.
     var panelIgnoresMouseEvents: Bool? { panel?.ignoresMouseEvents }
-
-    init() {
-        hoverDetector.onExpansionChange = { [weak self] expanded in
-            // Раскрыто → панель обязана перехватывать мышь (чекбоксы задач
-            // появятся в Фазе 4); свёрнуто → снова пропускать клики насквозь,
-            // чтобы меню-бар под капсулой оставался кликабельным (критерий
-            // приёмки Фазы 1).
-            self?.panel?.ignoresMouseEvents = !expanded
-        }
-    }
 
     /// Создаёт и показывает панель на переданном экране (или на экране с
     /// курсором мыши, если экран не передан).
@@ -64,7 +86,11 @@ final class NotchWindowController {
         let frame = targetScreen.capsulePanelFrame
         let newPanel = NotchPanel(contentRect: frame)
         newPanel.contentView = NSHostingView(
-            rootView: NotchRootView(stateMachine: stateMachine, hoverDetector: hoverDetector)
+            rootView: NotchRootView(
+                stateMachine: stateMachine,
+                hoverDetector: hoverDetector,
+                taskPanel: taskPanel
+            )
         )
 
         // Повторно после contentView: NSHostingView добавляет свои tracking-области,
@@ -72,10 +98,14 @@ final class NotchWindowController {
         // состоянию раскрытия, а не жёстко true: `hoverDetector` персистентен и
         // мог быть раскрыт уже до переезда панели на другой экран.
         newPanel.ignoresMouseEvents = !hoverDetector.isExpanded
+        newPanel.allowsKeyWhenExpanded = hoverDetector.isExpanded
 
         // orderFrontRegardless(), а не makeKeyAndOrderFront(_:) — панель не
         // должна становиться key-окном и красть фокус у того, с чем работает
-        // пользователь (см. canBecomeKey = false в NotchPanel).
+        // пользователь. Раскрытая панель Фазы 4а МОЖЕТ на время стать
+        // key-окном, но только под управлением `allowsKeyWhenExpanded` +
+        // `becomesKeyOnlyIfNeeded` (см. NotchPanel), а не потому, что мы
+        // попросили систему сделать её key прямо здесь.
         newPanel.orderFrontRegardless()
 
         panel = newPanel
