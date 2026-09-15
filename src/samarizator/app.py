@@ -7,10 +7,16 @@ import threading
 from collections import deque
 from dataclasses import asdict
 from pathlib import Path
-from urllib.parse import quote
 
 from PySide6.QtCore import QLockFile, Qt, QThread, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QDesktopServices, QPalette
+from PySide6.QtGui import (
+    QColor,
+    QDesktopServices,
+    QKeySequence,
+    QPainter,
+    QPalette,
+    QShortcut,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -28,6 +34,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QSpinBox,
     QSplitter,
     QTableWidget,
@@ -38,8 +45,24 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from . import obsidian, screencapture
 from .config import Settings, data_dir, set_api_key
 from .knowledge import stamp
+from .live import (
+    BOTH,
+    DEVICE,
+    MICROPHONE,
+    NATIVE,
+    SOURCE_LABELS,
+    SYSTEM,
+    LiveCaptureError,
+    LiveRecorder,
+    audio_devices,
+    capture_supported,
+    describe_tracks,
+    recording_title,
+    system_audio_devices,
+)
 from .playback import evidence_intervals
 from .process import supervise
 from .store import Store
@@ -59,6 +82,7 @@ PROVIDERS = [
 
 STATUS = {
     "new": "Новая",
+    "recording": "Идёт запись",
     "transcribing": "Распознавание",
     "review": "Готова к проверке",
     "retrying": "Повторный проход по сомнительным репликам",
@@ -67,6 +91,54 @@ STATUS = {
     "error": "Ошибка",
     "interrupted": "Приостановлена",
 }
+
+
+NEXT_STEP = {
+    "new": "Нажмите «1. Распознать» — текст создаётся на этом Mac, аудио никуда не уходит.",
+    "recording": "Идёт запись, готовые фрагменты распознаются по ходу. "
+    "Нажмите «Live: остановить», когда встреча закончится.",
+    "transcribing": "Идёт распознавание. Кнопки шагов включатся, когда оно закончится.",
+    "retrying": "Идёт повторный проход по отмеченным репликам.",
+    "review": "Проверьте отмеченные реплики, при необходимости исправьте текст — "
+    "затем «2. Создать сводку».",
+    "summarizing": "Создаётся сводка. Текст ушёл на выбранный API, аудио не отправляется.",
+    "done": "Готово. Сводки — во вкладках выше, «Открыть в Obsidian» — внизу.",
+    "error": "Шаг не выполнен. Причина ниже; после исправления запустите его заново.",
+    "interrupted": "Обработка остановлена. Тот же шаг продолжит с места остановки, "
+    "уже готовые фрагменты сохранены.",
+}
+
+
+def explain(button, enabled, reason=""):
+    """Enable a button and say why when it stays off: a dead control must not be a riddle."""
+    button.setEnabled(bool(enabled))
+    if not enabled and reason:
+        button.setToolTip(reason)
+    elif not enabled:
+        button.setToolTip("")
+    return enabled
+
+
+class ElidedLabel(QLabel):
+    """Shortens its own text with an ellipsis to whatever width it ends up with.
+
+    Measuring at build time is wrong: the sidebar has no final width yet, and it
+    changes again whenever the splitter moves.
+    """
+
+    def __init__(self, text="", parent=None):
+        super().__init__(text, parent)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self._full = text
+
+    def setText(self, text):
+        self._full = text
+        super().setText(text)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        elided = self.fontMetrics().elidedText(self._full, Qt.TextElideMode.ElideRight, self.width())
+        painter.drawText(self.rect(), int(self.alignment()) | int(Qt.AlignmentFlag.AlignVCenter), elided)
 
 
 class Job(QThread):
@@ -152,6 +224,91 @@ class SettingsDialog(QDialog):
         )
         hint.setWordWrap(True)
         form.addRow(hint)
+        form.addRow(QLabel("<b>Live-запись</b>"))
+        source = QComboBox()
+        for value, label in [
+            (MICROPHONE, "Только микрофон"),
+            (SYSTEM, "Только системный звук"),
+            (BOTH, "Микрофон и системный звук — раздельными каналами"),
+        ]:
+            source.addItem(label, value)
+        source.setCurrentIndex(max(0, source.findData(settings.live_source)))
+        self.fields["live_source"] = source
+        form.addRow("Источник", source)
+        backend = QComboBox()
+        for value, label in [
+            (NATIVE, "Штатный macOS · ScreenCaptureKit, без драйверов"),
+            (DEVICE, "Устройство петли · BlackHole, Loopback, интерфейс"),
+        ]:
+            backend.addItem(label, value)
+        backend.setCurrentIndex(max(0, backend.findData(settings.live_system_backend)))
+        self.fields["live_system_backend"] = backend
+        form.addRow("Захват системного звука", backend)
+        self.helper = screencapture.status()
+        helper_state = QLabel(
+            ("✓ " if self.helper["available"] else "⚠ ") + self.helper["message"]
+        )
+        helper_state.setWordWrap(True)
+        form.addRow("Состояние helper'а", helper_state)
+        self.inputs, self.loopback = self.live_devices()
+        for key, label, only_loopback in [
+            ("live_microphone_device", "Устройство микрофона", False),
+            ("live_system_device", "Устройство системного звука", True),
+        ]:
+            box = QComboBox()
+            box.setEditable(True)
+            box.addItem("По умолчанию", "")
+            for _, name in (self.loopback if only_loopback else self.inputs):
+                box.addItem(name, name)
+            saved = getattr(settings, key)
+            found = box.findData(saved)
+            if saved and found < 0:
+                box.addItem(saved, saved)
+                found = box.count() - 1
+            box.setCurrentIndex(max(0, found))
+            self.fields[key] = box
+            form.addRow(label, box)
+        mixing = QComboBox()
+        for value, label in [
+            ("gentle", "Мягкое выравнивание — по умолчанию"),
+            ("no-resample", "Без выравнивания — дорожки как есть"),
+            ("stretch", "Жёсткое выравнивание темпом"),
+            ("hard-stuff", "Выравнивание вставкой тишины"),
+            ("legacy-pan", "Старое поведение до 14.09.2026"),
+        ]:
+            mixing.addItem(label, value)
+        mixing.setCurrentIndex(max(0, mixing.findData(settings.live_mix)))
+        self.fields["live_mix"] = mixing
+        form.addRow("Сведение двух дорожек", mixing)
+        mix_hint = QLabel(
+            "Микрофон и системный звук идут от разных часов, и расхождение приходится "
+            "компенсировать. Вставка тишины слышна как прерывание, растяжение темпа — как "
+            "лёгкое плавание звука. Сравнить на своих устройствах:\n"
+            "python -m samarizator.live compare-mix"
+        )
+        mix_hint.setWordWrap(True)
+        form.addRow(mix_hint)
+        live_hint = QLabel(
+            "Штатный захват берёт системный звук через ScreenCaptureKit: сторонний драйвер не нужен, "
+            "разрешение — «Запись экрана и системного звука», отдельное от микрофонного. Оно "
+            "выдаётся приложению-хозяину: при запуске из Terminal в списке нужно включить Terminal. "
+            "Экран при этом не записывается, helper берёт только звук.\n"
+            "Устройство петли — запасной путь, если штатный захват запрещён политикой компании: "
+            "BlackHole, Loopback или интерфейс с аппаратным loopback, выбранный выходом звука. "
+            "Обход запрета приложение не выполняет — согласуйте вариант с IT.\n"
+            "Оба источника пишутся в один WAV: канал 1 — микрофон, канал 2 — системный звук, "
+            "на общей шкале времени. Whisper сводит каналы в моно, оба голоса попадают в текст.\n"
+            "При выводе в динамики микрофон повторно захватит удалённую речь — используйте наушники."
+        )
+        live_hint.setWordWrap(True)
+        form.addRow(live_hint)
+        if self.inputs and not self.loopback:
+            missing = QLabel(
+                "Устройства петли сейчас не видно. Оно нужно только для запасного пути: "
+                "установите его и переоткройте настройки либо впишите имя вручную."
+            )
+            missing.setWordWrap(True)
+            form.addRow(missing)
         quality = QWidget()
         qform = QFormLayout(quality)
         tabs.addTab(quality, "Качество и термины")
@@ -172,6 +329,23 @@ class SettingsDialog(QDialog):
             qform.addRow(label, field)
         self.fields["glossary"].setMaxLength(800)
         self.fields["glossary"].setPlaceholderText("Samarizator, Иванов, EBITDA, названия ваших проектов")
+        cleanup = QComboBox()
+        for value, label in [
+            ("off", "Без обработки — как записано"),
+            ("light", "Лёгкая — срез гула и выравнивание громкости"),
+            ("strong", "Сильная — плюс подавление шипения"),
+        ]:
+            cleanup.addItem(label, value)
+        cleanup.setCurrentIndex(max(0, cleanup.findData(settings.audio_cleanup)))
+        self.fields["audio_cleanup"] = cleanup
+        qform.addRow("Обработка звука перед Whisper", cleanup)
+        cleanup_hint = QLabel(
+            "Обрабатывается только то, что слышит Whisper: сама запись на диске не меняется, "
+            "и профиль можно поменять и распознать заново. Сравнить на своей записи:\n"
+            "python -m samarizator.live clean <файл записи>"
+        )
+        cleanup_hint.setWordWrap(True)
+        qform.addRow(cleanup_hint)
         beam = QSpinBox()
         beam.setRange(1, 8)
         beam.setValue(settings.beam_size)
@@ -242,6 +416,17 @@ class SettingsDialog(QDialog):
         if not self.fields["vad_model"].text().strip():
             self.fields["vad_model"].setText(profile.vad_model)
 
+    @staticmethod
+    def live_devices():
+        """Enumerate macOS inputs for the pickers; elsewhere the fields stay free text."""
+        if not capture_supported():
+            return [], []
+        try:
+            devices = audio_devices(shutil.which("ffmpeg") or "ffmpeg")
+        except LiveCaptureError:
+            return [], []
+        return devices, system_audio_devices(devices)
+
     def pick_provider(self, index):
         if url := self.provider.itemData(index):
             self.fields["base_url"].setText(url)
@@ -294,6 +479,7 @@ class Window(QMainWindow):
 
         cleanup()
         self.job = None
+        self.pending_phase = ""
         self.active_id = None
         self.mid = None
         self.page = 0
@@ -301,6 +487,7 @@ class Window(QMainWindow):
         self.playback_queue = deque()
         self.playback_total = 0
         self.playback_mid = None
+        self.live_recorder = None
         from .build import build_label
 
         self.build_label = build_label()
@@ -323,15 +510,27 @@ class Window(QMainWindow):
         layout.addWidget(split, 1)
         sidebar = QWidget()
         side = QVBoxLayout(sidebar)
-        add = QPushButton("+ Добавить аудио или видео")
-        add.clicked.connect(self.add_file)
-        side.addWidget(add)
+        self.add_button = QPushButton("+ Добавить аудио или видео")
+        self.add_button.clicked.connect(self.add_file)
+        side.addWidget(self.add_button)
+        self.live_button = QPushButton("● Live: начать запись")
+        self.live_button.setToolTip(
+            "Записывает локально выбранный в настройках источник: микрофон, системный звук или оба "
+            "раздельными каналами. Готовые фрагменты распознаются прямо во время записи, поэтому "
+            "после остановки остаётся только хвост."
+        )
+        self.live_button.clicked.connect(self.toggle_live)
+        side.addWidget(self.live_button)
         self.search = QLineEdit()
         self.search.setPlaceholderText("Поиск в записях и сводках…")
         self.search.textChanged.connect(self.refresh_list)
         side.addWidget(self.search)
         self.list = QListWidget()
+        self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.list.currentItemChanged.connect(self.select)
+        remove = QShortcut(QKeySequence.StandardKey.Delete, self.list)
+        remove.setContext(Qt.ShortcutContext.WidgetShortcut)
+        remove.activated.connect(lambda: self.delete_meeting())
         side.addWidget(self.list)
         split.addWidget(sidebar)
         detail = QWidget()
@@ -377,6 +576,7 @@ class Window(QMainWindow):
         )
         for button in [self.rerun_button, self.copy_error_button]:
             maintenance.addWidget(button)
+        maintenance.addStretch(1)
         body.addLayout(maintenance)
         self.tabs = QTabWidget()
         body.addWidget(self.tabs, 1)
@@ -502,6 +702,120 @@ class Window(QMainWindow):
             self.mid = self.store.create(path, self.settings)
             self.refresh_list()
 
+    def toggle_live(self):
+        # Stopping comes first: catch-up recognition runs as a job during the whole
+        # recording, and it must never block the button that ends the meeting.
+        if self.live_recorder is not None:
+            self.stop_live()
+            return
+        if self.job:
+            return
+        try:
+            recorder = LiveRecorder(
+                source=self.settings.live_source,
+                microphone_device=self.settings.live_microphone_device,
+                system_device=self.settings.live_system_device,
+                system_backend=self.settings.live_system_backend,
+                mix=self.settings.live_mix,
+            )
+            recorder.start()
+        except LiveCaptureError as exc:
+            QMessageBox.warning(self, "Live-запись", str(exc))
+            return
+        self.live_recorder = recorder
+        self.stop_playback()
+        # The meeting exists from the first second so recognition can run alongside
+        # the recording; its source moves to the finished file when capture stops.
+        self.mid = self.store.create(recorder.partial, self.settings)
+        self.store.update(
+            self.mid,
+            title=recording_title(recorder.source, recorder.partial.stem),
+            status="recording",
+        )
+        self.page = 0
+        self.refresh_list()
+        self.start_catchup()
+        self.progress.setText(
+            f"Live-запись началась ({SOURCE_LABELS[recorder.source]}). "
+            "Аудио сохраняется только на этом Mac, распознавание идёт по ходу записи."
+        )
+        self.controls()
+
+    def start_catchup(self):
+        """Recognise finished fragments while the meeting is still being recorded."""
+        if self.job or not self.mid:
+            return
+        self.active_id = self.mid
+        self.job = Job("catchup", self.mid, self.settings.memory_gb)
+        self.job.memory.connect(
+            lambda rss: self.ram.setText(
+                f"RSS приложения и обработчиков: {rss:.2f} ГиБ / {self.settings.memory_gb:g} ГиБ · CPU"
+            )
+        )
+        self.job.result.connect(self.job_result)
+        self.job.finished.connect(self.job_finished)
+        self.job.start()
+
+    def stop_live(self, start_transcription=True):
+        recorder = self.live_recorder
+        mid = self.mid
+        if recorder is None:
+            return
+        self.live_recorder = None
+        try:
+            path = recorder.stop()
+        except (LiveCaptureError, OSError, ValueError) as exc:
+            self.end_catchup(mid)
+            # An empty recording leaves nothing to keep unless catch-up already saved text.
+            if mid and not self.store.segments(mid, limit=1):
+                self.store.delete(mid)
+                self.mid = None
+            self.refresh_list()
+            self.progress.setText(str(exc))
+            QMessageBox.warning(self, "Live-запись", str(exc))
+            self.controls()
+            return
+        self.store.update(mid, source=str(path), status="transcribing")
+        self.end_catchup(mid)
+        self.mid, self.page = mid, 0
+        self.refresh_list()
+        self.progress.setText("Live-запись сохранена локально.")
+        self.controls()
+        self.report_live_tracks(path, recorder.tracks, [e.name for e in recorder.inputs])
+        if start_transcription:
+            # Catch-up is still finishing its last fragment; chain the closing pass to it.
+            if self.job is not None and self.job.phase == "catchup":
+                self.pending_phase = "transcribe"
+            else:
+                self.start("transcribe")
+
+    def end_catchup(self, mid):
+        """Tell the catch-up worker the recording is over, so it stops after the tail."""
+        if mid:
+            self.store.save_checkpoint(mid, "live-stopped", 0, True)
+
+    def report_live_tracks(self, path, tracks, names=()):
+        """Say which source made it into the file, instead of leaving it to the ear."""
+        if len(tracks) < 2:
+            return
+        try:
+            report, silent = describe_tracks(path, tracks, names)
+        except (OSError, ValueError, RuntimeError) as exc:
+            self.progress.setText(f"Запись сохранена, проверить дорожки не удалось: {exc}")
+            return
+        self.progress.setText("Live-запись сохранена локально. " + report.replace("\n", " · "))
+        if silent:
+            QMessageBox.warning(
+                self,
+                "Live-запись",
+                "В записи нет звука на дорожке: "
+                + ", ".join(silent)
+                + ".\n\n"
+                + report
+                + "\n\nЗапись сохранена, распознавание продолжится. Измерены первые "
+                "30 секунд: если источник молчал в начале, предупреждение ложное.",
+            )
+
     def refresh_list(self):
         current = self.mid
         self.list.blockSignals(True)
@@ -512,10 +826,17 @@ class Window(QMainWindow):
             item.setData(Qt.ItemDataRole.UserRole, meeting["id"])
             row = QWidget()
             row_layout = QHBoxLayout(row)
-            row_layout.setContentsMargins(10, 8, 6, 8)
-            label = QLabel(f"{meeting['title']}\n{STATUS.get(meeting['status'], meeting['status'])}")
-            label.setWordWrap(True)
-            row_layout.addWidget(label, 1)
+            row_layout.setContentsMargins(10, 6, 6, 6)
+            text = QVBoxLayout()
+            text.setSpacing(1)
+            # One line per record keeps a long list scannable; the full title is in the tooltip.
+            label = ElidedLabel(meeting["title"])
+            state = QLabel(STATUS.get(meeting["status"], meeting["status"]))
+            state.setObjectName("rowStatus")
+            text.addWidget(label)
+            text.addWidget(state)
+            row_layout.addLayout(text, 1)
+            row.setToolTip(meeting["title"])
             trash = QPushButton("🗑")
             trash.setObjectName("trashButton")
             trash.setToolTip("Удалить запись")
@@ -550,7 +871,7 @@ class Window(QMainWindow):
 
     def delete_meeting(self, mid=None):
         mid = mid or self.mid
-        if self.job or not mid:
+        if self.job or self.live_recorder is not None or not mid:
             return
         meeting = self.store.meeting(mid)
         confirm = QMessageBox.question(
@@ -580,10 +901,9 @@ class Window(QMainWindow):
             return
         meeting = self.store.meeting(self.mid)
         self.heading.setText(meeting["title"])
-        self.info.setText(
-            f"{STATUS.get(meeting['status'], meeting['status'])} · {stamp(meeting['duration'])} · "
-            "Проверьте отмеченные места перед созданием сводки."
-        )
+        state = STATUS.get(meeting["status"], meeting["status"])
+        length = f" · {stamp(meeting['duration'])}" if meeting["duration"] else ""
+        self.info.setText(f"{state}{length} · {NEXT_STEP.get(meeting['status'], '')}")
         self.error_detail.setText(
             "Причина: " + meeting["error"]
             if meeting["error"] and meeting["status"] not in {"transcribing", "summarizing", "retrying"}
@@ -838,7 +1158,7 @@ class Window(QMainWindow):
         self.start("transcribe")
 
     def start(self, phase):
-        if self.job or not self.mid:
+        if self.job or self.live_recorder is not None or not self.mid:
             return
         try:
             meeting = self.store.meeting(self.mid)
@@ -905,6 +1225,7 @@ class Window(QMainWindow):
 
     def job_finished(self):
         meeting = self.store.meeting(self.active_id)
+        pending, self.pending_phase = self.pending_phase, ""
         if self.job.phase == "summary" and meeting["summary"] and self.mid == self.active_id:
             self.tabs.setCurrentWidget(self.summary)
         self.progress.setText(meeting["error"] or "Готово. Результат сохранён.")
@@ -913,6 +1234,8 @@ class Window(QMainWindow):
         self.active_id = None
         self.refresh_list()
         self.controls()
+        if pending:
+            self.start(pending)
 
     def cancel_job(self):
         if self.job:
@@ -920,7 +1243,18 @@ class Window(QMainWindow):
             self.progress.setText("Остановка обработчиков…")
 
     def poll(self):
-        if self.active_id:
+        if self.live_recorder is not None:
+            if self.live_recorder.recording:
+                # One line during a meeting: the timer plus whatever catch-up is doing.
+                note = (self.store.meeting(self.active_id)["error"] or "") if self.active_id else ""
+                self.progress.setText(
+                    f"● Live-запись · {SOURCE_LABELS[self.live_recorder.source]} · "
+                    f"{stamp(self.live_recorder.elapsed)} · "
+                    + (note.strip() or "нажмите кнопку ещё раз для остановки")
+                )
+            else:
+                self.stop_live(start_transcription=False)
+        elif self.active_id:
             meeting = self.store.meeting(self.active_id)
             self.progress.setText(meeting["error"] or "Подготовка…")
         if self.player_proc and self.player_proc.poll() is not None:
@@ -936,18 +1270,50 @@ class Window(QMainWindow):
             self.controls()
 
     def controls(self):
-        busy = self.job is not None
+        recording = self.live_recorder is not None
+        busy = self.job is not None or recording
         ready = self.mid is not None
-        self.settings_button.setEnabled(not busy)
+        working = "Дождитесь конца текущей обработки." if self.job else "Идёт запись."
+        pick = "Выберите запись в списке слева."
+        explain(self.settings_button, not busy, working)
+        explain(self.add_button, not busy, working)
+        self.search.setEnabled(not busy)
+        self.list.setEnabled(not busy)
+        # Stopping must stay possible while catch-up recognition is running.
+        explain(self.live_button, self.job is None or recording, working)
+        self.live_button.setText("■ Live: остановить и распознать" if recording else "● Live: начать запись")
         complete = ready and bool(self.store.checkpoint(self.mid, "asr_complete", 0))
-        self.transcribe.setText("Распознавание завершено" if complete else "1. Распознать / продолжить")
-        self.transcribe.setEnabled(ready and not busy and not complete)
-        self.rerun_button.setEnabled(ready and not busy)
-        self.copy_error_button.setEnabled(bool(self.error_detail.text()))
-        self.retry.setEnabled(ready and not busy and bool(self.store.checkpoint(self.mid, "asr_complete", 0)))
-        self.summarize.setEnabled(bool(complete) and not busy)
-        self.cancel.setEnabled(busy)
-        self.save_segment.setEnabled(ready and not busy)
+        explain(
+            self.transcribe,
+            ready and not busy and not complete,
+            "Распознавание уже завершено. Для нового прохода — «Распознать заново»."
+            if complete
+            else (working if busy else pick),
+        )
+        explain(self.rerun_button, ready and not busy, working if busy else pick)
+        # An error button with nothing to copy is noise; it appears only with an error.
+        self.copy_error_button.setVisible(bool(self.error_detail.text()))
+        explain(self.copy_error_button, bool(self.error_detail.text()))
+        explain(
+            self.retry,
+            ready and not busy and complete,
+            working if busy else ("Сначала распознайте запись целиком." if ready else pick),
+        )
+        explain(
+            self.summarize,
+            bool(complete) and not busy,
+            working if busy else ("Сначала распознайте запись целиком." if ready else pick),
+        )
+        explain(self.cancel, busy, "Сейчас нечего останавливать.")
+        explain(self.save_segment, ready and not busy, working if busy else pick)
+        # Exactly one step is highlighted, so the next action is never a guess.
+        step = self.summarize if complete else self.transcribe
+        for button in (self.transcribe, self.summarize):
+            primary = button is step and button.isEnabled()
+            if button.property("primary") != primary:
+                button.setProperty("primary", primary)
+                button.style().unpolish(button)
+                button.style().polish(button)
         index = self.table.currentRow()
         has_retry = (
             ready
@@ -959,7 +1325,10 @@ class Window(QMainWindow):
         has_row = ready and hasattr(self, "visible_rows") and 0 <= index < len(self.visible_rows)
         self.undo_retry_button.setEnabled(bool(has_row) and not busy)
         self.play_button.setEnabled(has_row)
-        self.stop_button.setEnabled(bool(self.player_proc) and self.player_proc.poll() is None)
+        playing = bool(self.player_proc) and self.player_proc.poll() is None
+        self.stop_button.setEnabled(playing)
+        self.stop_button.setVisible(playing)
+        self.playback_label.setVisible(playing)
         self.obsidian.setEnabled(
             ready
             and bool(self.store.meeting(self.mid)["note"])
@@ -974,37 +1343,39 @@ class Window(QMainWindow):
     def open_obsidian(self):
         if not self.mid or not (note := self.store.meeting(self.mid)["note"]):
             return
-        # obsidian://open?path=<absolute path> only resolves if that exact path matches a
-        # vault Obsidian already knows about. On macOS that absolute path very often does not
-        # match: iCloud Drive's "Desktop & Documents Folders" sync turns ~/Documents into a
-        # symlink, so Path.resolve() (used both here and when the note was exported) yields
-        # .../Library/Mobile Documents/com~apple~CloudDocs/..., not the ~/Documents path the
-        # user picked and Obsidian registered the vault under. vault=<name>&file=<relative
-        # path> sidesteps this: Obsidian just needs a vault already open under that name, and
-        # resolves the file relative to it the same way it resolves a wikilink.
-        vault_root = Path(self.settings.vault).expanduser().resolve()
-        try:
-            relative = Path(note).resolve().relative_to(vault_root)
-        except ValueError:
-            QMessageBox.warning(
-                self,
-                "Не удалось открыть в Obsidian",
-                "Путь заметки не совпадает с текущим хранилищем в настройках. "
-                "Нажмите «Экспортировать снова», затем повторите попытку.",
-            )
+        # Ask Obsidian which vaults it knows rather than guessing a name from the
+        # settings folder: the name only matches if the user opened that exact folder
+        # as a vault, and a note can also live inside a vault registered higher up.
+        url = obsidian.note_url(note)
+        if url and QDesktopServices.openUrl(QUrl(url)):
             return
-        file_param = relative.with_suffix("").as_posix()
-        url = f"obsidian://open?vault={quote(vault_root.name, safe='')}&file={quote(file_param, safe='')}"
-        if not QDesktopServices.openUrl(QUrl(url)):
-            QMessageBox.warning(
-                self,
-                "Не удалось открыть в Obsidian",
-                "Проверьте, что Obsidian установлен и хранилище хотя бы раз было открыто "
-                f"внутри самого приложения Obsidian (Файл → Открыть хранилище → «{vault_root.name}»). "
-                "Без этого шага ссылка obsidian:// не находит хранилище, даже если папка есть на диске.",
+        folder = Path(self.settings.vault).expanduser()
+        registered = "\n".join(f"• {location}" for _, location in obsidian.vaults())
+        message = (
+            "Obsidian не знает хранилища с этой заметкой.\n\n"
+            f"Заметка лежит в {folder}. Откройте Obsidian → «Открыть папку как хранилище» "
+            "и выберите эту папку — одного наличия папки на диске недостаточно, "
+            "ссылка obsidian:// работает только с зарегистрированным хранилищем."
+        )
+        if registered:
+            message += "\n\nСейчас Obsidian знает такие хранилища:\n" + registered
+        elif not obsidian.config_path().is_file():
+            message = (
+                "Не найден конфиг Obsidian — похоже, приложение не установлено или ни разу "
+                f"не запускалось. Заметки лежат в {folder} и открываются любым "
+                "Markdown-редактором."
             )
+        box = QMessageBox(self)
+        box.setWindowTitle("Не удалось открыть в Obsidian")
+        box.setText(message)
+        box.addButton("Показать папку", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Закрыть", QMessageBox.ButtonRole.RejectRole)
+        if box.exec() == 0:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(note).parent)))
 
     def closeEvent(self, event):
+        if self.live_recorder is not None:
+            self.stop_live(start_transcription=False)
         if self.job:
             self.job.stop.set()
             if not self.job.wait(5000):
@@ -1014,11 +1385,8 @@ class Window(QMainWindow):
         event.accept()
 
 
-def main():
-    os.umask(0o077)
-    app = QApplication(sys.argv)
-    app.setApplicationName("Samarizator")
-    app.setStyle("Fusion")
+def apply_theme(app):
+    """Palette and stylesheet. Separate from main() so a rendered window can be checked."""
     palette = QPalette()
     for role, color in [
         (QPalette.ColorRole.Window, "#f4f5f7"),
@@ -1033,25 +1401,38 @@ def main():
     ]:
         palette.setColor(role, QColor(color))
     app.setPalette(palette)
-    lock = QLockFile(str(data_dir() / "app.lock"))
-    lock.setStaleLockTime(0)
-    if not lock.tryLock(100):
-        QMessageBox.information(None, "Samarizator", "Приложение уже запущено.")
-        return 0
     app.setStyleSheet("""
         QWidget { font-size: 13px; }
         QMainWindow { background: #f4f5f7; }
         QLabel#brand { font-size: 25px; font-weight: 700; color: #185c50; padding: 14px 10px; }
         QLabel#heading { font-size: 21px; font-weight: 600; padding: 14px 0; }
+        QLabel#step { color: #3c5a51; }
         QPushButton { padding: 8px 12px; border-radius: 6px; background: #e3ece8; color: #173e35; }
         QPushButton:hover { background: #ccded5; }
         QPushButton:disabled { color: #87968f; background: #edf0ee; }
+        QPushButton[primary="true"] { background: #185c50; color: #ffffff; font-weight: 600; }
+        QPushButton[primary="true"]:hover { background: #145046; }
+        QPushButton[primary="true"]:disabled { background: #cfd8d4; color: #8a9a94; }
         QLineEdit { padding: 7px; }
         QListWidget, QTableWidget, QTextBrowser { background: white; border: 1px solid #d9dfdb; }
         QListWidget::item:selected { background: #d9e9e2; color: #163f33; }
+        QLabel#rowStatus { color: #6b7d76; font-size: 12px; }
         QPushButton#trashButton { padding: 4px; background: transparent; border-radius: 4px; }
         QPushButton#trashButton:hover { background: #f0d3d3; }
     """)
+
+
+def main():
+    os.umask(0o077)
+    app = QApplication(sys.argv)
+    app.setApplicationName("Samarizator")
+    app.setStyle("Fusion")
+    lock = QLockFile(str(data_dir() / "app.lock"))
+    lock.setStaleLockTime(0)
+    if not lock.tryLock(100):
+        QMessageBox.information(None, "Samarizator", "Приложение уже запущено.")
+        return 0
+    apply_theme(app)
     window = Window()
     window.show()
     code = app.exec()

@@ -201,6 +201,58 @@ def test_api_length_signal_is_preserved_for_adaptive_split(meeting):
     assert len(calls) == 1
 
 
+def test_permanently_bad_small_map_finishes_with_source_fallback(meeting):
+    store, mid, settings = meeting
+    store.save_chunk(
+        mid,
+        0,
+        [dict(start=0, end=2, speaker="Речь", text="Согласовали бюджет в семнадцать миллионов.")],
+    )
+
+    class Client:
+        def complete(self, prompt, allowed):
+            raise SummaryFormatError("Модель оборвала JSON.")
+
+    result = summarize(store, mid, settings, client=Client())
+    assert result["detailed"]["items"][0]["text"] == "Согласовали бюджет в семнадцать миллионов."
+    assert result["detailed"]["items"][0]["evidence"]
+    assert "исходные реплики сохранены" in result["detailed"]["quality_warning"].lower()
+    assert result["brief"]["items"]
+    assert "Финальное сжатие" in result["brief"]["generation_warning"]
+
+
+def test_oversized_valid_map_item_preserves_detailed_result(meeting):
+    store, mid, settings = meeting
+    settings.input_chars = 4000
+    store.save_chunk(mid, 0, [dict(start=0, end=2, speaker="Речь", text="Исходный тезис")])
+
+    class Client:
+        def complete(self, prompt, allowed):
+            if "Подготовь подробную" in prompt:
+                return dict(
+                    overview="Подробный результат",
+                    items=[
+                        dict(
+                            kind="point",
+                            text="деталь " * 700,
+                            evidence=[min(allowed)],
+                            owner=None,
+                            due=None,
+                            status="unspecified",
+                        )
+                    ],
+                    topics=["Тема"],
+                )
+            if "провер" in prompt.lower():
+                raise ValueError("Проверка недоступна")
+            raise AssertionError("Oversized item must use the local brief fallback")
+
+    result = summarize(store, mid, settings, client=Client())
+    assert result["detailed"]["items"][0]["text"].startswith("деталь")
+    assert result["brief"]["items"]
+    assert "не поместился" in result["brief"]["generation_warning"]
+
+
 @pytest.mark.parametrize("failure", [SummaryFormatError, SummaryTooLong])
 def test_bad_final_compression_preserves_detailed_summary_and_returns_safe_brief(
     meeting, failure

@@ -1,0 +1,794 @@
+"""Bounded microphone and system-audio capture for the live-mode milestone on macOS."""
+
+import os
+import platform
+import re
+import shutil
+import subprocess
+import time
+import uuid
+import wave
+from collections import namedtuple
+from datetime import datetime
+from pathlib import Path
+
+from . import screencapture
+from .config import data_dir
+
+MICROPHONE = "microphone"
+SYSTEM = "system"
+BOTH = "both"
+LIVE_SOURCES = (MICROPHONE, SYSTEM, BOTH)
+
+# How system audio is obtained: Apple's own capture, or a loopback input device.
+NATIVE = "screencapturekit"
+DEVICE = "device"
+SYSTEM_BACKENDS = (NATIVE, DEVICE)
+
+# `index` is the AVFoundation input number; native capture has none and arrives
+# on a pipe from the ScreenCaptureKit helper instead.
+Input = namedtuple("Input", "kind index name native")
+
+SOURCE_LABELS = {
+    MICROPHONE: "микрофон",
+    SYSTEM: "системный звук",
+    BOTH: "микрофон и системный звук",
+}
+
+# How each input is prepared before the two tracks are merged.
+#
+# `aformat=channel_layouts=mono` downmixes exactly like `-ac 1` on the single-source
+# path. `pan=mono|c0=c0` (used until 2026-09-14) instead kept channel 0 alone, so a
+# stereo input whose voice was not on the left gave its noise floor and nothing else.
+#
+# `aresample=async` aligns two independent device clocks. High values buy alignment by
+# stretching audio, which is audible, so the default corrects gently and the rest are
+# kept for A/B on a real Mac via scripts/diagnose_dual_audio.sh.
+MIX_PROFILES = {
+    # Measured on a real Mac: `async=1` leaves drift uncorrected until it crosses
+    # aresample's `min_hard_comp` (0.1 s by default), which is then filled with digital
+    # silence — audible as a ~107 ms interruption. `gentle` corrects continuously by a
+    # fraction of a percent, far below hearing, and only stuffs after a full second.
+    "gentle": "aresample=async=50:min_hard_comp=1:first_pts=0,aformat=channel_layouts=mono",
+    "no-resample": "aformat=channel_layouts=mono",
+    # Kept as probes: "hard-stuff" is what produced the ~107 ms silences, "stretch"
+    # trades them for a slight, continuous change of tempo.
+    "hard-stuff": "aresample=async=1:first_pts=0,aformat=channel_layouts=mono",
+    "stretch": "aresample=async=1000:first_pts=0,aformat=channel_layouts=mono",
+    "legacy-pan": "aresample=async=1000:first_pts=0,pan=mono|c0=c0",
+}
+
+# Short form for record titles, which have to stay readable in a narrow list.
+SOURCE_TAGS = {MICROPHONE: "микрофон", SYSTEM: "система", BOTH: "микрофон + система"}
+
+
+def recording_title(source, stem):
+    """`live-2026-09-13_16-50-44-ab12cd34` → `Live 13.09 16:50 · микрофон + система`."""
+    moment = stem.removeprefix("live-").rsplit("-", 1)[0]
+    try:
+        date, clock = moment.split("_")
+        year, month, day = date.split("-")
+        hour, minute, _ = clock.split("-")
+        when = f"{day}.{month} {hour}:{minute}"
+    except ValueError:
+        when = moment
+    return f"Live {when} · {SOURCE_TAGS.get(source, source)}"
+
+# Inputs that can carry the Mac output stream. macOS exposes no built-in one:
+# the user installs a loopback driver or builds an aggregate device themselves.
+LOOPBACK_HINTS = (
+    "blackhole",
+    "loopback",
+    "soundflower",
+    "vb-cable",
+    "vb cable",
+    "existential audio",
+    "aggregate",
+    "multi-output",
+    "multi output",
+    "ishowu",
+    "background music",
+)
+
+NO_LOOPBACK_DEVICE = (
+    "Системный звук не найден. macOS не отдаёт вывод приложений как вход сама по себе: нужно "
+    "устройство петли — BlackHole, Loopback или агрегатное устройство в «Настройке Audio-MIDI» — "
+    "и его же выбрать выходом для звонка. Если установка драйверов запрещена политикой компании, "
+    "согласуйте её с IT: обход ограничения приложение не выполняет."
+)
+
+
+class LiveCaptureError(RuntimeError):
+    pass
+
+
+def capture_supported():
+    """AVFoundation exists only on macOS; SAMARIZATOR_DEV keeps the tests runnable."""
+    return platform.system() == "Darwin" or os.environ.get("SAMARIZATOR_DEV") == "1"
+
+
+def parse_avfoundation_audio_devices(output):
+    """Return (index, name) pairs from FFmpeg's AVFoundation device listing."""
+    audio = False
+    devices = []
+    for line in output.splitlines():
+        if "AVFoundation audio devices:" in line:
+            audio = True
+            continue
+        if not audio:
+            continue
+        match = re.search(r"\[(\d+)\]\s+(.+?)\s*$", line)
+        if match:
+            devices.append((int(match.group(1)), match.group(2)))
+    return devices
+
+
+def audio_devices(ffmpeg):
+    try:
+        result = subprocess.run(
+            [ffmpeg, "-hide_banner", "-f", "avfoundation", "-list_devices", "true", "-i", ""],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise LiveCaptureError("Не удалось получить список аудиоустройств через FFmpeg.") from exc
+    devices = parse_avfoundation_audio_devices(result.stderr)
+    if not devices:
+        raise LiveCaptureError(
+            "FFmpeg не нашёл аудиовходов. Проверьте подключение устройства и разрешение macOS."
+        )
+    return devices
+
+
+def looks_like_loopback(name):
+    lowered = name.casefold()
+    return any(hint in lowered for hint in LOOPBACK_HINTS)
+
+
+def system_audio_devices(devices):
+    """Inputs that can carry system output. AVFoundation does not mark them, so match by name."""
+    return [(index, name) for index, name in devices if looks_like_loopback(name)]
+
+
+def resolve_device(devices, preferred, kind):
+    """Pick an input by its saved name; without one take the first device of that kind.
+
+    Names are stored instead of indexes: AVFoundation renumbers inputs when devices
+    are plugged in, so a saved index can silently point at the wrong source.
+    """
+    if preferred and preferred.strip():
+        wanted = preferred.strip().casefold()
+        for index, name in devices:
+            if name.casefold() == wanted:
+                return index, name
+        listing = ", ".join(name for _, name in devices) or "список пуст"
+        raise LiveCaptureError(
+            f"Устройство «{preferred.strip()}» не найдено среди входов macOS. Доступны: {listing}. "
+            "Выберите другое в настройках live-записи."
+        )
+    if kind == SYSTEM:
+        found = system_audio_devices(devices)
+        if not found:
+            raise LiveCaptureError(NO_LOOPBACK_DEVICE)
+        return found[0]
+    return devices[0]
+
+
+class LiveRecorder:
+    """Record one live session to a local WAV without buffering it in RAM.
+
+    With `source="both"` the microphone becomes channel 0 and the system output
+    channel 1 of a single stereo file, so both tracks share one timeline and the
+    existing file pipeline (which downmixes to mono) needs no change.
+    """
+
+    def __init__(
+        self,
+        folder=None,
+        ffmpeg=None,
+        device_index=None,
+        popen_factory=None,
+        source=MICROPHONE,
+        microphone_device="",
+        system_device="",
+        system_backend=NATIVE,
+        helper=None,
+        mix="gentle",
+    ):
+        if not capture_supported():
+            raise LiveCaptureError("Live-запись пока поддерживается только на macOS.")
+        if source not in LIVE_SOURCES:
+            raise LiveCaptureError("Неизвестный источник live-записи.")
+        if system_backend not in SYSTEM_BACKENDS:
+            raise LiveCaptureError("Неизвестный способ захвата системного звука.")
+        if mix not in MIX_PROFILES:
+            raise LiveCaptureError("Неизвестный профиль сведения дорожек.")
+        self.mix = mix
+        self.ffmpeg = ffmpeg or shutil.which("ffmpeg")
+        if not self.ffmpeg:
+            raise LiveCaptureError("FFmpeg не найден. Запустите ./start.sh для установки.")
+        self.folder = Path(folder or data_dir() / "recordings")
+        self.folder.mkdir(parents=True, exist_ok=True)
+        self.folder.chmod(0o700)
+        self.source = source
+        self.system_backend = system_backend
+        self.helper = Path(helper) if helper else screencapture.binary_path()
+        self.inputs = self._inputs(device_index, microphone_device, system_device)
+        self.device_index = self.inputs[0].index
+        stamp = datetime.now().astimezone().strftime("%Y-%m-%d_%H-%M-%S")
+        token = uuid.uuid4().hex[:8]
+        self.path = self.folder / f"live-{stamp}-{token}.wav"
+        self.partial = self.folder / f"live-{stamp}-{token}.partial.wav"
+        self.log = self.folder / f"live-{stamp}-{token}.log"
+        self.helper_log = self.folder / f"live-{stamp}-{token}.helper.log"
+        self.process = None
+        self.helper_process = None
+        self.started = None
+        self._log_handle = None
+        self._helper_log_handle = None
+        self._popen = popen_factory or subprocess.Popen
+
+    def _inputs(self, device_index, microphone_device, system_device):
+        """Inputs in channel order: microphone first, system audio second."""
+        if self.source == MICROPHONE and device_index is not None:
+            return [Input(MICROPHONE, int(device_index), "", False)]
+        kinds = [MICROPHONE] if self.source == MICROPHONE else (
+            [SYSTEM] if self.source == SYSTEM else [MICROPHONE, SYSTEM]
+        )
+        native = self.system_backend == NATIVE
+        if kinds == [SYSTEM] and native:
+            return [Input(SYSTEM, None, "ScreenCaptureKit", True)]
+        devices = audio_devices(self.ffmpeg)
+        wanted = {MICROPHONE: microphone_device, SYSTEM: system_device}
+        resolved = []
+        for kind in kinds:
+            if kind == SYSTEM and native:
+                resolved.append(Input(SYSTEM, None, "ScreenCaptureKit", True))
+                continue
+            index, name = resolve_device(devices, wanted[kind], kind)
+            resolved.append(Input(kind, index, name, False))
+        taken = [entry.index for entry in resolved if entry.index is not None]
+        if len(set(taken)) < len(taken):
+            raise LiveCaptureError(
+                "Микрофон и системный звук указывают на одно устройство. Выберите разные входы, "
+                "иначе дорожки будут одинаковыми."
+            )
+        return resolved
+
+    @property
+    def tracks(self):
+        """Channel layout of the produced WAV, in order."""
+        return tuple(entry.kind for entry in self.inputs)
+
+    @property
+    def native_capture(self):
+        return any(entry.native for entry in self.inputs)
+
+    @property
+    def recording(self):
+        return self.process is not None and self.process.poll() is None
+
+    @property
+    def elapsed(self):
+        return max(0.0, time.monotonic() - self.started) if self.started is not None else 0.0
+
+    def _args(self, pipe_fd=None):
+        # `warning`, not `error`: dropped packets from a full input queue are reported as
+        # warnings, and they are exactly what a crackling recording sounds like.
+        args = [self.ffmpeg, "-hide_banner", "-loglevel", "warning", "-nostats", "-y"]
+        for entry in self.inputs:
+            # A live device cannot wait: if its queue fills while the other input is busy,
+            # FFmpeg drops packets and the track clicks.
+            args += ["-thread_queue_size", "4096"]
+            if entry.native:
+                # Raw PCM from the ScreenCaptureKit helper; FFmpeg cannot probe a pipe,
+                # so the format is stated explicitly and must match the helper's output.
+                args += [
+                    "-f",
+                    screencapture.SAMPLE_FORMAT,
+                    "-ar",
+                    str(screencapture.SAMPLE_RATE),
+                    "-ac",
+                    str(screencapture.CHANNELS),
+                    "-i",
+                    f"pipe:{pipe_fd}",
+                ]
+            else:
+                args += ["-f", "avfoundation", "-i", f":{entry.index}"]
+        args += ["-vn"]
+        if len(self.inputs) == 1:
+            args += ["-ac", "1"]
+        else:
+            chains = [
+                f"[{position}:a]{MIX_PROFILES[self.mix]}[t{position}]"
+                for position in range(len(self.inputs))
+            ]
+            merge = "".join(f"[t{position}]" for position in range(len(self.inputs)))
+            args += [
+                "-filter_complex",
+                ";".join(chains) + f";{merge}amerge=inputs={len(self.inputs)}[live]",
+                "-map",
+                "[live]",
+                "-ac",
+                str(len(self.inputs)),
+            ]
+        # flush_packets keeps the growing file readable: without it FFmpeg buffers the
+        # WAV and nothing reaches disk until the end, so catch-up would have nothing to do.
+        args += ["-ar", "16000", "-c:a", "pcm_s16le", "-flush_packets", "1", str(self.partial)]
+        return args
+
+    def start(self):
+        if self.process is not None:
+            raise LiveCaptureError("Live-запись уже запущена.")
+        env = os.environ.copy()
+        env.pop("SAMARIZATOR_API_KEY", None)
+        if self.native_capture:
+            self._check_helper()
+        # Created before FFmpeg starts so catch-up recognition has a path to watch
+        # from the first second of the meeting.
+        self.partial.touch(mode=0o600)
+        read_fd, write_fd = os.pipe() if self.native_capture else (None, None)
+        self._log_handle = self.log.open("wb")
+        try:
+            # FFmpeg starts first and blocks on an empty pipe; the helper then fills it.
+            self.process = self._popen(
+                self._args(read_fd),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=self._log_handle,
+                env=env,
+                start_new_session=True,
+                **({"pass_fds": (read_fd,)} if read_fd is not None else {}),
+            )
+        except (OSError, ValueError) as exc:
+            self._close_pipe(read_fd, write_fd)
+            self._close_log()
+            raise LiveCaptureError(
+                f"Не удалось запустить захват ({SOURCE_LABELS[self.source]}) через FFmpeg."
+            ) from exc
+        if read_fd is not None:
+            self._close_fd(read_fd)
+            try:
+                self._start_helper(write_fd, env)
+            except LiveCaptureError:
+                self._close_fd(write_fd)
+                self._stop_ffmpeg()
+                self._close_log()
+                self.process = None
+                self.partial.unlink(missing_ok=True)
+                raise
+            self._close_fd(write_fd)
+        self.started = time.monotonic()
+        return self.path
+
+    def _check_helper(self):
+        report = screencapture.status(self.helper)
+        if not report["available"]:
+            raise LiveCaptureError(report["message"])
+
+    def _start_helper(self, write_fd, env):
+        self._helper_log_handle = self.helper_log.open("wb")
+        try:
+            self.helper_process = self._popen(
+                [str(self.helper), "capture"],
+                stdin=subprocess.DEVNULL,
+                stdout=write_fd,
+                stderr=self._helper_log_handle,
+                env=env,
+                start_new_session=True,
+            )
+        except (OSError, ValueError) as exc:
+            self._close_helper_log()
+            raise LiveCaptureError(
+                "Не удалось запустить helper системного звука. Пересоберите его через ./start.sh."
+            ) from exc
+
+    @staticmethod
+    def _close_fd(fd):
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+    def _close_pipe(self, read_fd, write_fd):
+        for fd in (read_fd, write_fd):
+            if fd is not None:
+                self._close_fd(fd)
+
+    def stop(self, timeout=10):
+        if self.process is None:
+            raise LiveCaptureError("Live-запись не запущена.")
+        # The helper goes first: closing its end of the pipe is what lets FFmpeg
+        # finish that input cleanly instead of waiting for more audio.
+        helper_problem, helper_detail = self._stop_helper(timeout)
+        self._stop_ffmpeg(timeout)
+        self._close_log()
+        if helper_problem:
+            self.partial.unlink(missing_ok=True)
+            self.log.unlink(missing_ok=True)
+            raise LiveCaptureError(helper_problem)
+        if self.process.returncode != 0:
+            self.partial.unlink(missing_ok=True)
+            raise LiveCaptureError(self._failure_message())
+        if not self.partial.is_file() or self.partial.stat().st_size <= 1024:
+            self.partial.unlink(missing_ok=True)
+            raise LiveCaptureError(self._silence_message(helper_detail))
+        self.partial.replace(self.path)
+        # Warnings survive a successful recording: they explain clicks and dropouts.
+        if not self.log.is_file() or not self.log.read_text(errors="replace").strip():
+            self.log.unlink(missing_ok=True)
+        self.helper_log.unlink(missing_ok=True)  # only a good recording removes the evidence
+        return self.path
+
+    def _stop_ffmpeg(self, timeout=10):
+        proc = self.process
+        if proc is None:
+            return
+        if proc.poll() is None:
+            try:
+                proc.stdin.write(b"q\n")
+                proc.stdin.flush()
+            except (AttributeError, BrokenPipeError, OSError):
+                pass
+            try:
+                proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+
+    def _stop_helper(self, timeout=10):
+        """Stop the helper; return (error message, its raw report) for diagnosis."""
+        proc = self.helper_process
+        if proc is None:
+            return "", ""
+        if proc.poll() is None:
+            proc.terminate()  # SIGTERM: the helper stops the stream and exits 0.
+            try:
+                proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        self._close_helper_log()
+        detail = self.helper_log.read_text(errors="replace") if self.helper_log.is_file() else ""
+        return screencapture.failure_message(proc.returncode, detail), detail
+
+    def _close_log(self):
+        if self._log_handle is not None:
+            self._log_handle.close()
+            self._log_handle = None
+
+    def _close_helper_log(self):
+        if self._helper_log_handle is not None:
+            self._helper_log_handle.close()
+            self._helper_log_handle = None
+
+    def _silence_message(self, helper_detail=""):
+        if self.source == MICROPHONE:
+            return "Микрофон не записал звук. Проверьте выбранный вход и разрешение macOS."
+        if self.native_capture:
+            # The helper's own counters say whether ScreenCaptureKit delivered anything,
+            # so an empty file is never blamed on the user's volume by guesswork.
+            return (
+                screencapture.silence_diagnosis(helper_detail)
+                + f"\nЖурнал helper'а: {self.helper_log}"
+            )
+        return (
+            "Запись получилась пустой. Проверьте, что устройство петли выбрано выходом звука "
+            "в системных настройках, иначе на его вход ничего не поступает."
+        )
+
+    def _failure_message(self):
+        detail = self.log.read_text(errors="replace")[-1200:] if self.log.is_file() else ""
+        self.log.unlink(missing_ok=True)
+        lowered = detail.casefold()
+        if "not authorized" in lowered or "permission" in lowered:
+            # Loopback inputs are ordinary AVFoundation inputs: macOS gates them
+            # behind the microphone permission too, not screen recording.
+            return (
+                "macOS не дала доступ к аудиовходу. Откройте Системные настройки → "
+                "Конфиденциальность и безопасность → Микрофон и разрешите Terminal или Samarizator. "
+                "Это же разрешение нужно для устройства системного звука."
+            )
+        return (
+            f"Не удалось записать выбранный источник ({SOURCE_LABELS[self.source]}). "
+            "Проверьте устройства ввода и разрешения macOS."
+        )
+
+
+TRACK_SAMPLE_SECONDS = 30
+
+
+def describe_tracks(path, tracks, names=(), seconds=TRACK_SAMPLE_SECONDS):
+    """Level report per track of a finished live recording, and which are silent.
+
+    Only the first `seconds` are measured: enough to catch a dead source, bounded
+    enough to run right after a long recording without freezing the window.
+    """
+    from tempfile import TemporaryDirectory
+
+    from .audio_quality import track_levels
+
+    labels = {MICROPHONE: "микрофон", SYSTEM: "системный звук"}
+    with TemporaryDirectory() as tmp:
+        levels = track_levels(path, tracks, tmp, seconds=seconds)
+    lines, silent = [], []
+    for level in levels:
+        name = labels.get(level["track"], level["track"])
+        # Naming the device turns "no microphone sound" into "this input gave nothing".
+        device = names[level["channel"]] if level["channel"] < len(names) else ""
+        titled = f"{name} ({device})" if device else name
+        state = "тишина" if level["peak"] == 0 else f"пик {level['peak']:.3f}"
+        lines.append(f"канал {level['channel'] + 1} · {titled}: RMS {level['rms_dbfs']} dBFS, {state}")
+        if level["peak"] == 0:
+            silent.append(titled)
+    return "\n".join(lines), silent
+
+
+def compare_mixes(seconds=20, profiles=None):
+    """Record the same room with each mixing profile and count the interruptions.
+
+    The choice is a trade-off — uncorrected drift against inserted silence — so it is
+    settled by measurement on the machine that has the problem, not by argument.
+    """
+    from tempfile import TemporaryDirectory
+
+    from .audio_quality import gaps
+    from .media import extract
+
+    profiles = profiles or list(MIX_PROFILES)
+    print(f"Каждый профиль пишет {seconds:.0f} с. Говорите в микрофон, держите звук из приложений.\n")
+    rows = []
+    for name in profiles:
+        print(f"  пишу «{name}»…")
+        try:
+            path, _ = record_sample(seconds=seconds, mix=name, source=BOTH)
+        except LiveCaptureError as exc:
+            print(f"    не удалось: {exc}")
+            continue
+        counts = []
+        for channel in (0, 1):
+            with TemporaryDirectory() as tmp:
+                mono = Path(tmp) / "track.wav"
+                extract(path, mono, Path(tmp), duration=seconds, channel=channel)
+                found = gaps(mono)
+            counts.append((len(found["dropouts"]), len(found["zeros"])))
+        rows.append((name, counts, path))
+    print(f"\n{'профиль':14s} {'микрофон: провалы/нули':>24s} {'система: провалы/нули':>24s}")
+    for name, counts, _ in rows:
+        mic, system = counts
+        print(f"{name:14s} {f'{mic[0]}/{mic[1]}':>24s} {f'{system[0]}/{system[1]}':>24s}")
+    if rows:
+        best = min(rows, key=lambda row: (row[1][0][0], row[1][0][1]))
+        print(f"\nМеньше всего прерываний микрофона: «{best[0]}».")
+        print("Поставьте его в настройках live-записи и запишите встречу целиком для проверки.")
+        for name, _, path in rows:
+            print(f'  afplay "{path}"   # {name}')
+    return 0
+
+
+def report_gaps(path, seconds=300):
+    """Describe interruptions in numbers, because nobody can send a sound over text."""
+    from tempfile import TemporaryDirectory
+
+    from .audio_quality import gaps
+    from .media import extract
+
+    path = Path(path)
+    if not path.is_file():
+        print(f"Файл не найден: {path}")
+        return 1
+    with wave.open(str(path)) as wav:
+        channels = wav.getnchannels()
+        duration = wav.getnframes() / max(1, wav.getframerate())
+    tracks = (MICROPHONE, SYSTEM) if channels == 2 else (MICROPHONE,)
+    labels = {MICROPHONE: "микрофон", SYSTEM: "системный звук"}
+    print(f"{path.name}: {duration:.1f} с, каналов {channels}. Проверяю первые {seconds} с.\n")
+    for channel, track in enumerate(tracks):
+        with TemporaryDirectory() as tmp:
+            mono = Path(tmp) / "track.wav"
+            extract(path, mono, Path(tmp), duration=min(seconds, duration), channel=channel)
+            found = gaps(mono)
+        name = labels.get(track, track)
+        lengths = [item["ms"] for item in found["dropouts"]]
+        print(f"--- {name} ---")
+        print(f"  провалов внутри речи: {len(lengths)}")
+        if lengths:
+            ordered = sorted(lengths)
+            print(
+                f"  длительность, мс: минимум {ordered[0]}, медиана {ordered[len(ordered) // 2]}, "
+                f"максимум {ordered[-1]}"
+            )
+            print("  первые: " + ", ".join(f"{d['start']:.2f}с/{d['ms']}мс" for d in found["dropouts"][:8]))
+            if found["spacing"]:
+                rhythm = "регулярные" if found["regular"] else "нерегулярные"
+                print(f"  интервал между провалами: медиана {found['spacing']} с — {rhythm}")
+        print(f"  участков цифровой тишины (ровные нули): {len(found['zeros'])}")
+        if found["zeros"]:
+            print(
+                "  ровные нули означают потерянные сэмплы: живой микрофон всегда даёт хоть "
+                "какой-то шум. Это конвейер, а не комната."
+            )
+        print()
+    log = path.with_suffix(".log")
+    print(f"Журнал FFmpeg рядом с записью: {log}" if log.is_file() else "Журнала FFmpeg нет (записывался без предупреждений).")
+    return 0
+
+
+def compare_cleanup(path, seconds=120, channel=None):
+    """Render the cleanup profiles from one recording and measure what each changed.
+
+    Numbers and files, not adjectives: the loud seconds are speech, the quiet ones are
+    pauses, and the gap between them is what decides whether cleanup helped.
+    """
+    from tempfile import TemporaryDirectory
+
+    from .audio_quality import level_profile
+    from .media import CLEANUP_PROFILES, extract
+
+    path = Path(path)
+    if not path.is_file():
+        print(f"Файл не найден: {path}")
+        return 1
+    with wave.open(str(path)) as wav:
+        if channel is None and wav.getnchannels() == 2:
+            channel = 0  # the microphone track is the one that needs cleaning
+    print(f"{path.name}: сравниваю обработку на первых {seconds:.0f} с")
+    print("(громкие секунды — речь, тихие — паузы; важна разница между ними)\n")
+    print(f"{'профиль':10s} {'речь':>9s} {'паузы':>9s} {'разница':>9s}   файл")
+    for name in CLEANUP_PROFILES:
+        rendered = path.with_suffix(f".{name}.wav")
+        extract(path, rendered, path.parent, duration=seconds, channel=channel, cleanup=name)
+        with TemporaryDirectory() as tmp:
+            levels = level_profile(rendered, (MICROPHONE,), tmp, seconds=seconds)[0]["levels"]
+        if not levels:
+            continue
+        ordered = sorted(levels)
+        third = max(1, len(ordered) // 3)
+        quiet = ordered[third // 2]
+        loud = ordered[-third // 2 - 1]
+        print(f"{name:10s} {loud:>8.1f}дБ {quiet:>8.1f}дБ {loud - quiet:>8.1f}дБ   {rendered.name}")
+    print("\nПослушайте и выберите на слух:")
+    for name in CLEANUP_PROFILES:
+        print(f'  afplay "{path.with_suffix(f".{name}.wav")}"')
+    print("\nВыбранный профиль ставится в Настройки → Качество и термины → «Обработка звука».")
+    print("Он влияет только на то, что слышит Whisper: запись на диске не меняется.")
+    return 0
+
+
+def profile_recording(path, seconds=180):
+    """Print how loud each track was, second by second, and flag outside gain control."""
+    from tempfile import TemporaryDirectory
+
+    from .audio_quality import ducking, level_profile
+
+    path = Path(path)
+    if not path.is_file():
+        print(f"Файл не найден: {path}")
+        return 1
+    with wave.open(str(path)) as wav:
+        channels = wav.getnchannels()
+    tracks = (MICROPHONE, SYSTEM) if channels == 2 else (MICROPHONE,)
+    labels = {MICROPHONE: "микрофон", SYSTEM: "система"}
+    with TemporaryDirectory() as tmp:
+        profile = level_profile(path, tracks, tmp, seconds=seconds)
+    print(f"{path.name}: уровень по секундам, dBFS (тише −60 — тишина)\n")
+    print(f"{'сек':>4}  " + "  ".join(f"{labels.get(t['track'], t['track']):>26}" for t in profile))
+    for index in range(max(len(t["levels"]) for t in profile)):
+        row = f"{index:>4}  "
+        for track in profile:
+            value = track["levels"][index] if index < len(track["levels"]) else None
+            if value is None:
+                row += " " * 28
+                continue
+            bar = "█" * max(0, min(18, int((value + 60) / 3)))
+            row += f"{value:>7.1f} {bar:<18}  "
+        print(row)
+    verdict = ducking(profile)
+    if verdict:
+        print(
+            f"\nМикрофон проседает в {verdict['share']:.0%} секунд, когда говорит другая сторона "
+            f"(обычный уровень {verdict['typical']} dBFS, проверено {verdict['seconds']} с)."
+        )
+        if verdict["share"] > 0.4:
+            print(
+                "Это подавление эха или автоусиление вне приложения: macOS Mic Mode либо "
+                "автогромкость в Zoom/Teams. Приложение так не умеет — в его цепочке нет "
+                "ни гейта, ни компрессора."
+            )
+    return 0
+
+
+def check_recording(path):
+    """CLI: report what actually landed in each channel of a live recording."""
+    path = Path(path)
+    if not path.is_file():
+        print(f"Файл не найден: {path}")
+        return 1
+    with wave.open(str(path)) as wav:
+        channels = wav.getnchannels()
+        duration = wav.getnframes() / max(1, wav.getframerate())
+    tracks = (MICROPHONE, SYSTEM) if channels == 2 else (MICROPHONE,)
+    measured = min(duration, 120)
+    print(f"{path.name}: каналов {channels}, длительность {duration:.1f} с")
+    print(f"Измерены первые {measured:.0f} с каждой дорожки:")
+    report, silent = describe_tracks(path, tracks, seconds=measured)
+    print(report)
+    if silent:
+        print("Пустые дорожки: " + ", ".join(silent))
+        return 1
+    print("Все дорожки содержат звук.")
+    return 0
+
+
+def record_sample(seconds=10, mix="default", source=BOTH, folder=None):
+    """Record a short sample with one mixing profile and report what each track got."""
+    from .config import Settings
+
+    settings = Settings.load()
+    recorder = LiveRecorder(
+        folder=folder,
+        source=source,
+        microphone_device=settings.live_microphone_device,
+        system_device=settings.live_system_device,
+        system_backend=settings.live_system_backend,
+        mix=mix,
+    )
+    recorder.start()
+    time.sleep(seconds)
+    path = recorder.stop()
+    report, _ = describe_tracks(
+        path, recorder.tracks, [entry.name for entry in recorder.inputs], seconds=seconds
+    )
+    return path, report
+
+
+def main():
+    import sys
+
+    if len(sys.argv) > 2 and sys.argv[1] == "profile":
+        return profile_recording(sys.argv[2])
+    if len(sys.argv) > 2 and sys.argv[1] == "clean":
+        return compare_cleanup(sys.argv[2])
+    if len(sys.argv) > 2 and sys.argv[1] == "gaps":
+        return report_gaps(sys.argv[2])
+    if len(sys.argv) > 1 and sys.argv[1] == "compare-mix":
+        rest = sys.argv[2:]
+        return compare_mixes(seconds=float(rest[rest.index("--seconds") + 1]) if "--seconds" in rest else 20)
+    if len(sys.argv) > 1 and sys.argv[1] == "record":
+        options = sys.argv[2:]
+
+        def option(name, fallback):
+            return options[options.index(name) + 1] if name in options else fallback
+
+        path, report = record_sample(
+            seconds=float(option("--seconds", 10)),
+            mix=option("--mix", "default"),
+            source=option("--source", BOTH),
+            folder=option("--folder", None),
+        )
+        print(report)
+        print(path)
+        return 0
+    if len(sys.argv) < 2:
+        print(
+            "Использование:\n"
+            "  python -m samarizator.live <файл-записи.wav>   — уровни по дорожкам\n"
+            "  python -m samarizator.live profile <файл>       — уровень по секундам и пампинг\n"
+            "  python -m samarizator.live clean <файл>         — сравнить профили обработки\n"
+            "  python -m samarizator.live gaps <файл>          — найти прерывания звука\n"
+            "  python -m samarizator.live compare-mix          — сравнить профили сведения по прерываниям\n"
+            "  python -m samarizator.live record [--seconds N] [--mix ИМЯ] [--source both|microphone|system]"
+        )
+        return 2
+    return check_recording(sys.argv[1])
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

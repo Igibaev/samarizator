@@ -29,6 +29,12 @@ class Settings:
     vad_model: str = ""
     glossary: str = ""
     beam_size: int = 5
+    live_source: str = "microphone"
+    live_microphone_device: str = ""
+    live_system_device: str = ""
+    live_system_backend: str = "screencapturekit"
+    audio_cleanup: str = "off"
+    live_mix: str = "gentle"
 
     def quality_profile(self):
         """Opt-in profile. Preserve the user's ASR model and corporate API configuration."""
@@ -53,6 +59,15 @@ class Settings:
     def validate(self, api=False):
         if not 1 <= self.beam_size <= 8 or len(self.glossary) > 800:
             raise ValueError("Beam size: 1–8; словарь терминов: не более 800 символов.")
+        if self.live_source not in {"microphone", "system", "both"}:
+            raise ValueError("Источник live-записи: микрофон, системный звук или оба.")
+        if self.live_system_backend not in {"screencapturekit", "device"}:
+            raise ValueError("Захват системного звука: ScreenCaptureKit или устройство петли.")
+        if self.audio_cleanup not in {"off", "light", "strong"}:
+            raise ValueError("Обработка звука перед распознаванием: off, light или strong.")
+        # Names mirror live.MIX_PROFILES; kept literal so config does not import capture code.
+        if self.live_mix not in {"gentle", "no-resample", "hard-stuff", "stretch", "legacy-pan"}:
+            raise ValueError("Неизвестный профиль сведения дорожек live-записи.")
         if not 2 <= self.memory_gb <= 64:
             raise ValueError("Бюджет памяти должен быть от 2 до 64 ГиБ.")
         if not 1 <= self.threads <= 16 or not 30 <= self.chunk_seconds <= 300:

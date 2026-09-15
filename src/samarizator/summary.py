@@ -467,6 +467,46 @@ def contextual_blocks(segments, max_chars):
         previous, current = current, following
 
 
+def source_fallback(block, reason):
+    """Keep source text when a provider never returns usable JSON for a tiny map block.
+
+    This is deliberately extractive: it never invents a summary or evidence. The visible
+    warning makes clear that the affected part still needs review.
+    """
+    items = []
+    topics = []
+    for sid, line in block:
+        text = json.loads(line)["text"].strip()
+        for start in range(0, len(text), 2000):
+            piece = text[start : start + 2000].strip()
+            if piece:
+                items.append(
+                    dict(
+                        kind="point",
+                        text=piece,
+                        evidence=[sid],
+                        owner=None,
+                        due=None,
+                        status="unspecified",
+                    )
+                )
+    if not items:
+        raise ValueError("В блоке нет текста, который можно сохранить в резервную сводку.")
+    warning = (
+        "Корпоративная модель не вернула корректный JSON для этой части даже после уменьшения "
+        "блока. Исходные реплики сохранены без перефразирования; проверьте этот фрагмент. "
+        + str(reason)[:300]
+    )
+    result = dict(
+        overview="Часть разговора сохранена из исходной расшифровки без модельного обобщения.",
+        items=items,
+        topics=topics,
+        quality_warning=warning,
+    )
+    validate_summary(result, {sid for sid, _ in block})
+    return result
+
+
 def _source_result(result, allowed, primary):
     try:
         validate_summary(result, allowed)
@@ -590,17 +630,22 @@ def summarize(store, mid, settings, progress=lambda *_: None, client=None):
 
         def split(reason):
             if depth >= 3:
-                raise ValueError(
-                    "Модель не вернула полную корректную сводку даже для малого блока. "
-                    "Проверьте лимит токенов ответа и модель."
-                ) from None
+                fallback = source_fallback(block, reason)
+                store.save_checkpoint(mid, phase, part, dict(digest=digest, parts=[fallback]))
+                progress(f"Блок {index + 1}: сохранён исходный текст вместо повреждённого ответа модели")
+                return [fallback]
             if len(block) > 1:
                 halves = [block[: len(block) // 2], block[len(block) // 2 :]]
             else:
                 row = json.loads(block[0][1])
                 text = row["text"]
                 if len(text) < 400:
-                    raise ValueError(str(reason)) from None
+                    fallback = source_fallback(block, reason)
+                    store.save_checkpoint(mid, phase, part, dict(digest=digest, parts=[fallback]))
+                    progress(
+                        f"Блок {index + 1}: сохранён исходный текст вместо повреждённого ответа модели"
+                    )
+                    return [fallback]
                 halves = [
                     [(row["id"], _json(dict(row, text=piece)))]
                     for piece in [text[: len(text) // 2], text[len(text) // 2 :]]
@@ -738,7 +783,9 @@ def summarize(store, mid, settings, progress=lambda *_: None, client=None):
         for item in current:
             length = len(json.dumps(item, ensure_ascii=False)) + 2
             if length + 2 > settings.input_chars:
-                raise ValueError("Один пункт сводки превышает размер блока. Увеличьте входной лимит.")
+                return fallback_brief(
+                    "Один пункт подробной сводки не поместился в блок финального сжатия."
+                )
             if group and size + length > settings.input_chars:
                 units.append(group)
                 group, size = [], 2
