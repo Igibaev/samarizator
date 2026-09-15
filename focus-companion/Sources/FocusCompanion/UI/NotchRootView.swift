@@ -14,18 +14,21 @@ struct NotchRootView: View {
     // дыхания и глобальный монитор мыши внутри него живут, пока жива вью.
     @State private var eyesModel = EyesViewModel()
 
-    /// Подложка капсулы: матовое стекло плюс затемняющая тонировка.
+    /// Затемняющая тонировка поверх стекла.
+    ///
+    /// Само стекло сюда НЕ входит: оно живёт на уровне AppKit, как contentView
+    /// панели (см. NotchWindowController). Если рисовать его здесь и обрезать
+    /// по форме средствами SwiftUI, размытие фона позади окна теряется и
+    /// остаётся плоская заливка.
+    ///
     /// В debug-режиме — плоский красный, иначе капсулу не разглядеть.
     @ViewBuilder
     private var capsuleBackground: some View {
         if AppearanceConfig.isDebug {
             AppearanceConfig.capsuleColor
         } else {
-            ZStack {
-                VisualEffectBackground(material: AppearanceConfig.capsuleMaterial)
-                AppearanceConfig.capsuleColor
-                    .opacity(AppearanceConfig.capsuleTintOpacity)
-            }
+            AppearanceConfig.capsuleColor
+                .opacity(AppearanceConfig.capsuleTintOpacity)
         }
     }
 
