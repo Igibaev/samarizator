@@ -139,8 +139,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Фаза 2: капсула теперь шире и глубже физического выреза
         // Габариты свёрнутой капсулы и её посадка относительно выреза —
         // самые часто крутимые числа, поэтому печатаются при каждом старте.
-        print("свёрнутая капсула: тело \(AppearanceConfig.collapsedWidth)pt шириной, "
-              + "зазор от выреза \(AppearanceConfig.collapsedGapFromNotch)pt, "
+        print("свёрнутая капсула: продолжение вправо от выреза "
+              + "\(AppearanceConfig.collapsedExtensionRight)pt, "
               + "свисание ниже выреза \(AppearanceConfig.capsuleExtraDepth)pt")
         if let screen = NSScreen.screenWithMouse ?? NSScreen.main {
             // Фаза 3: окно панели теперь ВСЕГДА в размере раскрытого
