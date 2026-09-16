@@ -13,6 +13,10 @@ struct CompanionRootView: View {
     var navigation: NavigationController
     var recordings: RecordingsController
     var eyes: EyesViewModel
+    /// Перетаскивание живёт в контроллере окна: ему нужен и экран, и окно.
+    var onDragChanged: (CGSize) -> Void
+    var onDragEnded: (CGSize) -> Void
+    var onReturnToNotch: () -> Void
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
@@ -78,6 +82,8 @@ struct CompanionRootView: View {
     // MARK: - Крыло
 
     private func wingSurface(geometry: CompanionGeometry) -> some View {
+        // У выреза — прямой левый край и скругления только справа.
+        // В свободном положении — полноценная капсула со всех сторон.
         let shape = WingShape(
             topCornerRadius: 10,
             bottomCornerRadius: max(0, geometry.wingRect.height - 10),
@@ -85,6 +91,14 @@ struct CompanionRootView: View {
         )
         return ZStack {
             shape.fill(CharacterConfig.isDebug ? Color.red : DesignTokens.Palette.companionBase)
+                // Свободная капсула отделена от обоев тенью и тонкой линией;
+                // у пристыкованного крыла их быть не должно — это выдало бы шов.
+                .shadow(
+                    color: geometry.wingIsSeamless ? .clear : DesignTokens.Glass.shadowColor,
+                    radius: geometry.wingIsSeamless ? 0 : 10,
+                    x: 0,
+                    y: geometry.wingIsSeamless ? 0 : 4
+                )
             WingView(
                 eyes: eyes,
                 stateMachine: stateMachine,
@@ -92,7 +106,10 @@ struct CompanionRootView: View {
                 isSeamless: geometry.wingIsSeamless,
                 notchHeight: geometry.wingRect.height,
                 now: taskPanel.now,
-                onEyesTap: handleEyesTap
+                onEyesTap: handleEyesTap,
+                onEyesDoubleTap: onReturnToNotch,
+                onDragChanged: onDragChanged,
+                onDragEnded: onDragEnded
             )
         }
         .contentShape(shape)

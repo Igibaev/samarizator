@@ -73,6 +73,8 @@ struct CompanionGeometry: Equatable {
     let isFocusOpen: Bool
     /// Идёт ли запись: при записи крыло может вырасти под метку времени.
     let isRecording: Bool
+    /// Где стоит корпус: у выреза или там, куда его перетащили.
+    let anchor: CompanionAnchor
     /// Показывается ли сейчас короткое сообщение под полкой.
     /// От этого зависит и нижняя граница компаньона, и область кликов:
     /// у сообщения есть кнопка «Вернуть», а значит оно обязано принимать нажатия.
@@ -86,7 +88,8 @@ struct CompanionGeometry: Equatable {
         activeTaskCount: Int = 0,
         isFocusOpen: Bool = false,
         isRecording: Bool = false,
-        hasCompactNotice: Bool = false
+        hasCompactNotice: Bool = false,
+        anchor: CompanionAnchor = .notch
     ) {
         self.screenFrame = screenFrame
         self.visibleFrame = visibleFrame
@@ -96,6 +99,7 @@ struct CompanionGeometry: Equatable {
         self.isFocusOpen = isFocusOpen
         self.isRecording = isRecording
         self.hasCompactNotice = hasCompactNotice
+        self.anchor = anchor
     }
 
     // MARK: - Корпус
@@ -129,6 +133,9 @@ struct CompanionGeometry: Equatable {
     /// та же высота и та же верхняя линия. Без выреза (или когда справа не
     /// хватает места) — самостоятельная капсула по центру под меню-баром.
     var wingRect: CGRect {
+        if case .free(let xFraction, let yFraction) = anchor {
+            return freeCapsuleRect(xFraction: xFraction, yFraction: yFraction)
+        }
         if let notch = notchRect, canAttachSeamlessWing {
             return CGRect(x: notch.maxX, y: notch.minY, width: wingWidth, height: notch.height)
         }
@@ -144,23 +151,73 @@ struct CompanionGeometry: Equatable {
         )
     }
 
+    /// Высота свободной капсулы: та же, что у пристыкованного крыла, чтобы
+    /// персонаж не менял рост при перетаскивании.
+    var capsuleHeight: CGFloat { notchRect?.height ?? menuBarHeight }
+
+    /// Капсула в свободном положении, целиком внутри рабочей области.
+    ///
+    /// Доли считаются от `visibleFrame`, а не от `frame`: иначе капсулу можно
+    /// было бы утащить под строку меню или под Dock и там потерять.
+    private func freeCapsuleRect(xFraction: CGFloat, yFraction: CGFloat) -> CGRect {
+        let width = wingWidth
+        let height = capsuleHeight
+        let minX = visibleFrame.minX
+        let maxX = visibleFrame.maxX - width
+        let minY = visibleFrame.minY
+        let maxY = visibleFrame.maxY - height
+        let x = minX + (maxX - minX) * min(max(xFraction, 0), 1)
+        let y = minY + (maxY - minY) * min(max(yFraction, 0), 1)
+        return CGRect(x: x, y: y, width: width, height: height)
+    }
+
+    /// Обратный перевод: прямоугольник капсулы в доли рабочей области.
+    /// Нужен при перетаскивании — положение хранится долями.
+    func fractions(forCapsuleOrigin origin: CGPoint) -> (x: CGFloat, y: CGFloat) {
+        let width = wingWidth
+        let height = capsuleHeight
+        let spanX = max(1, visibleFrame.width - width)
+        let spanY = max(1, visibleFrame.height - height)
+        return (
+            x: min(max((origin.x - visibleFrame.minX) / spanX, 0), 1),
+            y: min(max((origin.y - visibleFrame.minY) / spanY, 0), 1)
+        )
+    }
+
     /// Крыло рисуется бесшовно (прямая левая сторона, скругления только справа)
     /// только когда физический вырез реально присутствует.
-    var wingIsSeamless: Bool { hasNotch && canAttachSeamlessWing }
+    var wingIsSeamless: Bool { anchor.isDocked && hasNotch && canAttachSeamlessWing }
 
     /// Ось, по которой центрируются задачи и focus.
     /// С вырезом — центр выреза, иначе — центр самостоятельной капсулы.
     var bodyCenterX: CGFloat {
-        if let notch = notchRect, canAttachSeamlessWing { return notch.midX }
+        if wingIsSeamless, let notch = notchRect { return notch.midX }
         return wingRect.midX
     }
 
     /// Верхняя граница полки и раскрытой панели.
     var bodyTop: CGFloat {
-        let anchorBottom = (notchRect != nil && canAttachSeamlessWing)
-            ? (notchRect?.minY ?? wingRect.minY)
-            : wingRect.minY
+        let anchorBottom = wingIsSeamless ? (notchRect?.minY ?? wingRect.minY) : wingRect.minY
         return anchorBottom - Metrics.bodyTopGap
+    }
+
+    /// Хватает ли места, чтобы раскрыться ВНИЗ.
+    ///
+    /// Капсулу можно утащить к нижнему краю экрана, и тогда полка и панель
+    /// фокуса ушли бы за границу. В этом случае они растут ВВЕРХ от капсулы.
+    var growsUpward: Bool {
+        guard !wingIsSeamless else { return false }
+        return bodyTop - Metrics.focusHeight < visibleFrame.minY + Metrics.drawerInset
+    }
+
+    /// Нижняя граница поверхности, растущей вниз, либо верхняя — растущей вверх.
+    private func surfaceRect(width: CGFloat, height: CGFloat, stackedBelow offset: CGFloat) -> CGRect {
+        let x = bodyCenterX - width / 2
+        if growsUpward {
+            let bottom = wingRect.maxY + Metrics.bodyTopGap + offset
+            return CGRect(x: x, y: bottom, width: width, height: height)
+        }
+        return CGRect(x: x, y: bodyTop - offset - height, width: width, height: height)
     }
 
     // MARK: - Полка задач и панель фокуса
@@ -173,12 +230,7 @@ struct CompanionGeometry: Equatable {
     /// Компактная полка задач. `nil` при нуле задач — полки просто нет.
     var shelfRect: CGRect? {
         guard activeTaskCount > 0 else { return nil }
-        return CGRect(
-            x: bodyCenterX - Metrics.shelfWidth / 2,
-            y: bodyTop - shelfHeight,
-            width: Metrics.shelfWidth,
-            height: shelfHeight
-        )
+        return surfaceRect(width: Metrics.shelfWidth, height: shelfHeight, stackedBelow: 0)
     }
 
     /// Полоска сообщения под полкой. `nil` — сообщения нет.
@@ -188,22 +240,16 @@ struct CompanionGeometry: Equatable {
     /// (design.md §11.3), а окно возврата живёт всего 8 секунд.
     var compactNoticeRect: CGRect? {
         guard hasCompactNotice, !isFocusOpen else { return nil }
-        return CGRect(
-            x: bodyCenterX - Metrics.shelfWidth / 2,
-            y: bodyTop - shelfHeight - Metrics.bodyTopGap - Metrics.noticeHeight,
+        return surfaceRect(
             width: Metrics.shelfWidth,
-            height: Metrics.noticeHeight
+            height: Metrics.noticeHeight,
+            stackedBelow: shelfHeight + Metrics.bodyTopGap
         )
     }
 
     /// Раскрытая панель фокуса.
     var focusRect: CGRect {
-        CGRect(
-            x: bodyCenterX - Metrics.focusWidth / 2,
-            y: bodyTop - Metrics.focusHeight,
-            width: Metrics.focusWidth,
-            height: Metrics.focusHeight
-        )
+        surfaceRect(width: Metrics.focusWidth, height: Metrics.focusHeight, stackedBelow: 0)
     }
 
     /// Самая нижняя видимая поверхность компаньона — от неё отсчитывается drawer.
@@ -219,7 +265,10 @@ struct CompanionGeometry: Equatable {
     /// что может раскрыться под notch. Окно одно — так стык крыла и полки
     /// не может разъехаться между двумя независимо позиционируемыми окнами.
     var topWindowRect: CGRect {
-        wingRect.union(focusRect).union(shelfRect ?? focusRect)
+        var union = wingRect.union(focusRect)
+        if let shelf = shelfRect { union = union.union(shelf) }
+        if let notice = compactNoticeRect { union = union.union(notice) }
+        return union
     }
 
     // MARK: - Правая панель (design.md §4.2, §4.3)
@@ -236,16 +285,44 @@ struct CompanionGeometry: Equatable {
     /// чтобы не перекрывать ни глаза, ни висящие задачи.
     var drawerRect: CGRect {
         let width = drawerWidth
-        // Перевод «нижней границы компаньона» в отступ сверху рабочей области.
-        let companionDepth = max(0, visibleFrame.maxY - companionBottom)
-        let topInset = max(Metrics.drawerInset, companionDepth + Metrics.drawerInset)
+        let x = visibleFrame.maxX - Metrics.drawerInset - width
+        let topInset = drawerTopInset(drawerLeftEdge: x)
         let height = max(0, visibleFrame.height - topInset - Metrics.drawerInset)
         return CGRect(
-            x: visibleFrame.maxX - Metrics.drawerInset - width,
+            x: x,
             y: visibleFrame.maxY - topInset - height,
             width: width,
             height: height
         )
+    }
+
+    /// Насколько ниже верхней границы рабочей области начинается правая панель.
+    ///
+    /// Смысл правила из design.md §4.2 — не перекрыть глаза и висящие задачи.
+    /// Пока компаньон стоит у выреза, он всегда над панелью, и отступ считается
+    /// от его нижней границы. Но перетащенная капсула может оказаться слева,
+    /// где панели она вообще не мешает: опускать панель из-за неё значило бы
+    /// терять высоту ни за что. Поэтому отступ считается только при реальном
+    /// пересечении по горизонтали.
+    private func drawerTopInset(drawerLeftEdge: CGFloat) -> CGFloat {
+        let companionSpan = companionHorizontalSpan
+        let overlapsHorizontally = companionSpan.maxX > drawerLeftEdge
+            && companionSpan.minX < visibleFrame.maxX
+        guard overlapsHorizontally else { return Metrics.drawerInset }
+        let companionDepth = max(0, visibleFrame.maxY - companionBottom)
+        return max(Metrics.drawerInset, companionDepth + Metrics.drawerInset)
+    }
+
+    /// Горизонтальные границы всего, что компаньон сейчас рисует.
+    private var companionHorizontalSpan: (minX: CGFloat, maxX: CGFloat) {
+        var rect = wingRect
+        if isFocusOpen {
+            rect = rect.union(focusRect)
+        } else {
+            if let shelf = shelfRect { rect = rect.union(shelf) }
+            if let notice = compactNoticeRect { rect = rect.union(notice) }
+        }
+        return (rect.minX, rect.maxX)
     }
 
     /// Ширина области чтения внутри правой панели (без колонки списка).

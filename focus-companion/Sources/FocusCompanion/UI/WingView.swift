@@ -16,6 +16,9 @@ struct WingView: View {
     /// зависеть от случайных перерисовок вью.
     var now: Date
     var onEyesTap: () -> Void
+    var onEyesDoubleTap: () -> Void
+    var onDragChanged: (CGSize) -> Void
+    var onDragEnded: (CGSize) -> Void
 
     @State private var hoveringEyes = false
 
@@ -40,18 +43,27 @@ struct WingView: View {
 
     // MARK: - Глаза
 
+    /// Глаза — одновременно кнопка «открыть фокус» и ручка для перетаскивания.
+    ///
+    /// Это не `Button`: у кнопки нажатие срабатывало бы в начале любого
+    /// перетаскивания. Тап и жест разведены порогом `dragThreshold` —
+    /// короткое нажатие открывает фокус, протаскивание двигает корпус.
     private var eyesButton: some View {
-        Button(action: onEyesTap) {
-            EyesView(
-                model: eyes,
-                appearance: stateMachine.appearance,
-                gazeTargetOffset: stateMachine.gazeTargetOffset
-            )
-        }
-        .buttonStyle(.plain)
+        EyesView(
+            model: eyes,
+            appearance: stateMachine.appearance,
+            gazeTargetOffset: stateMachine.gazeTargetOffset
+        )
         .frame(width: CharacterConfig.eyesAreaWidth, height: CharacterConfig.eyesAreaHeight)
         .contentShape(Rectangle())
-        .help("Открыть фокус")
+        .onTapGesture(count: 2, perform: onEyesDoubleTap)
+        .onTapGesture(perform: onEyesTap)
+        .gesture(
+            DragGesture(minimumDistance: PlacementController.dragThreshold)
+                .onChanged { value in onDragChanged(value.translation) }
+                .onEnded { value in onDragEnded(value.translation) }
+        )
+        .help("Открыть фокус. Перетащите, чтобы переместить; двойной клик вернёт к вырезу")
         .onHover { hovering in
             hoveringEyes = hovering
             // Любопытство при наведении — 280 мс, один раз на вход курсора.

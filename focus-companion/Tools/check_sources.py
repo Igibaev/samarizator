@@ -50,6 +50,7 @@ SYSTEM_TYPES = {
     "VStack", "View", "ViewBuilder", "ViewModifier", "ZStack", "AnimatablePair",
     "FocusState", "ButtonStyle", "Button", "Content", "Configuration", "Overlay",
     "EmptyView", "ButtonStyleConfiguration", "Label", "Link", "Slider",
+    "DragGesture", "TapGesture", "Gesture", "AnyView", "Transaction",
     # CoreGraphics / SQLite
     "CGEventSource", "CGEventType", "SQLITE_OK", "SQLITE_ROW",
 }
