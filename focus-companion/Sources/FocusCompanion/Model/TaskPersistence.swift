@@ -1,34 +1,28 @@
 import Foundation
 
-/// Чтение и запись задач в JSON-файл.
+/// Задачи и история лежат в обычном JSON рядом с настройками приложения.
 ///
-/// Путь задан явно, а не отдан на откуп фреймворку: приложение собирается
-/// вручную в `.app` (`build-app.sh`) и может запускаться голым бинарником,
-/// когда `Bundle.main.bundleIdentifier` вообще `nil`. Хранилище обязано быть
-/// одним и тем же в обоих случаях запуска.
+/// SwiftData здесь принципиально не используется: её `@Model` — макрос,
+/// реализованный плагином компилятора Xcode, а приложение собирается
+/// `swift build` из терминала (см. docs/focus-companion/HANDOFF.md).
 enum TaskPersistence {
-
-    /// Совпадает с `CFBundleIdentifier` из `Resources/Info.plist`. Задан
-    /// строкой намеренно — см. комментарий выше.
     static let bundleIdentifier = "dev.samarizator.focuscompanion"
 
-    static var fileURL: URL {
+    static var directoryURL: URL {
         let fileManager = FileManager.default
         let base = (try? fileManager.url(
             for: .applicationSupportDirectory,
             in: .userDomainMask,
             appropriateFor: nil,
             create: true
-        )) ?? fileManager.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support")
-
+        )) ?? fileManager.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support")
         let directory = base.appendingPathComponent(bundleIdentifier, isDirectory: true)
         try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
-        return directory.appendingPathComponent("tasks.json")
+        return directory
     }
 
-    /// Пустой список при любой ошибке — отсутствие файла при первом запуске
-    /// это норма, а не сбой.
+    static var fileURL: URL { directoryURL.appendingPathComponent("tasks.json") }
+
     static func load() -> [CompanionTask] {
         guard let data = try? Data(contentsOf: fileURL) else { return [] }
         let decoder = JSONDecoder()
@@ -41,9 +35,64 @@ enum TaskPersistence {
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         guard let data = try? encoder.encode(tasks) else { return }
-        // .atomic: запись через временный файл. Приложение живёт неделями и
-        // может быть убито в любой момент — недописанный JSON означал бы
-        // потерю всех задач разом.
         try? data.write(to: fileURL, options: .atomic)
+    }
+}
+
+/// Пользовательские настройки компаньона, которые нельзя терять между запусками.
+enum CompanionSettings {
+    private static let defaults = UserDefaults.standard
+
+    private enum Key {
+        static let mood = "companion.mood"
+        static let disposal = "companion.disposalEffect"
+        static let clipboardHistory = "companion.clipboardHistoryEnabled"
+        static let drawerPinned = "companion.drawerPinned"
+        static let gestureHintsShown = "companion.gestureHintsShown"
+        static let frequentReminders = "companion.frequentReminders"
+        static let demoMode = "companion.demoMode"
+    }
+
+    static var mood: CharacterMood {
+        get { CharacterMood(rawValue: defaults.string(forKey: Key.mood) ?? "") ?? .expressive }
+        set { defaults.set(newValue.rawValue, forKey: Key.mood) }
+    }
+
+    static var disposalEffect: DisposalEffect {
+        get { DisposalEffect(rawValue: defaults.string(forKey: Key.disposal) ?? "") ?? .burn }
+        set { defaults.set(newValue.rawValue, forKey: Key.disposal) }
+    }
+
+    /// История буфера включается ЯВНЫМ действием пользователя (design.md §9.2).
+    static var clipboardHistoryEnabled: Bool {
+        get { defaults.bool(forKey: Key.clipboardHistory) }
+        set { defaults.set(newValue, forKey: Key.clipboardHistory) }
+    }
+
+    /// Закрепление правой панели включено по умолчанию (design.md §9.1).
+    static var drawerPinned: Bool {
+        get { defaults.object(forKey: Key.drawerPinned) as? Bool ?? true }
+        set { defaults.set(newValue, forKey: Key.drawerPinned) }
+    }
+
+    /// Подсказка про жесты показывается первые два раза, потом скрывается.
+    static var gestureHintsShown: Int {
+        get { defaults.integer(forKey: Key.gestureHintsShown) }
+        set { defaults.set(newValue, forKey: Key.gestureHintsShown) }
+    }
+
+    static var frequentReminders: Bool {
+        get { defaults.bool(forKey: Key.frequentReminders) }
+        set { defaults.set(newValue, forKey: Key.frequentReminders) }
+    }
+
+    /// Демонстрационный режим: FOCUS_DEMO=1 или переключатель в меню.
+    /// Данные из него всегда подписаны как демонстрационные.
+    static var demoMode: Bool {
+        get {
+            if ProcessInfo.processInfo.environment["FOCUS_DEMO"] == "1" { return true }
+            return defaults.bool(forKey: Key.demoMode)
+        }
+        set { defaults.set(newValue, forKey: Key.demoMode) }
     }
 }

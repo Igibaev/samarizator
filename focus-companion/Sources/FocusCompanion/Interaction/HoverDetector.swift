@@ -2,71 +2,47 @@ import AppKit
 import SwiftUI
 import Observation
 
-/// Определяет наведение курсора на капсулу и переключает
-/// свёрнутое/раскрытое состояние панели.
+/// Отслеживание курсора над компаньоном (design.md §7.2).
 ///
-/// Решение автора (см. PHASE-3-PROMPT.md, "Ховер вместо NSTrackingArea"):
-/// `NSTrackingArea` требует, чтобы панель видела мышь, а
-/// `ignoresMouseEvents = true` — это ровно то, что держит меню-бар под
-/// свёрнутой капсулой кликабельным. Поэтому наведение определяется
-/// ОПРОСОМ `NSEvent.mouseLocation` по таймеру (~20 Гц), а не монитором
-/// событий и не tracking-областью:
-/// - опрос дешёвый (чтение состояния, не обработка потока событий);
-/// - он одинаково работает и когда панель `ignoresMouseEvents = true`
-///   (свёрнуто), и когда `false` (раскрыто) — в отличие от
-///   `NSEvent.addGlobalMonitorForEvents` (см. `MouseTracker`), который
-///   слепнет, как только панель начинает перехватывать мышь.
-///
-/// Тем же опросом (через `onMouseLocation`) питается слежение глаз во время
-/// раскрытия — см. подключение в `NotchRootView.init`.
+/// Опрос `NSEvent.mouseLocation` по таймеру, а не `NSTrackingArea` и не
+/// глобальный монитор: глобальный монитор слепнет над собственным окном, как
+/// только панель перестаёт пропускать мышь, а `NSTrackingArea` не видит
+/// курсор, пока окно клики пропускает. Опрос работает одинаково в обоих
+/// режимах — это уже проверено на живой машине в Фазе 3.
 @MainActor
 @Observable
 final class HoverDetector {
 
-    /// Текущее состояние: раскрыта ли панель.
-    private(set) var isExpanded = false
+    /// Курсор внутри области глаз (крыла).
+    private(set) var isOverWing = false
+    /// Курсор внутри объединения корпуса, панели и коридора между ними.
+    private(set) var isOverUnion = false
+    /// Текущая геометрия — её же читает и вью, чтобы раскладка была одна.
+    private(set) var geometry: CompanionGeometry?
+    private(set) var mouseLocation: CGPoint = .zero
 
-    /// Размер свёрнутой капсулы в pt экрана — тот же самый размер и в
-    /// локальных координатах содержимого окна (масштабирования между
-    /// экранными и view-координатами здесь нет). Считается по текущему
-    /// экрану на каждом тике опроса, поэтому переживает смену экрана без
-    /// отдельной подписки на уведомления.
-    private(set) var collapsedSize: CGSize = .zero
+    /// Требуется ли панели принимать клики прямо сейчас.
+    private(set) var wantsMouseEvents = false
 
-    /// Размер раскрытой капсулы — всегда равен размеру самого окна панели
-    /// (решение №2 в PHASE-3-PROMPT.md: окно всегда в размере раскрытого
-    /// состояния).
-    private(set) var expandedSize: CGSize = .zero
+    /// Ввод, drag или открытое контекстное меню удерживают панель открытой.
+    var holdsOpen = false
 
-    /// Смещение центра свёрнутой капсулы относительно центра окна: окно
-    /// центрировано по вырезу, а капсула уходит вправо.
-    private(set) var collapsedOffsetX: CGFloat = 0
-
-    /// Смещение глаз относительно центра окна. Одно и то же в обоих
-    /// состояниях — по горизонтали персонаж при раскрытии не ездит.
-    private(set) var eyesOffsetX: CGFloat = 0
-
-    /// Вызывается на каждом тике опроса с текущей глобальной позицией
-    /// курсора — используется `EyesViewModel` для слежения глаз, пока
-    /// раскрыто (см. комментарий в шапке файла).
+    var onOpenFocus: (() -> Void)?
+    var onCloseFocus: (() -> Void)?
     var onMouseLocation: ((CGPoint) -> Void)?
+    var onWantsMouseEventsChange: ((Bool) -> Void)?
+    var onWingHoverChange: ((Bool) -> Void)?
 
-    /// Вызывается ТОЛЬКО когда `isExpanded` реально меняется. Слушает
-    /// `NotchWindowController`, чтобы держать `NSPanel.ignoresMouseEvents`
-    /// в синхроне: раскрыто → `false` (панель интерактивна), свёрнуто →
-    /// `true` (меню-бар под капсулой остаётся кликабельным).
-    var onExpansionChange: ((Bool) -> Void)?
+    /// Поставщик актуального состояния: сколько задач и раскрыт ли focus.
+    var currentStateProvider: (() -> (taskCount: Int, isFocusOpen: Bool, isRecording: Bool))?
 
-    /// Копит промежуточное "хочет измениться" состояние наведения и момент,
-    /// с которого оно держится — простая ручная реализация debounce внутри
-    /// одного цикла опроса, без отдельных отменяемых задач на каждый чих.
-    private var pendingTargetExpanded: Bool?
-    private var pendingSince: Date?
-
+    private var openPendingSince: Date?
+    private var closePendingSince: Date?
     private let taskBag = TaskBag()
+    /// 20 Гц: достаточно для ощущения мгновенности и не греет процессор.
+    private let pollInterval: Double = 1.0 / 20.0
 
     init() {
-        updateSizes()
         startPolling()
     }
 
@@ -78,61 +54,89 @@ final class HoverDetector {
         taskBag.replace(.hoverPoll, with: Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
-                self.tick()
-                try? await Task.sleep(nanoseconds: Self.nanoseconds(AppearanceConfig.hoverPollInterval))
+                self.tick(now: Date())
+                try? await Task.sleep(nanoseconds: UInt64(self.pollInterval * 1_000_000_000))
             }
         })
     }
 
-    private func tick() {
+    /// Один шаг опроса. Вынесен отдельно от цикла, чтобы логику задержек
+    /// можно было прогнать вручную, не дожидаясь реального таймера.
+    func tick(now: Date) {
         guard let screen = NSScreen.screenWithMouse ?? NSScreen.main else { return }
-        let mouseLocation = NSEvent.mouseLocation
+        let state = currentStateProvider?() ?? (taskCount: 0, isFocusOpen: false, isRecording: false)
+        let geometry = screen.companionGeometry(
+            activeTaskCount: state.taskCount,
+            isFocusOpen: state.isFocusOpen,
+            isRecording: state.isRecording
+        )
+        self.geometry = geometry
 
-        onMouseLocation?(mouseLocation)
-        updateSizes(on: screen)
+        let location = NSEvent.mouseLocation
+        mouseLocation = location
+        onMouseLocation?(location)
 
-        let activeRect = isExpanded ? screen.capsulePanelFrame : screen.collapsedCapsuleFrame
-        let rawHover = NSMouseInRect(mouseLocation, activeRect, false)
-        evaluateDebounce(rawHover: rawHover)
+        let overWing = geometry.wingRect.contains(location)
+        if overWing != isOverWing {
+            isOverWing = overWing
+            onWingHoverChange?(overWing)
+        }
+
+        let overUnion = geometry.hoverUnionRect.contains(location)
+        isOverUnion = overUnion
+
+        // Клики панель должна принимать, когда курсор над реально
+        // нарисованными поверхностями: крылом, полкой или раскрытым focus.
+        // Коридор в эту проверку НЕ входит — прозрачные участки не имеют
+        // права перехватывать нажатия у других приложений.
+        var interactive = geometry.wingRect.contains(location)
+        if state.isFocusOpen {
+            interactive = interactive || geometry.focusRect.contains(location)
+        } else if let shelf = geometry.shelfRect {
+            interactive = interactive || shelf.contains(location)
+        }
+        if interactive != wantsMouseEvents {
+            wantsMouseEvents = interactive
+            onWantsMouseEventsChange?(interactive)
+        }
+
+        evaluateOpen(overWing: overWing, now: now)
+        evaluateClose(overUnion: overUnion, isFocusOpen: state.isFocusOpen, now: now)
     }
 
-    /// Задержка перед раскрытием (~0.2с, гасит случайный пролёт курсора
-    /// мимо) и перед сворачиванием (~0.15с, короче — гасит дрожание курсора
-    /// у самой границы, но не должна ощущаться как залипание) — обе в
-    /// `AppearanceConfig`.
-    private func evaluateDebounce(rawHover: Bool) {
-        guard rawHover != isExpanded else {
-            pendingTargetExpanded = nil
-            pendingSince = nil
+    /// Курсор вошёл в область глаз → через 120 мс раскрыть focus.
+    /// Ушёл раньше — открытие отменяется.
+    private func evaluateOpen(overWing: Bool, now: Date) {
+        guard overWing else {
+            openPendingSince = nil
             return
         }
-
-        guard pendingTargetExpanded == rawHover, let pendingSince else {
-            pendingTargetExpanded = rawHover
-            pendingSince = Date()
+        guard let since = openPendingSince else {
+            openPendingSince = now
             return
         }
+        guard now.timeIntervalSince(since) >= DesignTokens.Motion.hoverOpenDelay else { return }
+        openPendingSince = nil
+        onOpenFocus?()
+    }
 
-        let requiredDelay = rawHover ? AppearanceConfig.hoverExpandDelay : AppearanceConfig.hoverCollapseDelay
-        guard Date().timeIntervalSince(pendingSince) >= requiredDelay else { return }
-
-        self.pendingTargetExpanded = nil
-        self.pendingSince = nil
-        withAnimation(.easeInOut(duration: AppearanceConfig.hoverMorphDuration)) {
-            isExpanded = rawHover
+    /// Курсор покинул ВСЁ объединение корпуса и панели → таймер 450 мс.
+    /// Возврат до истечения таймера отменяет закрытие.
+    private func evaluateClose(overUnion: Bool, isFocusOpen: Bool, now: Date) {
+        guard isFocusOpen, !holdsOpen else {
+            closePendingSince = nil
+            return
         }
-        onExpansionChange?(rawHover)
-    }
-
-    private func updateSizes(on screen: NSScreen? = nil) {
-        guard let screen = screen ?? NSScreen.screenWithMouse ?? NSScreen.main else { return }
-        collapsedSize = screen.collapsedCapsuleFrame.size
-        expandedSize = screen.capsulePanelFrame.size
-        collapsedOffsetX = screen.collapsedOffsetXInPanel
-        eyesOffsetX = screen.eyesOffsetXInPanel
-    }
-
-    private static func nanoseconds(_ seconds: Double) -> UInt64 {
-        UInt64(max(0, seconds) * 1_000_000_000)
+        guard !overUnion else {
+            closePendingSince = nil
+            return
+        }
+        guard let since = closePendingSince else {
+            closePendingSince = now
+            return
+        }
+        guard now.timeIntervalSince(since) >= DesignTokens.Motion.hoverCloseDelay else { return }
+        closePendingSince = nil
+        onCloseFocus?()
     }
 }

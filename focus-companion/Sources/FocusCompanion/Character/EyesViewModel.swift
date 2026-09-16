@@ -2,73 +2,38 @@ import AppKit
 import SwiftUI
 import Observation
 
-/// Состояние "живости" персонажа: слежение зрачков за курсором, моргание,
-/// саккады и дыхание.
+/// Фоновая жизнь глаз: моргание, слежение за курсором, цикл «думает»,
+/// короткий толчок в злости.
 ///
-/// Анимация всех переходов сделана через `withAnimation` вокруг присвоений
-/// `@Observable`-свойств (SwiftUI сам подхватывает изменение при следующей
-/// перерисовке `EyesView`), а не через ручной интегратор пружины на таймере —
-/// так вся физика (`interactiveSpring`, `easeOut`...) остаётся стандартной
-/// логикой SwiftUI, а не самодельным кодом, который здесь физически нельзя
-/// ни разу собрать и посмотреть глазами.
-///
-/// Фаза 3: класс получает `CompanionStateMachine` и на каждом шаге своих же
-/// циклов читает её `appearance` — множители к интервалам/амплитудам. Так
-/// машина состояний ВЛИЯЕТ на уже существующие таймеры, не заводя вторых
-/// (см. PHASE-3-PROMPT.md, раздел про `CompanionStateMachine`).
+/// Анимации запускаются событиями интерфейса и не требуют ответа языковой
+/// модели. Непрерывного рендера 60 fps нет: между морганиями задача просто
+/// спит (design.md §13).
 @MainActor
 @Observable
 final class EyesViewModel {
 
-    /// Текущее смещение зрачков, нормированное -1...1 по обеим осям
-    /// (1 = зрачок у самого края склеры). Общее для обоих глаз — расхождение
-    /// глаз (конвергенция при близком курсоре) в Фазе 2 не делаем.
-    private(set) var pupilOffset: CGPoint = .zero
+    /// Доля открытости при моргании: 1 — открыт, ~0.11 — закрыт (18 → 2 pt).
+    private(set) var openFraction: CGFloat = 1
+    /// Смещение пары за курсором, в pt.
+    private(set) var gazeOffset: CGSize = .zero
+    /// Короткий толчок в злости, в pt.
+    private(set) var jolt: CGFloat = 0
+    /// Фаза цикла «думает»: какой глаз сейчас прищурен.
+    private(set) var thinkingPhase = 0
 
-    /// Текущий вертикальный масштаб глаза: 1 — открыт полностью,
-    /// `CharacterConfig.blinkClosedScaleY` — закрыт.
-    private(set) var eyeScaleY: CGFloat = 1
+    var reduceMotion = false
 
-    /// Масштаб всей пары глаз от дыхания (1 ± амплитуда). Капсулу не трогает —
-    /// её форма жёстко привязана к физическому вырезу (см. PHASE-2-PROMPT.md).
-    private(set) var breathScale: CGFloat = 1
-
-    /// Нормированная (0...1) фаза дыхания: 0 на выдохе, 1 на пике вдоха.
-    /// Используется как готовый источник плавной пульсации для подсветки
-    /// состояния (`.reminding`) — второй таймер под "мягкую пульсацию" не
-    /// заводим, переиспользуем уже идущий цикл дыхания.
-    private(set) var breathPulse: Double = 0
-
-    /// Доп. вертикальный сдвиг пары глаз от "подпрыгивания" `.celebrating`
-    /// (`StateAppearance.bobAmplitudeMultiplier`). Синхронно с дыханием, тем
-    /// же циклом — см. `startBreathing`.
-    private(set) var bobOffsetY: CGFloat = 0
-
-    private let mouseTracker = MouseTracker()
-
-    /// Машина состояний — источник множителей к циклам ниже. Ссылка общая с
-    /// `NotchRootView`/`EyesView` (та же инстанция), не собственная копия.
     private let stateMachine: CompanionStateMachine
-
-    /// Точка, куда зрачок "должен" смотреть в состоянии покоя — то есть
-    /// нормированное смещение, посчитанное из реальной позиции курсора.
-    /// Саккады временно уводят `pupilOffset` от неё и возвращают обратно,
-    /// а не наоборот.
-    private var restOffset: CGPoint = .zero
-
-    /// Таймеры моргания, саккад и дыхания. Лежат в `TaskBag`, а не в
-    /// обычных свойствах, потому что их надо отменять в `deinit` — а тот у
-    /// @MainActor-класса не имеет доступа к изолированным свойствам.
     private let taskBag = TaskBag()
+    /// Воспроизводимое моргание для скриншотов: FOCUS_BLINK_SEED=<число>.
+    private var random: SeededGenerator
 
     init(stateMachine: CompanionStateMachine) {
         self.stateMachine = stateMachine
-        mouseTracker.onMove = { [weak self] location in
-            self?.handleMouseMove(to: location)
-        }
-        startBreathing()
+        let seedText = ProcessInfo.processInfo.environment[CharacterConfig.blinkSeedEnvironmentKey]
+        self.random = SeededGenerator(seed: UInt64(seedText ?? "") ?? UInt64.random(in: 1...UInt64.max))
         scheduleNextBlink()
-        startSaccadeLoop()
+        startThinkingCycle()
     }
 
     deinit {
@@ -77,208 +42,123 @@ final class EyesViewModel {
 
     // MARK: - Слежение за курсором
 
-    /// Публичная точка входа для слежения, питаемая ЛИБО глобальным
-    /// монитором (`MouseTracker`, свёрнутое состояние панели), ЛИБО 20 Гц
-    /// опросом `HoverDetector` (раскрытое состояние, где монитор слепнет —
-    /// см. PHASE-3-PROMPT.md, решение №1). Вызывающая сторона сама решает,
-    /// какой источник сейчас актуален — здесь оба ведут к одной и той же
-    /// логике.
-    func updateGaze(from location: CGPoint) {
-        handleMouseMove(to: location)
-    }
-
-    private func handleMouseMove(to location: CGPoint) {
-        let target = normalizedOffset(mouseLocation: location)
-        restOffset = target
-        withAnimation(
-            .interactiveSpring(
-                response: CharacterConfig.trackingSpringResponse,
-                dampingFraction: CharacterConfig.trackingSpringDamping
-            )
-        ) {
-            pupilOffset = target
+    /// Общий сдвиг пары до ±3 pt по x и ±2 pt по y, и только рядом с корпусом.
+    func updateGaze(mouse: CGPoint, wing: CGRect) {
+        guard stateMachine.appearance.tracksCursor, !reduceMotion else {
+            setGaze(.zero)
+            return
         }
-    }
-
-    /// Переводит глобальную позицию курсора в нормированное -1...1 смещение
-    /// относительно центра персонажа на экране, где он сейчас находится.
-    /// Добавляет `StateAppearance.gazeBiasX` текущего состояния поверх
-    /// обычного слежения — источник "взгляда вбок" у `.thinking`, заметного
-    /// даже когда курсор прямо перед персонажем (внутри мёртвой зоны).
-    private func normalizedOffset(mouseLocation: CGPoint) -> CGPoint {
-        let bias = stateMachine.appearance.gazeBiasX
-        guard let screen = NSScreen.screenWithMouse ?? NSScreen.main else {
-            return CGPoint(x: bias, y: 0)
-        }
-        let notch = screen.notchFrameWithFallback
-        let center = CGPoint(x: notch.midX, y: notch.midY)
-
-        let dx = mouseLocation.x - center.x
-        let dy = mouseLocation.y - center.y
+        let center = CGPoint(x: wing.midX, y: wing.midY)
+        let dx = mouse.x - center.x
+        let dy = mouse.y - center.y
         let distance = (dx * dx + dy * dy).squareRoot()
-
-        guard distance > CharacterConfig.trackingDeadZoneRadius else {
-            return CGPoint(x: Self.clamp(bias, to: -1...1), y: 0)
+        guard distance <= CharacterConfig.gazeNearRadius else {
+            setGaze(.zero)
+            return
         }
+        guard distance > CharacterConfig.gazeDeadZoneRadius else {
+            setGaze(.zero)
+            return
+        }
+        let normalizedX = max(-1, min(1, dx / CharacterConfig.gazeNearRadius))
+        let normalizedY = max(-1, min(1, dy / CharacterConfig.gazeNearRadius))
+        setGaze(CGSize(
+            width: normalizedX * CharacterConfig.gazeMaxShiftX,
+            // Экранная Y растёт вверх, а SwiftUI-смещение — вниз.
+            height: -normalizedY * CharacterConfig.gazeMaxShiftY
+        ))
+    }
 
-        let range = CharacterConfig.trackingRange
-        let nx = Self.clamp(dx / range + bias, to: -1...1)
-        // В AppKit Y растёт вверх; в нашей нормировке "вниз" (курсор ниже
-        // персонажа) должно быть положительным смещением зрачка вниз —
-        // поэтому знак инвертируем.
-        let ny = Self.clamp(-dy / range, to: -1...1)
-        return CGPoint(x: nx, y: ny)
+    private func setGaze(_ target: CGSize) {
+        guard target != gazeOffset else { return }
+        withAnimation(.easeOut(duration: CharacterConfig.gazeSmoothing)) {
+            gazeOffset = target
+        }
     }
 
     // MARK: - Моргание
 
     private func scheduleNextBlink() {
-        let rateMultiplier = max(stateMachine.appearance.blinkRateMultiplier, 0.05)
-        let delay = Double.random(in: CharacterConfig.blinkMinInterval...CharacterConfig.blinkMaxInterval) / rateMultiplier
+        let delay = Double.random(
+            in: CharacterConfig.blinkMinInterval...CharacterConfig.blinkMaxInterval,
+            using: &random
+        ) / max(0.05, stateMachine.appearance.blinkRateMultiplier)
         taskBag.replace(.blink, with: Task { [weak self] in
-            try? await Task.sleep(nanoseconds: Self.nanoseconds(delay))
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             guard !Task.isCancelled, let self else { return }
-            await self.performBlinkCycle()
+            await self.blinkOnce()
+            guard !Task.isCancelled else { return }
             self.scheduleNextBlink()
         })
     }
 
-    private func performBlinkCycle() async {
-        await singleBlink()
-        guard !Task.isCancelled else { return }
-        if Double.random(in: 0..<1) < CharacterConfig.doubleBlinkProbability {
-            try? await Task.sleep(nanoseconds: Self.nanoseconds(CharacterConfig.doubleBlinkPause))
-            guard !Task.isCancelled else { return }
-            await singleBlink()
-        }
-    }
-
-    private func singleBlink() async {
+    /// 18 → 2 → 18 pt за 110 мс.
+    func blinkOnce() async {
+        guard !reduceMotion else { return }
+        let closed = CharacterConfig.blinkClosedHeight / CharacterConfig.eyeHeight
         let half = CharacterConfig.blinkDuration / 2
-        withAnimation(.easeIn(duration: half)) {
-            eyeScaleY = CharacterConfig.blinkClosedScaleY
-        }
-        try? await Task.sleep(nanoseconds: Self.nanoseconds(half))
+        withAnimation(.easeIn(duration: half)) { openFraction = closed }
+        try? await Task.sleep(nanoseconds: UInt64(half * 1_000_000_000))
         guard !Task.isCancelled else { return }
-        withAnimation(.easeOut(duration: half)) {
-            eyeScaleY = 1
-        }
-        try? await Task.sleep(nanoseconds: Self.nanoseconds(half))
+        withAnimation(.easeOut(duration: half)) { openFraction = 1 }
+        try? await Task.sleep(nanoseconds: UInt64(half * 1_000_000_000))
     }
 
-    // MARK: - Саккады
+    // MARK: - «Думает»
 
-    /// Постоянно (раз в полсекунды) проверяет, сколько курсор простоял без
-    /// движения, и включает саккаду при превышении порога. Опрос, а не
-    /// подписка на "нет событий N секунд" — таймеров бездействия в AppKit нет,
-    /// а перезапускать один Task-таймер при каждом chirp'е движения мыши
-    /// сложнее и не даёт выигрыша: саккада — редкое и не батарее-критичное
-    /// событие.
-    private func startSaccadeLoop() {
-        taskBag.replace(.saccade, with: Task { [weak self] in
+    /// Поочерёдное сужение глаз, цикл 1.2 с — и ТОЛЬКО при реальной обработке.
+    private func startThinkingCycle() {
+        taskBag.replace(.thinkingCycle, with: Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 500_000_000)
+                let half = CharacterConfig.thinkingCycle / 2
+                try? await Task.sleep(nanoseconds: UInt64(half * 1_000_000_000))
                 guard !Task.isCancelled, let self else { return }
-                let freqMultiplier = max(self.stateMachine.appearance.saccadeFrequencyMultiplier, 0.05)
-                let idleFor = Date().timeIntervalSince(self.mouseTracker.lastMovementDate)
-                if idleFor >= CharacterConfig.saccadeIdleThreshold / freqMultiplier {
-                    await self.performSaccade()
-                    guard !Task.isCancelled else { return }
-
-                    // Пауза до следующей саккады. Без неё цикл, пока курсор
-                    // неподвижен, запускал бы саккаду каждые ~0.9 сек без
-                    // остановки: глаза дёргались бы непрерывно, и персонаж
-                    // читался бы как тревожный, а не как живой.
-                    let pause = Double.random(
-                        in: CharacterConfig.saccadeMinPause...CharacterConfig.saccadeMaxPause
-                    ) / freqMultiplier
-                    try? await Task.sleep(nanoseconds: Self.nanoseconds(pause))
+                guard self.stateMachine.state == .thinking, !self.reduceMotion else {
+                    if self.thinkingPhase != 0 { self.thinkingPhase = 0 }
+                    continue
+                }
+                withAnimation(.easeInOut(duration: half)) {
+                    self.thinkingPhase = self.thinkingPhase == 0 ? 1 : 0
                 }
             }
         })
     }
 
-    private func performSaccade() async {
-        let appearance = stateMachine.appearance
-        let angle = Double.random(in: 0..<(2 * Double.pi))
-        let amplitude = CharacterConfig.saccadeAmplitude * appearance.saccadeAmplitudeMultiplier
-        let speedMultiplier = max(appearance.saccadeSpeedMultiplier, 0.05)
-        let jump = CGPoint(
-            x: Self.clamp(restOffset.x + CGFloat(cos(angle)) * amplitude, to: -1...1),
-            y: Self.clamp(restOffset.y + CGFloat(sin(angle)) * amplitude, to: -1...1)
-        )
-
-        // Рывок — быстрый и резкий (короткий easeOut), возврат — заметно
-        // медленнее и мягче. Несимметрично специально: настоящая саккада —
-        // это почти мгновенный скачок глаза с плавным "остыванием" после,
-        // а не одинаково плавное движение туда-обратно (то читалось бы как
-        // "плавающий", заторможенный взгляд). `saccadeSpeedMultiplier` > 1
-        // растягивает обе фазы — источник "медленных саккад" у `.thinking`.
-        let jumpDuration = CharacterConfig.saccadeJumpDuration * speedMultiplier
-        withAnimation(.easeOut(duration: jumpDuration)) {
-            pupilOffset = jump
-        }
-        try? await Task.sleep(nanoseconds: Self.nanoseconds(jumpDuration))
-        guard !Task.isCancelled else { return }
-
-        let hold = Double.random(
-            in: CharacterConfig.saccadeMinHold...CharacterConfig.saccadeMaxHold
-        )
-        try? await Task.sleep(nanoseconds: Self.nanoseconds(hold))
-        guard !Task.isCancelled else { return }
-
-        let returnDuration = CharacterConfig.saccadeReturnDuration * speedMultiplier
-        withAnimation(.easeInOut(duration: returnDuration)) {
-            pupilOffset = restOffset
-        }
-        try? await Task.sleep(nanoseconds: Self.nanoseconds(returnDuration))
+    /// Насколько прищурен конкретный глаз в цикле «думает».
+    func thinkingSquint(isRight: Bool) -> CGFloat {
+        guard stateMachine.state == .thinking else { return 0 }
+        let active = isRight ? (thinkingPhase == 1) : (thinkingPhase == 0)
+        return active ? 0.22 : 0
     }
 
-    // MARK: - Дыхание
+    // MARK: - Толчок в злости
 
-    /// Бесконечный вдох-выдох через явный цикл `Task`, а не
-    /// `.repeatForever(autoreverses:)`: так весь ритм управляется теми же
-    /// понятными сегментами `withAnimation` + `Task.sleep`, что моргание и
-    /// саккады, и одинаково надёжно подхватывается @Observable-свойством
-    /// вне тела `View`.
-    ///
-    /// Фаза 3: тот же цикл заодно двигает `breathPulse` (для пульсации
-    /// подсветки `.reminding`) и `bobOffsetY` (для "подпрыгивания"
-    /// `.celebrating`) — специально не заводим под них отдельные таймеры.
-    private func startBreathing() {
-        taskBag.replace(.breath, with: Task { [weak self] in
-            while !Task.isCancelled {
-                guard let self else { return }
-                let appearance = self.stateMachine.appearance
-                let rateMultiplier = max(appearance.breathRateMultiplier, 0.05)
-                let half = (CharacterConfig.breathPeriod / 2) / rateMultiplier
-                let amplitude = CharacterConfig.breathAmplitude * appearance.breathAmplitudeMultiplier
-                let bobPeak = -CharacterConfig.bobAmplitude * appearance.bobAmplitudeMultiplier
-
-                withAnimation(.easeInOut(duration: half)) {
-                    self.breathScale = 1 + amplitude
-                    self.breathPulse = 1
-                    self.bobOffsetY = bobPeak
-                }
-                try? await Task.sleep(nanoseconds: Self.nanoseconds(half))
-                guard !Task.isCancelled else { return }
-                withAnimation(.easeInOut(duration: half)) {
-                    self.breathScale = 1
-                    self.breathPulse = 0
-                    self.bobOffsetY = 0
-                }
-                try? await Task.sleep(nanoseconds: Self.nanoseconds(half))
-            }
+    /// Один короткий толчок на 2 pt — часть реакции `.angry` (design.md §12).
+    func performJolt() {
+        guard !reduceMotion else { return }
+        withAnimation(.easeOut(duration: 0.08)) { jolt = -2 }
+        taskBag.replace(.stateReset, with: Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 90_000_000)
+            guard !Task.isCancelled, let self else { return }
+            withAnimation(.easeIn(duration: 0.12)) { self.jolt = 0 }
         })
     }
+}
 
-    // MARK: - Мелкие утилиты
+/// Линейный конгруэнтный генератор: нужен только для воспроизводимого
+/// моргания в скриншотах, криптостойкость здесь ни при чём.
+struct SeededGenerator: RandomNumberGenerator {
+    private var state: UInt64
 
-    private static func nanoseconds(_ seconds: Double) -> UInt64 {
-        UInt64(max(0, seconds) * 1_000_000_000)
+    init(seed: UInt64) {
+        self.state = seed == 0 ? 0x9E3779B97F4A7C15 : seed
     }
 
-    private static func clamp(_ value: CGFloat, to range: ClosedRange<CGFloat>) -> CGFloat {
-        min(max(value, range.lowerBound), range.upperBound)
+    mutating func next() -> UInt64 {
+        state = state &* 6364136223846793005 &+ 1442695040888963407
+        var z = state
+        z = (z ^ (z >> 30)) &* 0xBF58476D1CE4E5B9
+        z = (z ^ (z >> 27)) &* 0x94D049BB133111EB
+        return z ^ (z >> 31)
     }
 }

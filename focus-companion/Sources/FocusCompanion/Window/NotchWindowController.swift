@@ -1,134 +1,264 @@
 import AppKit
 import SwiftUI
 
-/// Управляет жизненным циклом единственной панели-капсулы: создание,
-/// позиционирование над вырезом и переезд между экранами.
-/// `@MainActor` по той же причине, что и у `AppDelegate`: контроллер держит
-/// `CompanionStateMachine` и `HoverDetector` (оба изолированы) и работает с
-/// `NSPanel`, то есть в любом случае обязан жить на главном потоке.
+/// Владелец обоих окон компаньона и точка сборки всех контроллеров.
 @MainActor
 final class NotchWindowController {
 
-    private var panel: NotchPanel?
-
-    /// Экран, за которым сейчас "закреплена" капсула — нужен, чтобы не
-    /// пересоздавать панель при каждом уведомлении, а только при реальном
-    /// переезде.
-    private var currentScreen: NSScreen?
-
-    /// Машина состояний персонажа — Фаза 3. Живёт здесь, а не внутри
-    /// `NotchRootView`, специально: `show()` пересоздаёт панель и вью при
-    /// смене экрана, а текущая эмоция должна это пережить (иначе она
-    /// сбрасывалась бы в `.idle` при каждом подключении/отключении
-    /// монитора). `AppDelegate` обращается сюда напрямую для debug-меню.
     let stateMachine = CompanionStateMachine()
-
-    /// Определитель наведения — тоже персистентен и по той же причине, но
-    /// вдобавок он должен пережить пересоздание панели, чтобы его
-    /// единственный `onExpansionChange` не пришлось перевешивать на новую
-    /// панель при каждом переезде: колбэк ниже всегда обращается к
-    /// `self.panel`, то есть к АКТУАЛЬНОЙ панели на момент срабатывания.
-    private let hoverDetector = HoverDetector()
-
-    /// Хранилище задач — Фаза 4а. Живёт здесь по той же причине, что и
-    /// `stateMachine`/`hoverDetector`: не должно пересоздаваться при переезде
-    /// панели между экранами: перечитывать файл задач на каждый чих экрана
-    /// незачем.
     let taskPanel: TaskPanelController
+    let navigation = NavigationController()
+    let recordings = RecordingsController()
+    let clipboard = ClipboardService()
+    let eyes: EyesViewModel
+
+    private let hoverDetector = HoverDetector()
+    private var topPanel: NotchPanel?
+    private var drawerPanel: DrawerPanel?
+    private var currentScreen: NSScreen?
+    private var topHostingView: GestureHostingView<CompanionRootView>?
+    private var drawerHostingView: GestureHostingView<DrawerRootView>?
 
     init() {
         let store = TaskStore()
-        self.taskPanel = TaskPanelController(store: store, stateMachine: stateMachine)
+        let machine = stateMachine
+        self.taskPanel = TaskPanelController(store: store, stateMachine: machine)
+        self.eyes = EyesViewModel(stateMachine: machine)
 
-        hoverDetector.onExpansionChange = { [weak self] expanded in
-            // Раскрыто → панель обязана перехватывать мышь (чекбоксы и поле
-            // ввода задач, Фаза 4а); свёрнуто → снова пропускать клики
-            // насквозь, чтобы меню-бар под капсулой оставался кликабельным
-            // (критерий приёмки Фазы 1).
-            self?.panel?.ignoresMouseEvents = !expanded
-            self?.panel?.allowsKeyWhenExpanded = expanded
+        if CompanionSettings.demoMode {
+            clipboard.loadDemoItems(DemoFixtures.clipboardItems)
+        }
 
-            if !expanded {
-                // Сворачивание обязано забрать фокус обратно: если в этот
-                // момент шёл ввод текста, панель могла быть key-окном
-                // (`becomesKeyOnlyIfNeeded`, см. NotchPanel) — отдаём
-                // клавиатурный фокус явно, не полагаясь на то, что просто
-                // выключенный `canBecomeKey` сам по себе тут же снимет
-                // key-статус с уже key-окна.
-                self?.panel?.resignKey()
-                self?.panel?.makeFirstResponder(nil)
+        wireHoverDetector()
+        wireNavigation()
+    }
+
+    // MARK: - Связывание
+
+    private func wireHoverDetector() {
+        hoverDetector.currentStateProvider = { [weak self] in
+            guard let self else { return (taskCount: 0, isFocusOpen: false, isRecording: false) }
+            return (
+                taskCount: self.taskPanel.store.activeTasks.count,
+                isFocusOpen: self.navigation.isFocusOpen,
+                isRecording: self.recordings.captureState.isRecording
+            )
+        }
+        hoverDetector.onOpenFocus = { [weak self] in
+            guard let self else { return }
+            // Случайное наведение на глаза не имеет права переключить
+            // пользователя с записей обратно на фокус.
+            guard !self.navigation.isDrawerOpen else { return }
+            withAnimation(DesignTokens.Motion.respectful(
+                DesignTokens.Motion.focusExpand,
+                reduceMotion: self.stateMachine.reduceMotion
+            )) {
+                self.navigation.openFocusHover()
+            }
+        }
+        hoverDetector.onCloseFocus = { [weak self] in
+            guard let self else { return }
+            withAnimation(DesignTokens.Motion.respectful(
+                DesignTokens.Motion.focusCollapse,
+                reduceMotion: self.stateMachine.reduceMotion
+            )) {
+                self.navigation.closeFocusHover()
+            }
+        }
+        hoverDetector.onMouseLocation = { [weak self] location in
+            guard let self, let geometry = self.hoverDetector.geometry else { return }
+            self.eyes.updateGaze(mouse: location, wing: geometry.wingRect)
+        }
+        hoverDetector.onWantsMouseEventsChange = { [weak self] wants in
+            guard let self else { return }
+            self.topPanel?.ignoresMouseEvents = !wants
+            let allowsKey = wants && self.navigation.isFocusOpen
+            self.topPanel?.allowsKeyWhenExpanded = allowsKey
+            if !allowsKey {
+                self.topPanel?.resignKey()
+                self.topPanel?.makeFirstResponder(nil)
             }
         }
     }
 
-    /// Действительно ли панель существует и показана — для отладочного вывода.
-    var isPanelVisible: Bool { panel?.isVisible ?? false }
+    private func wireNavigation() {
+        navigation.onPresentationChange = { [weak self] presentation in
+            guard let self else { return }
+            self.syncDrawer(for: presentation)
+            self.reposition()
+        }
+    }
 
-    /// Пропускает ли панель клики насквозь — для отладочного вывода.
-    var panelIgnoresMouseEvents: Bool? { panel?.ignoresMouseEvents }
+    // MARK: - Верхнее окно
 
-    /// Создаёт и показывает панель на переданном экране (или на экране с
-    /// курсором мыши, если экран не передан).
+    var isPanelVisible: Bool { topPanel?.isVisible ?? false }
+    var panelIgnoresMouseEvents: Bool? { topPanel?.ignoresMouseEvents }
+
     func show(on screen: NSScreen? = nil) {
         let targetScreen = screen ?? NSScreen.screenWithMouse ?? NSScreen.main
+        guard let targetScreen else { return }
 
-        guard let targetScreen else {
-            // Теоретически недостижимо (macOS всегда сообщает хотя бы один
-            // экран), но на всякий случай не падаем.
-            return
+        topPanel?.close()
+
+        let geometry = currentGeometry(for: targetScreen)
+        let panel = NotchPanel(contentRect: geometry.topWindowRect)
+        let hosting = GestureHostingView(rootView: CompanionRootView(
+            stateMachine: stateMachine,
+            hoverDetector: hoverDetector,
+            taskPanel: taskPanel,
+            navigation: navigation,
+            recordings: recordings,
+            eyes: eyes
+        ))
+        // Жест считается «внутри компаньона», если начался в крыле, на полке
+        // или в раскрытой панели фокуса — не где угодно по экрану.
+        hosting.isGestureAllowed = { [weak self] point in
+            guard let self, let geometry = self.hoverDetector.geometry else { return false }
+            if geometry.wingRect.contains(point) { return true }
+            if self.navigation.isFocusOpen, geometry.focusRect.contains(point) { return true }
+            if let shelf = geometry.shelfRect, shelf.contains(point) { return true }
+            return false
         }
-
-        if let panel {
-            panel.close()
+        hosting.swipeRecognizer.onSwipe = { [weak self] direction in
+            self?.handleSwipe(direction)
         }
+        panel.contentView = hosting
+        panel.ignoresMouseEvents = !hoverDetector.wantsMouseEvents
+        panel.orderFrontRegardless()
 
-        let frame = targetScreen.capsulePanelFrame
-        let newPanel = NotchPanel(contentRect: frame)
-        newPanel.contentView = NSHostingView(
-            rootView: NotchRootView(
-                stateMachine: stateMachine,
-                hoverDetector: hoverDetector,
-                taskPanel: taskPanel
-            )
-        )
-
-        // Повторно после contentView: NSHostingView добавляет свои tracking-области,
-        // и порядок важнее любых настроек содержимого. Значение — по текущему
-        // состоянию раскрытия, а не жёстко true: `hoverDetector` персистентен и
-        // мог быть раскрыт уже до переезда панели на другой экран.
-        newPanel.ignoresMouseEvents = !hoverDetector.isExpanded
-        newPanel.allowsKeyWhenExpanded = hoverDetector.isExpanded
-
-        // orderFrontRegardless(), а не makeKeyAndOrderFront(_:) — панель не
-        // должна становиться key-окном и красть фокус у того, с чем работает
-        // пользователь. Раскрытая панель Фазы 4а МОЖЕТ на время стать
-        // key-окном, но только под управлением `allowsKeyWhenExpanded` +
-        // `becomesKeyOnlyIfNeeded` (см. NotchPanel), а не потому, что мы
-        // попросили систему сделать её key прямо здесь.
-        newPanel.orderFrontRegardless()
-
-        panel = newPanel
+        topPanel = panel
+        topHostingView = hosting
         currentScreen = targetScreen
     }
 
-    /// Пересчитывает целевой экран и переезжает, если он изменился.
-    /// Вызывается при смене параметров экранов (подключение/отключение
-    /// монитора, смена разрешения) и может вызываться при перемещении курсора.
+    private func currentGeometry(for screen: NSScreen) -> CompanionGeometry {
+        screen.companionGeometry(
+            activeTaskCount: taskPanel.store.activeTasks.count,
+            isFocusOpen: navigation.isFocusOpen,
+            isRecording: recordings.captureState.isRecording
+        )
+    }
+
     func reposition() {
-        let targetScreen = NSScreen.screenWithMouse ?? NSScreen.main
-
+        let targetScreen = NSScreen.screenWithMouse ?? currentScreen ?? NSScreen.main
         guard let targetScreen else { return }
-
-        if targetScreen !== currentScreen || panel == nil {
+        if targetScreen !== currentScreen || topPanel == nil {
             show(on: targetScreen)
-        } else {
-            // Тот же экран, но его геометрия могла измениться (например,
-            // сменилось разрешение) — просто обновляем фрейм панели.
-            panel?.setFrame(targetScreen.capsulePanelFrame, display: true)
+            return
+        }
+        let geometry = currentGeometry(for: targetScreen)
+        // Окно верхней панели всегда в максимальном размере: анимировать
+        // `setFrame` синхронно со SwiftUI-анимацией — источник рывков.
+        topPanel?.setFrame(geometry.topWindowRect, display: true)
+        if let drawerPanel, drawerPanel.isVisible {
+            drawerPanel.setFrame(geometry.drawerRect, display: true)
         }
     }
 
     func moveToScreen(_ screen: NSScreen) {
         show(on: screen)
+        syncDrawer(for: navigation.presentation)
+    }
+
+    // MARK: - Правая панель
+
+    private func syncDrawer(for presentation: PanelPresentation) {
+        guard presentation.isDrawerOpen else {
+            drawerPanel?.stopWatchingOutsideClicks()
+            drawerPanel?.orderOut(nil)
+            return
+        }
+        guard let screen = currentScreen ?? NSScreen.screenWithMouse ?? NSScreen.main else { return }
+        let geometry = currentGeometry(for: screen)
+
+        if drawerPanel == nil {
+            let panel = DrawerPanel(contentRect: geometry.drawerRect)
+            panel.onOutsideClick = { [weak self] in
+                guard let self, !self.navigation.drawerPinned else { return }
+                self.navigation.closeDrawer()
+            }
+            // Оболочка создаётся ОДИН раз: пересоздание `NSHostingView` при
+            // каждом переключении страницы сбрасывало бы поиск, выделение и
+            // позицию чтения — а их требуется сохранять (design.md §9.1).
+            let hosting = GestureHostingView(rootView: DrawerRootView(
+                navigation: navigation,
+                clipboard: clipboard,
+                recordings: recordings,
+                taskPanel: taskPanel,
+                geometry: geometry
+            ))
+            hosting.isGestureAllowed = { [weak panel] point in
+                guard let panel else { return false }
+                // В drawer жест распознаётся только в навигационной шапке:
+                // списки и выделяемый текст сохраняют свои обычные жесты.
+                let header = NSRect(
+                    x: panel.frame.minX,
+                    y: panel.frame.maxY - 48 - CompanionGeometry.Metrics.drawerPadding,
+                    width: panel.frame.width,
+                    height: 48 + CompanionGeometry.Metrics.drawerPadding
+                )
+                return header.contains(point)
+            }
+            hosting.swipeRecognizer.onSwipe = { [weak self] direction in
+                self?.handleSwipe(direction)
+            }
+            panel.contentView = hosting
+            drawerHostingView = hosting
+            drawerPanel = panel
+        }
+        guard let drawerPanel else { return }
+
+        drawerPanel.setFrame(geometry.drawerRect, display: true)
+        drawerPanel.orderFrontRegardless()
+        if navigation.drawerPinned {
+            drawerPanel.stopWatchingOutsideClicks()
+        } else {
+            drawerPanel.startWatchingOutsideClicks()
+        }
+        // Демонстрационный набор не затираем повторной загрузкой из базы.
+        if navigation.page == .recordings, !recordings.isDemo {
+            recordings.reload()
+        }
+    }
+
+    // MARK: - Жесты
+
+    private func handleSwipe(_ direction: SwipeDirection) {
+        withAnimation(DesignTokens.Motion.respectful(
+            DesignTokens.Motion.pageChange,
+            reduceMotion: stateMachine.reduceMotion
+        )) {
+            navigation.advance(direction)
+        }
+    }
+
+    // MARK: - Фикстуры и демонстрация
+
+    func applyFixture(_ fixture: CompanionFixture) {
+        taskPanel.loadFixture(fixture)
+        switch fixture {
+        case .recordingInProgress:
+            recordings.loadDemo()
+            recordings.performRecordAction()
+            stateMachine.setAmbient(.listening)
+        case .summaryGenerating:
+            recordings.loadDemo()
+            recordings.requestSummary()
+            stateMachine.setAmbient(.thinking)
+        case .processingError:
+            recordings.loadDemo()
+            recordings.select("demo-voice")
+            stateMachine.react(.error)
+        default:
+            stateMachine.setAmbient(.idle)
+        }
+        reposition()
+    }
+
+    func leaveFixture() {
+        taskPanel.leaveFixture()
+        recordings.reload()
+        stateMachine.setAmbient(.idle)
+        reposition()
     }
 }

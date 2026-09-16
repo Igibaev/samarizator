@@ -1,10 +1,5 @@
 import AppKit
 
-/// `@MainActor` на всём классе: делегат напрямую владеет и пользуется
-/// изолированными объектами (`CompanionStateMachine`, `HoverDetector`,
-/// `NotchWindowController`), а весь его жизненный цикл и так протекает на
-/// главном потоке. Без этой пометки каждое обращение к ним — обращение из
-/// nonisolated-контекста, то есть ошибка компиляции.
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
 
@@ -12,20 +7,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Дублирует LSUIElement из Info.plist: гарантирует отсутствие иконки
-        // в Dock и Cmd+Tab даже при запуске голого бинарника без .app-бандла
-        // (например, напрямую из `swift run`).
         NSApp.setActivationPolicy(.accessory)
-
         setUpStatusItem()
-
         windowController.show()
-
+        applyStartupFixtureIfRequested()
         logDiagnostics()
-
-        // У приложения без Dock-иконки и без стандартного меню Cmd+Q не работает
-        // "из коробки" — единственный способ выйти без Activity Monitor это
-        // пункт меню в NSStatusItem, который мы и заводим выше.
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(screenParametersDidChange),
@@ -34,59 +20,84 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        // У нас нет "обычных" окон, закрытие которых должно завершать приложение —
-        // капсула управляется контроллером напрямую, а не системой жизненного
-        // цикла окон.
-        false
-    }
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
     @objc private func screenParametersDidChange() {
-        // Переезжаем за активным дисплеем: экран с курсором мыши в приоритете,
-        // иначе — основной экран. Срабатывает при подключении/отключении
-        // монитора и при смене разрешения.
         windowController.reposition()
     }
 
+    /// FOCUS_FIXTURE=<имя> открывает воспроизводимое состояние сразу при старте.
+    private func applyStartupFixtureIfRequested() {
+        guard let raw = ProcessInfo.processInfo.environment["FOCUS_FIXTURE"],
+              let fixture = CompanionFixture(rawValue: raw) else { return }
+        windowController.applyFixture(fixture)
+    }
+
+    // MARK: - Меню в строке состояния
+
     private func setUpStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-
-        // Текстовый заголовок, а не SF Symbol: символ мог не отрисоваться и дать
-        // кнопку нулевой ширины — то есть невидимый пункт меню-бара. Текст
-        // виден гарантированно. Иконку вернём, когда убедимся, что пункт на месте.
         item.button?.title = "FC"
-        item.button?.toolTip = "Focus Companion"
-
-        // Пункт не должен прятаться под вырез, если в меню-баре много иконок.
+        item.button?.toolTip = "ИИ-компаньон"
         item.behavior = []
         item.isVisible = true
 
         let menu = NSMenu()
-        menu.addItem(makeStateSubmenuItem())
+        menu.addItem(makeMenuItem(title: "Фокус", action: #selector(openFocus)))
+        menu.addItem(makeMenuItem(title: "Буфер", action: #selector(openClipboard)))
+        menu.addItem(makeMenuItem(title: "Записи", action: #selector(openRecordings)))
         menu.addItem(.separator())
-        menu.addItem(
-            withTitle: "Выход",
-            action: #selector(quit),
-            keyEquivalent: "q"
-        )
+        menu.addItem(makeFixtureSubmenuItem())
+        menu.addItem(makeStateSubmenuItem())
+        menu.addItem(makeMenuItem(
+            title: "Вернуться к моим данным",
+            action: #selector(leaveFixture)
+        ))
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "Выход", action: #selector(quit), keyEquivalent: "q")
         item.menu = menu
-
         statusItem = item
     }
 
-    @objc private func quit() {
-        NSApp.terminate(nil)
+    private func makeMenuItem(title: String, action: Selector) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        item.target = self
+        return item
     }
 
-    /// Debug-подменю переключения состояний персонажа — критерий приёмки
-    /// Фазы 3. Текущее состояние отмечено галочкой; выбор пункта переключает
-    /// `CompanionStateMachine` (живёт в `NotchWindowController`, переживает
-    /// переезды между экранами) с анимацией.
-    private func makeStateSubmenuItem() -> NSMenuItem {
-        let parent = NSMenuItem(title: "Состояние (debug)", action: nil, keyEquivalent: "")
-        let submenu = NSMenu()
-        let currentState = windowController.stateMachine.state
+    @objc private func openFocus() { windowController.navigation.show(page: .focus) }
+    @objc private func openClipboard() { windowController.navigation.show(page: .clipboard) }
+    @objc private func openRecordings() { windowController.navigation.show(page: .recordings) }
+    @objc private func leaveFixture() { windowController.leaveFixture() }
+    @objc private func quit() { NSApp.terminate(nil) }
 
+    /// Воспроизводимые состояния для проверки без ожидания реальных сроков.
+    private func makeFixtureSubmenuItem() -> NSMenuItem {
+        let parent = NSMenuItem(title: "Состояния для проверки", action: nil, keyEquivalent: "")
+        let submenu = NSMenu()
+        for fixture in CompanionFixture.allCases {
+            let item = NSMenuItem(
+                title: fixture.displayName,
+                action: #selector(selectFixture(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = fixture.rawValue
+            submenu.addItem(item)
+        }
+        parent.submenu = submenu
+        return parent
+    }
+
+    @objc private func selectFixture(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let fixture = CompanionFixture(rawValue: raw) else { return }
+        windowController.applyFixture(fixture)
+    }
+
+    private func makeStateSubmenuItem() -> NSMenuItem {
+        let parent = NSMenuItem(title: "Эмоция (debug)", action: nil, keyEquivalent: "")
+        let submenu = NSMenu()
         for state in CompanionState.allCases {
             let item = NSMenuItem(
                 title: state.displayName,
@@ -94,63 +105,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 keyEquivalent: ""
             )
             item.target = self
-            item.representedObject = state
-            item.state = (state == currentState) ? .on : .off
+            item.representedObject = state.rawValue
+            item.state = (state == windowController.stateMachine.state) ? .on : .off
             submenu.addItem(item)
         }
-
         parent.submenu = submenu
         return parent
     }
 
     @objc private func selectState(_ sender: NSMenuItem) {
-        guard let state = sender.representedObject as? CompanionState else { return }
+        guard let raw = sender.representedObject as? String,
+              let state = CompanionState(rawValue: raw) else { return }
         windowController.stateMachine.setState(state)
-
-        // NSMenu не обновляет галочки соседних пунктов сам — проходим по
-        // всему подменю и выставляем `.on` только у выбранного.
         sender.menu?.items.forEach { menuItem in
-            let itemState = menuItem.representedObject as? CompanionState
-            menuItem.state = (itemState == state) ? .on : .off
+            menuItem.state = (menuItem.representedObject as? String) == raw ? .on : .off
         }
     }
 
-    /// Отладочный вывод при старте.
-    ///
-    /// Нужен потому, что в обычном режиме работающее приложение внешне
-    /// неотличимо от незапустившегося: капсула чёрная и точно по размеру выреза.
-    /// Видно только при запуске бинарника из терминала.
+    // MARK: - Диагностика при старте
+
+    /// Компаньон внешне почти неотличим от незапустившегося: крыло чёрное и
+    /// точно по высоте выреза. Поэтому метрики печатаются в терминал, а
+    /// FOCUS_DEBUG=1 красит крыло красным.
     private func logDiagnostics() {
-        print("=== Focus Companion ===")
-        print("debug-режим: \(AppearanceConfig.isDebug ? "ВКЛ (капсула красная и вытянута вниз)" : "выкл")")
-        if let button = statusItem?.button {
-            print("иконка в меню-баре: создана, isVisible=\(statusItem?.isVisible ?? false), "
-                  + "ширина кнопки=\(button.frame.width), окно кнопки=\(String(describing: button.window?.frame))")
-        } else {
-            print("иконка в меню-баре: НЕ СОЗДАНА")
-        }
+        print("=== ИИ-компаньон ===")
+        print("debug-режим: \(CharacterConfig.isDebug ? "ВКЛ (крыло красное)" : "выкл")")
+        print("демо-режим: \(CompanionSettings.demoMode ? "ВКЛ" : "выкл")")
         print("панель показана: \(windowController.isPanelVisible ? "да" : "НЕТ")")
-        print("панель пропускает клики (ignoresMouseEvents): \(windowController.panelIgnoresMouseEvents.map(String.init(describing:)) ?? "панели нет")")
-        print("стартовое состояние персонажа: \(windowController.stateMachine.state.displayName)")
+        print("панель пропускает клики: "
+            + (windowController.panelIgnoresMouseEvents.map(String.init(describing:)) ?? "панели нет"))
+        print("записи: \(windowController.recordings.availability.explanation)")
         print("экранов: \(NSScreen.screens.count)")
         for screen in NSScreen.screens {
             print(screen.geometryDescription)
         }
-        // Фаза 2: капсула теперь шире и глубже физического выреза
-        // Габариты свёрнутой капсулы и её посадка относительно выреза —
-        // самые часто крутимые числа, поэтому печатаются при каждом старте.
-        print("свёрнутая капсула: продолжение вправо от выреза "
-              + "\(AppearanceConfig.collapsedExtensionRight)pt, "
-              + "свисание ниже выреза \(AppearanceConfig.capsuleExtraDepth)pt")
-        if let screen = NSScreen.screenWithMouse ?? NSScreen.main {
-            // Фаза 3: окно панели теперь ВСЕГДА в размере раскрытого
-            // состояния (capsulePanelFrame) — печатаем отдельно от размера
-            // самой капсулы в свёрнутом виде (collapsedCapsuleFrame), иначе
-            // цифры легко перепутать при подборе AppearanceConfig.expandedWidth/Height.
-            print("фрейм окна панели (раскрытый размер): \(screen.capsulePanelFrame)")
-            print("фрейм капсулы (свёрнутый размер): \(screen.collapsedCapsuleFrame)")
-        }
-        print("=======================")
+        print("фикстуры: FOCUS_FIXTURE=" + CompanionFixture.allCases.map(\.rawValue).joined(separator: "|"))
+        print("====================")
         fflush(stdout)
     }
 }

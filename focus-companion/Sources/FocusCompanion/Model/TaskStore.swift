@@ -1,123 +1,207 @@
 import Foundation
 import Observation
 
-/// Хранилище задач — Фаза 4а: три активных слота, чекбокс выполнения,
-/// лёгкая ретенция выполненных. Фаза 4б добавляет фитиль: поджиг/гашение и
-/// уборку догоревших задач.
+/// Хранилище трёх слотов фокуса и истории.
 ///
-/// Держит все задачи одним массивом в памяти и целиком пишет его в JSON при
-/// каждом изменении. Для трёх активных задач это заведомо дешевле, чем любая
-/// база, и не требует ни схемы, ни миграций.
+/// Жёсткое правило: активных задач не больше трёх, скрытого четвёртого слота
+/// нет (design.md §2). История — отдельный архив, а не четвёртая задача.
 @MainActor
 @Observable
 final class TaskStore {
 
-    /// Правило трёх слотов — прямое требование ТЗ.
     static let maxActiveSlots = 3
+    /// Сколько завершённых/сгоревших записей держим в истории.
+    private static let maxHistoryKept = 100
 
-    /// Сколько последних выполненных задач держать, чтобы список не копился
-    /// бесконечно. Это простая уборка, а НЕ механика «сжигания» (та — Фаза
-    /// 4б, у активных задач и с другим смыслом: осознанное отпускание).
-    private static let maxCompletedKept = 8
+    private(set) var tasks: [CompanionTask]
 
-    private var tasks: [CompanionTask]
-
+    /// Активные задачи в закреплённом пользователем порядке.
     var activeTasks: [CompanionTask] {
-        tasks.filter { !$0.isDone }.sorted { $0.createdAt < $1.createdAt }
+        tasks.filter { $0.status == .active }.sorted { $0.order < $1.order }
     }
 
-    var completedTasks: [CompanionTask] {
-        tasks.filter(\.isDone).sorted { $0.createdAt > $1.createdAt }
+    /// История: выполненные, сгоревшие и убранные — новые сверху.
+    var history: [CompanionTask] {
+        tasks
+            .filter { $0.status != .active }
+            .sorted { lhs, rhs in
+                (lhs.completedAt ?? lhs.expiredAt ?? lhs.expiresAt)
+                    > (rhs.completedAt ?? rhs.expiredAt ?? rhs.expiresAt)
+            }
     }
 
-    /// Горит ли фитиль хотя бы у одной задачи — читает `TaskPanelController`,
-    /// чтобы решить фоновое состояние персонажа (`.burning` vs `.idle`,
-    /// Фаза 4б).
-    var hasBurningTasks: Bool {
-        tasks.contains { !$0.isDone && $0.fuseDate != nil }
-    }
+    var freeSlots: Int { max(0, Self.maxActiveSlots - activeTasks.count) }
+    var hasFreeSlot: Bool { freeSlots > 0 }
 
     init(tasks: [CompanionTask] = TaskPersistence.load()) {
         self.tasks = tasks
-        // Обязательный случай из PHASE-4B-PROMPT.md: приложение могло быть
-        // закрыто, пока фитиль горел. Такие задачи отпускаются ЗДЕСЬ, ДО
-        // того как до них доберётся UI или машина состояний — тихо, без
-        // единой эмоции персонажа и без сообщения о пропущенном. Человек
-        // вернулся к компьютеру, а не к отчёту о потерях.
-        releaseBurnedOut(now: Date())
     }
 
-    /// Добавляет задачу. `nil`, если все три слота заняты — вызывающая
-    /// сторона (`TaskPanelController`) отвечает за заботливое сообщение об
-    /// этом в UI, здесь только правило.
-    @discardableResult
-    func add(text: String) -> CompanionTask? {
-        guard activeTasks.count < Self.maxActiveSlots else { return nil }
+    // MARK: - Добавление
 
-        let task = CompanionTask(text: text)
+    /// Добавляет задачу в свободный слот. `nil` — слотов нет.
+    /// Молча вытеснить существующую задачу нельзя (design.md §9.3).
+    @discardableResult
+    func add(title: String, note: String = "", duration: TimeInterval, now: Date = Date()) -> CompanionTask? {
+        guard hasFreeSlot else { return nil }
+        let trimmed = String(title.prefix(CharacterConfig.maxTaskTitleLength))
+        let task = CompanionTask(
+            title: trimmed,
+            note: note,
+            startedAt: now,
+            expiresAt: now.addingTimeInterval(duration),
+            status: .active,
+            order: nextOrder()
+        )
         tasks.append(task)
         persist()
         return task
     }
 
-    func complete(_ task: CompanionTask) {
-        guard let index = tasks.firstIndex(where: { $0.id == task.id }) else { return }
-        tasks[index].isDone = true
-        tasks[index].completedAt = Date()
-        // Выполненная задача не может одновременно ещё и гореть — фитиль
-        // сброшен, чтобы `releaseBurnedOut` её не подобрал по ошибке (она и
-        // так уже отфильтрована через `!isDone`, это просто гигиена данных).
-        tasks[index].fuseDate = nil
-        tasks[index].fuseStartedAt = nil
-        trimCompleted()
-        persist()
+    private func nextOrder() -> Int {
+        (tasks.filter { $0.status == .active }.map(\.order).max() ?? -1) + 1
     }
 
-    // MARK: - Фитиль (Фаза 4б)
+    // MARK: - Жизненный цикл
 
-    /// Поджигает фитиль — задаче назначается момент, когда она уйдёт сама.
-    func igniteFuse(_ task: CompanionTask, duration: TimeInterval) {
-        guard let index = tasks.firstIndex(where: { $0.id == task.id }), !tasks[index].isDone else { return }
-        let now = Date()
-        tasks[index].fuseStartedAt = now
-        tasks[index].fuseDate = now.addingTimeInterval(duration)
-        persist()
+    func complete(_ id: UUID, now: Date = Date()) {
+        mutate(id) { task in
+            task.status = .completed
+            task.completedAt = now
+        }
     }
 
-    /// Гасит фитиль — пользователь передумал отпускать задачу по дороге.
-    /// Необратим только сам финал (задача ушла), не поджиг как таковой —
-    /// прямое требование PHASE-4B-PROMPT.md.
-    func extinguishFuse(_ task: CompanionTask) {
-        guard let index = tasks.firstIndex(where: { $0.id == task.id }) else { return }
-        tasks[index].fuseDate = nil
-        tasks[index].fuseStartedAt = nil
-        persist()
+    /// Пользователь убрал задачу раньше срока — спокойный уход без вины.
+    func archive(_ id: UUID, now: Date = Date()) {
+        mutate(id) { task in
+            task.status = .archived
+            task.completedAt = now
+        }
     }
 
-    /// Убирает задачи, чей фитиль догорел к моменту `now`. Задача при этом
-    /// НЕ становится "выполненной" — она целиком уходит из хранилища, минуя
-    /// `completedTasks`: отпускание не достижение и не должно попадать ни в
-    /// какую статистику (см. HANDOFF.md: "никаких счётчиков отпущенных
-    /// задач"). Возвращает число отпущенных — вызывающая сторона
-    /// (`TaskPanelController`) решает, нужна ли (и какая) реакция персонажа.
+    /// «Перенести на N минут»: обновляет НАЧАЛО интервала и новый срок,
+    /// чтобы линия остатка снова считалась от полной длительности.
+    func reschedule(_ id: UUID, by duration: TimeInterval, now: Date = Date()) {
+        mutate(id) { task in
+            task.startedAt = now
+            task.expiresAt = now.addingTimeInterval(duration)
+            task.lastRemindedAt = nil
+        }
+    }
+
+    func setExpiresAt(_ id: UUID, to date: Date, now: Date = Date()) {
+        mutate(id) { task in
+            task.startedAt = now
+            task.expiresAt = date
+            task.lastRemindedAt = nil
+        }
+    }
+
+    func markReminded(_ id: UUID, at date: Date) {
+        mutate(id) { $0.lastRemindedAt = date }
+    }
+
+    /// Сначала СОХРАНИТЬ статус expired, и только потом играть эффект:
+    /// сбой анимации не должен потерять задачу (design.md §11.2).
+    /// Возвращает задачи, у которых только что вышел срок.
     @discardableResult
-    func releaseBurnedOut(now: Date) -> Int {
-        let burnedOutIDs = tasks
-            .filter { !$0.isDone && ($0.fuseDate.map { $0 <= now } ?? false) }
-            .map(\.id)
-        guard !burnedOutIDs.isEmpty else { return 0 }
-        tasks.removeAll { burnedOutIDs.contains($0.id) }
+    func expireOverdue(now: Date = Date()) -> [CompanionTask] {
+        let overdue = tasks.filter { $0.isExpired(now: now) }
+        guard !overdue.isEmpty else { return [] }
+        for task in overdue {
+            mutate(task.id, persistNow: false) { item in
+                item.status = .expired
+                item.expiredAt = now
+            }
+        }
+        trimHistory()
         persist()
-        return burnedOutIDs.count
+        return overdue.map { task in
+            var copy = task
+            copy.status = .expired
+            copy.expiredAt = now
+            return copy
+        }
     }
 
-    private func trimCompleted() {
-        let stale = completedTasks.dropFirst(Self.maxCompletedKept).map(\.id)
+    // MARK: - Восстановление из истории
+
+    enum RestoreOutcome: Equatable {
+        case restored(CompanionTask)
+        /// Слоты заняты: пользователь должен выбрать, кого заменить.
+        case needsSlot
+        case notFound
+    }
+
+    /// Восстановление требует НОВОГО срока и свободного слота (design.md §11.2).
+    func restore(_ id: UUID, duration: TimeInterval, now: Date = Date()) -> RestoreOutcome {
+        guard tasks.contains(where: { $0.id == id && $0.status != .active }) else { return .notFound }
+        guard hasFreeSlot else { return .needsSlot }
+        // Порядок считаем ДО мутации: `nextOrder()` читает `tasks`, а внутри
+        // `mutate` этот же массив уже занят `inout`-доступом.
+        let order = nextOrder()
+        mutate(id) { task in
+            task.status = .active
+            task.startedAt = now
+            task.expiresAt = now.addingTimeInterval(duration)
+            task.completedAt = nil
+            task.expiredAt = nil
+            task.lastRemindedAt = nil
+            task.order = order
+        }
+        guard let restored = tasks.first(where: { $0.id == id }) else { return .notFound }
+        return .restored(restored)
+    }
+
+    /// Явная замена: указанная активная задача уходит в архив, а из истории
+    /// возвращается выбранная. Четвёртой задачи не появляется.
+    func restore(_ id: UUID, replacing victimID: UUID, duration: TimeInterval, now: Date = Date()) -> RestoreOutcome {
+        archive(victimID, now: now)
+        return restore(id, duration: duration, now: now)
+    }
+
+    func removeFromHistory(_ id: UUID) {
+        tasks.removeAll { $0.id == id && $0.status != .active }
+        persist()
+    }
+
+    // MARK: - Порядок
+
+    func move(_ id: UUID, to index: Int) {
+        var ordered = activeTasks
+        guard let from = ordered.firstIndex(where: { $0.id == id }) else { return }
+        let target = min(max(0, index), ordered.count - 1)
+        let item = ordered.remove(at: from)
+        ordered.insert(item, at: target)
+        for (position, task) in ordered.enumerated() {
+            mutate(task.id, persistNow: false) { $0.order = position }
+        }
+        persist()
+    }
+
+    // MARK: - Служебное
+
+    private func mutate(_ id: UUID, persistNow: Bool = true, _ body: (inout CompanionTask) -> Void) {
+        guard let index = tasks.firstIndex(where: { $0.id == id }) else { return }
+        body(&tasks[index])
+        if persistNow {
+            trimHistory()
+            persist()
+        }
+    }
+
+    private func trimHistory() {
+        let stale = history.dropFirst(Self.maxHistoryKept).map(\.id)
         guard !stale.isEmpty else { return }
         tasks.removeAll { stale.contains($0.id) }
     }
 
     private func persist() {
         TaskPersistence.save(tasks)
+    }
+
+    /// Для фикстур и debug-меню: заменить содержимое целиком, не трогая диск.
+    func replaceForFixture(_ newTasks: [CompanionTask]) {
+        tasks = newTasks
     }
 }

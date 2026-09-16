@@ -1,23 +1,7 @@
 import Foundation
 import Observation
 
-/// Связывает данные (`TaskStore`) с реакциями персонажа
-/// (`CompanionStateMachine`) — Фаза 4а, механика фитиля — Фаза 4б.
-///
-/// Отдельный класс, а не логика прямо в `ExpandedPanelView`: реакция на
-/// выполнение задачи держится несколько секунд и должна САМА вернуться в
-/// фоновое состояние по таймеру — а таймер обязан быть отменяемым и не
-/// зависеть от жизненного цикла SwiftUI-вью, которая пересоздаётся при
-/// переезде панели между экранами (тот же принцип, что у
-/// `EyesViewModel`/`TaskBag`, см. HANDOFF.md). Фаза 4б добавляет второй
-/// такой же отменяемый таймер — общий тик горения всех фитилей разом. Фаза
-/// 4в добавляет третий — опрос детектора бездействия (`IdleTimeProvider`)
-/// для напоминаний, переиспользующий `.reminding` и уже существующий
-/// `scheduleReturnToRestingState`, а не заводящий параллельную механику
-/// возврата в фон.
-///
-/// Живёт в `NotchWindowController` рядом со `stateMachine` — персистентно,
-/// не в `@State` вью.
+/// Логика панели фокуса: три слота, сроки, напоминания, утилизация, история.
 @MainActor
 @Observable
 final class TaskPanelController {
@@ -26,32 +10,44 @@ final class TaskPanelController {
     private let stateMachine: CompanionStateMachine
     private let taskBag = TaskBag()
 
-    /// Заботливое сообщение о занятых трёх слотах — НЕ ошибка и не выговор
-    /// (см. HANDOFF.md, раздел «Тон персонажа»).
-    private(set) var slotsFullMessage: String?
-
-    // MARK: - Напоминания (Фаза 4в)
-
-    /// Был ли на ПРЕДЫДУЩЕМ тике детектора бездействия зафиксирован простой
-    /// не короче `CharacterConfig.reminderIdleThreshold`. Хранится между
-    /// тиками, чтобы ловить не сам факт "сейчас бездействие", а ДВА
-    /// конкретных момента перехода — см. `tickReminder`.
-    private var wasIdleBeyondThreshold = false
-
-    /// Момент последнего показанного напоминания — обязательный кулдаун
-    /// (`CharacterConfig.reminderCooldown`), прямое требование
-    /// PHASE-4C-PROMPT.md.
-    private var lastReminderAt: Date?
-
-    /// Текущий момент, обновляется общим таймером горения раз в секунду
-    /// (`startBurnTicker`). Единственная причина, по которой
-    /// `ExpandedPanelView` вообще перерисовывается каждую секунду, пока
-    /// что-то горит: полоска остатка фитиля не хранит готовое число, а
-    /// считает долю на лету от `now` и `CompanionTask.fuseDate/fuseStartedAt`
-    /// (`remainingFuseFraction`).
+    /// Текущее время, которым считаются остатки. Обновляется тиком раз в
+    /// секунду — так линия срока не требует непрерывной перерисовки.
     private(set) var now: Date = Date()
 
-    enum AddOutcome {
+    /// Сообщение «слоты заняты» и связанный с ним выбор замены.
+    private(set) var slotsFullMessage: String?
+
+    /// Задача, которая только что сгорела, и окно «Вернуть» на 8 секунд.
+    private(set) var recentlyExpired: CompanionTask?
+    /// Эффект, который сейчас играется. `nil` — ничего не играется.
+    private(set) var runningDisposal: (taskID: UUID, effect: DisposalEffect)?
+
+    /// Подпись напоминания, живёт 4 секунды.
+    private(set) var reminderCaption: String?
+
+    /// Одно спокойное уведомление после сна: «Пока вас не было, истёк срок N задач».
+    private(set) var catchUpMessage: String?
+
+    /// Замена при восстановлении из истории: какую задачу возвращаем.
+    var pendingRestoreID: UUID?
+
+    var mood: CharacterMood = CompanionSettings.mood {
+        didSet { CompanionSettings.mood = mood }
+    }
+
+    var preferredDisposal: DisposalEffect = CompanionSettings.disposalEffect {
+        didSet { CompanionSettings.disposalEffect = preferredDisposal }
+    }
+
+    var reduceMotion = false
+
+    /// Сколько напоминаний уже было показано — для лимита в режиме «Чаще».
+    private var reminderTimestamps: [Date] = []
+    private var lastNoticeableReminder: Date?
+    /// Фикстура заморозила данные: не трогаем диск и не гасим задачи по сроку.
+    private(set) var isFixtureActive = false
+
+    enum AddOutcome: Equatable {
         case added
         case slotsFull
         case empty
@@ -60,236 +56,278 @@ final class TaskPanelController {
     init(store: TaskStore, stateMachine: CompanionStateMachine) {
         self.store = store
         self.stateMachine = stateMachine
-        // На случай, если при запуске что-то ЕЩЁ горит (не догорело, просто
-        // приложение открыли заново) — фоновое состояние должно это сразу
-        // отражать. Задачи, чей фитиль уже истёк, к этому моменту тихо
-        // отпущены внутри `TaskStore.init`, так что здесь никакого всплеска
-        // эмоций не будет — только ровный переход в уже идущее горение.
-        syncAmbientState()
-        startBurnTicker()
+        catchUpAfterSleep()
+        startDeadlineTicker()
         startReminderTicker()
     }
 
-    /// Добавляет задачу и включает короткую заметную реакцию персонажа.
-    @discardableResult
-    func addTask(text: String) -> AddOutcome {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return .empty }
+    deinit { taskBag.cancelAll() }
 
-        guard store.add(text: trimmed) != nil else {
-            slotsFullMessage = "Трёх задач хватит — давай сначала разберёмся с этими."
+    // MARK: - Добавление и правка
+
+    @discardableResult
+    func addTask(title: String, note: String = "", minutes: Int = CharacterConfig.defaultDeadlineMinutes) -> AddOutcome {
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return .empty }
+        guard store.add(title: trimmed, note: note, duration: Double(minutes) * 60) != nil else {
+            slotsFullMessage = "Три дела уже в фокусе. Освободите слот, чтобы добавить новое."
             return .slotsFull
         }
-
         slotsFullMessage = nil
-        briefReaction()
         return .added
     }
 
-    /// Отмечает задачу выполненной и включает позитивную реакцию —
-    /// `.celebrating` держится заметно дольше и ярче, чем реакция на
-    /// добавление: позитив должен быть громче негатива, прямое требование
-    /// автора (см. HANDOFF.md).
+    /// Единственное базовое подтверждение выполнения — нажатие пользователя.
+    /// Сам компаньон задачу выполненной не отмечает.
     func complete(_ task: CompanionTask) {
-        store.complete(task)
-        slotsFullMessage = nil // слот освободился — сообщение больше не актуально
-        stateMachine.setState(.celebrating)
-        scheduleReturnToRestingState(after: CharacterConfig.taskCompletedCelebrationDuration)
+        store.complete(task.id)
+        slotsFullMessage = nil
+        stateMachine.react(.happy)
     }
 
-    // MARK: - Фитиль (Фаза 4б)
-
-    /// Поджигает фитиль на выбранный пресет длительности. Вызывается только
-    /// из явного выбора пункта меню в `ExpandedPanelView` — см. `FusePreset`
-    /// и комментарий там про то, почему это не одиночный клик.
-    func igniteFuse(_ task: CompanionTask, preset: FusePreset) {
-        store.igniteFuse(task, duration: preset.duration(from: Date()))
-        syncAmbientState()
+    func archive(_ task: CompanionTask) {
+        // Спокойный уход в историю, без наказательной эмоции.
+        store.archive(task.id)
+        slotsFullMessage = nil
     }
 
-    /// Гасит фитиль — пользователь передумал отпускать задачу по дороге.
-    /// Тот же жест (нажатие на иконку фитиля), что и поджиг, но без меню:
-    /// передумать проще, чем решиться, и это сознательно НЕ требует
-    /// подтверждения (необратим только финал, не сам поджиг).
-    func extinguishFuse(_ task: CompanionTask) {
-        store.extinguishFuse(task)
-        syncAmbientState()
+    /// «Перенести на N минут» — видимое действие, а не скрытая правка.
+    func reschedule(_ task: CompanionTask, byMinutes minutes: Int) {
+        store.reschedule(task.id, by: Double(minutes) * 60)
     }
 
-    /// Доля оставшегося фитиля (0 — почти догорел, 1 — только подожгли) для
-    /// полоски прогресса в строке задачи. `nil`, если фитиль не горит.
-    func remainingFuseFraction(for task: CompanionTask) -> Double? {
-        guard let fuseDate = task.fuseDate, let startedAt = task.fuseStartedAt else { return nil }
-        let total = fuseDate.timeIntervalSince(startedAt)
-        guard total > 0 else { return 0 }
-        let remaining = fuseDate.timeIntervalSince(now)
-        return min(1, max(0, remaining / total))
+    func setDeadline(_ task: CompanionTask, to date: Date) {
+        store.setExpiresAt(task.id, to: date)
     }
 
-    /// Общий таймер горения — ОДИН на все горящие задачи разом, не по
-    /// таймеру на задачу (прямое требование PHASE-4B-PROMPT.md). Живёт в
-    /// `TaskBag`, а не в обычном `Task`-свойстве, по той же причине, что и
-    /// циклы `EyesViewModel`: `deinit` `@MainActor`-класса не видит
-    /// изолированные свойства (см. HANDOFF.md, «Грабли», п.2).
-    private func startBurnTicker() {
-        taskBag.replace(.burnTicker, with: Task { [weak self] in
+    func move(_ task: CompanionTask, to index: Int) {
+        store.move(task.id, to: index)
+    }
+
+    // MARK: - История и восстановление
+
+    /// Восстановление требует нового срока и свободного слота.
+    @discardableResult
+    func restore(_ task: CompanionTask, minutes: Int = CharacterConfig.defaultDeadlineMinutes) -> TaskStore.RestoreOutcome {
+        let outcome = store.restore(task.id, duration: Double(minutes) * 60)
+        if case .needsSlot = outcome {
+            pendingRestoreID = task.id
+            slotsFullMessage = "Все три слота заняты. Выберите, какую задачу заменить."
+        }
+        if case .restored = outcome {
+            pendingRestoreID = nil
+            slotsFullMessage = nil
+            recentlyExpired = nil
+        }
+        return outcome
+    }
+
+    @discardableResult
+    func restore(_ task: CompanionTask, replacing victim: CompanionTask, minutes: Int = CharacterConfig.defaultDeadlineMinutes) -> TaskStore.RestoreOutcome {
+        let outcome = store.restore(task.id, replacing: victim.id, duration: Double(minutes) * 60)
+        pendingRestoreID = nil
+        slotsFullMessage = nil
+        return outcome
+    }
+
+    func dismissRestorePrompt() {
+        pendingRestoreID = nil
+        slotsFullMessage = nil
+    }
+
+    // MARK: - Сроки и утилизация
+
+    private func startDeadlineTicker() {
+        taskBag.replace(.deadlineTicker, with: Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: UInt64(CharacterConfig.burnTickInterval * 1_000_000_000))
+                try? await Task.sleep(nanoseconds: UInt64(CharacterConfig.deadlineTickInterval * 1_000_000_000))
                 guard !Task.isCancelled, let self else { return }
-                self.handleBurnTick()
+                self.tickDeadlines(now: Date())
             }
         })
     }
 
-    private func handleBurnTick() {
-        now = Date()
-        let releasedCount = store.releaseBurnedOut(now: now)
-        if releasedCount > 0 {
-            // Слот(ы) освободились — заботливое сообщение о трёх занятых
-            // больше не актуально, как и при обычном выполнении задачи.
-            slotsFullMessage = nil
+    /// Один шаг проверки сроков. Сначала СОХРАНЯЕТСЯ статус, потом играется
+    /// эффект: сбой анимации не имеет права потерять задачу.
+    func tickDeadlines(now moment: Date) {
+        now = moment
+        guard !isFixtureActive else { return }
+        let expired = store.expireOverdue(now: moment)
+        guard !expired.isEmpty else { return }
+        slotsFullMessage = nil
+        // Одновременно истёкшие задачи меняют статус вместе, но эффект —
+        // ОДИН эпизод до 1.6 с, а не три наказания подряд.
+        playDisposal(for: expired)
+    }
+
+    /// Запускает ровно один эффект на событие.
+    func playDisposal(for tasks: [CompanionTask]) {
+        guard let first = tasks.first else { return }
+        recentlyExpired = first
+        startUndoWindow()
+
+        guard let effect = mood.effect(preferred: preferredDisposal), !reduceMotion else {
+            // «Без эмоций» и Reduce Motion: обычное изменение статуса.
+            // Кнопка «Вернуть» и запись в истории остаются в обоих случаях.
+            return
         }
-        // Реакция персонажа на догоревший фитиль — СОЗНАТЕЛЬНО без
-        // отдельной анимации-вспышки: не `.celebrating` (это не достижение)
-        // и не что-то мрачное. Задача просто тихо исчезает из списка, а
-        // персонаж оседает в фоновое состояние — `.idle` ("Спокоен") само
-        // по себе и есть та самая спокойная, принимающая реакция, без
-        // всякого назидания. См. отчёт — это решение, не забытая реакция.
-        syncAmbientState()
-    }
-
-    /// Фоновое (не временное, в отличие от `.celebrating`/`.listening`/
-    /// `.reminding`) состояние персонажа: `.burning`, пока горит хотя бы одна
-    /// задача, иначе `.idle`. НЕ перекрывает идущую временную реакцию — та
-    /// сама вернётся сюда по своему таймеру (`scheduleReturnToRestingState`),
-    /// пересчитав то же правило заново в момент срабатывания, а не то,
-    /// каким оно было на момент запуска таймера.
-    ///
-    /// `.reminding` в списке исключений с Фазы 4в: без него `handleBurnTick`
-    /// (тикающий раз в секунду) срывал бы напоминание почти сразу после
-    /// показа — оно должно продержаться свои
-    /// `CharacterConfig.reminderDisplayDuration` секунд целиком.
-    private func syncAmbientState() {
-        guard
-            stateMachine.state != .celebrating,
-            stateMachine.state != .listening,
-            stateMachine.state != .reminding
-        else { return }
-        stateMachine.setState(store.hasBurningTasks ? .burning : .idle)
-    }
-
-    /// Короткая, заметная, но не праздничная реакция на добавление задачи.
-    ///
-    /// Переиспользует состояние `.listening` ("шире раскрытые глаза") как
-    /// самое близкое по смыслу "заметил, внимание" из уже готовой таблицы
-    /// `StateAppearance` — специально не заводили новое состояние ради
-    /// одной короткой реакции. Если Фаза 5 (интеграция с samarizator)
-    /// закрепит за `.listening` буквальный смысл "идёт запись", этот выбор
-    /// стоит пересмотреть — см. отчёт.
-    private func briefReaction() {
-        stateMachine.setState(.listening)
-        scheduleReturnToRestingState(after: CharacterConfig.taskAddedReactionDuration)
-    }
-
-    /// Возврат из временной реакции — не жёстко в `.idle`, а в ТЕКУЩЕЕ
-    /// фоновое состояние на момент срабатывания таймера (Фаза 4б): если
-    /// что-то горит прямо сейчас, персонаж осядет в `.burning`, а не
-    /// мигнёт обратно в `.idle` на долю секунды перед тем, как
-    /// `syncAmbientState` в другом месте снова переключит его. Именно
-    /// поэтому здесь `store.hasBurningTasks`, а не захваченное на момент
-    /// запуска значение.
-    private func scheduleReturnToRestingState(after seconds: Double) {
-        taskBag.replace(.stateReset, with: Task { [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
+        runningDisposal = (taskID: first.id, effect: effect)
+        stateMachine.react(effect.emotion, duration: effect.duration)
+        taskBag.replace(.disposal, with: Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(effect.duration * 1_000_000_000))
             guard !Task.isCancelled, let self else { return }
-            self.stateMachine.setState(self.store.hasBurningTasks ? .burning : .idle)
+            self.runningDisposal = nil
         })
     }
 
-    // MARK: - Напоминания с учётом бездействия (Фаза 4в)
+    private func startUndoWindow() {
+        taskBag.replace(.undoWindow, with: Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(CharacterConfig.undoWindow * 1_000_000_000))
+            guard !Task.isCancelled, let self else { return }
+            self.recentlyExpired = nil
+        })
+    }
 
-    /// Общий (не по задаче) таймер опроса детектора бездействия — та же
-    /// инфраструктура отмены (`TaskBag`), что у `startBurnTicker`, но
-    /// отдельный ключ и заметно реже: `CharacterConfig.reminderTickInterval`
-    /// (30 сек) против `burnTickInterval` (1 сек) — прямой ориентир
-    /// PHASE-4C-PROMPT.md, напоминаниям такая частота не нужна.
+    func dismissExpiredNotice() {
+        recentlyExpired = nil
+        taskBag.cancel(.undoWindow)
+    }
+
+    func dismissCatchUpMessage() {
+        catchUpMessage = nil
+    }
+
+    /// После сна или перезапуска сверяем абсолютные сроки, а не досчитываем
+    /// таймеры: накопившиеся вспышки, слёзы и огонь не воспроизводятся.
+    private func catchUpAfterSleep() {
+        let expired = store.expireOverdue(now: Date())
+        guard !expired.isEmpty else { return }
+        catchUpMessage = "Пока вас не было, истёк срок \(expired.count) "
+            + Self.plural(expired.count, one: "задачи", few: "задач", many: "задач") + "."
+    }
+
+    private static func plural(_ count: Int, one: String, few: String, many: String) -> String {
+        let mod100 = count % 100
+        if (11...14).contains(mod100) { return many }
+        switch count % 10 {
+        case 1: return one
+        case 2, 3, 4: return few
+        default: return many
+        }
+    }
+
+    // MARK: - Напоминания (design.md §11.3)
+
     private func startReminderTicker() {
         taskBag.replace(.reminderTicker, with: Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: UInt64(CharacterConfig.reminderTickInterval * 1_000_000_000))
                 guard !Task.isCancelled, let self else { return }
-                self.tickReminder(now: Date())
+                self.tickReminders(now: Date())
             }
         })
     }
 
-    /// Решает, пора ли напомнить о задачах, и если да — включает
-    /// `.reminding` на `CharacterConfig.reminderDisplayDuration` секунд,
-    /// после чего персонаж сам возвращается в фоновое состояние
-    /// (`scheduleReturnToRestingState`, та же механика, что у
-    /// `.celebrating`/`.listening`).
-    ///
-    /// Момент показа — не голый факт "бездействие превысило порог", а один
-    /// из ДВУХ переходов между тиками (ориентир PHASE-4C-PROMPT.md: «отошёл
-    /// и вернулся или просто залип»):
-    /// - `justStuck` — бездействие ТОЛЬКО ЧТО впервые превысило порог (для
-    ///   случая "залип": сидит и смотрит в экран, не трогая ввод);
-    /// - `justReturned` — на ПРЕДЫДУЩЕМ тике бездействие уже было выше
-    ///   порога, а сейчас — почти ноль: только что было какое-то движение
-    ///   мыши/клавиатуры (для случая "отошёл и вернулся" — момент, когда
-    ///   человек точно смотрит на экран).
-    ///
-    /// Голая проверка "бездействие ⩾ порог" на каждом тике вместо этого не
-    /// подходит: она бы держала право на срабатывание открытым все 30-
-    /// секундные тики подряд, пока человек не шевельнётся, и как только
-    /// кулдаун истечёт где-то посреди долгого отсутствия — напоминание
-    /// покажется в пустоту, пока никто не смотрит.
-    private func tickReminder(now: Date) {
-        // Нет активных задач — молчать всегда, прямое правило
-        // PHASE-4C-PROMPT.md. Латч сбрасываем, чтобы появление первой новой
-        // задачи не унаследовало случайно устаревшее "залипание".
-        guard !store.activeTasks.isEmpty else {
-            wasIdleBeyondThreshold = false
-            return
+    /// Первый тихий сигнал на 50% интервала, второй — за 5 минут до срока.
+    /// Пропущенные сигналы объединяются, а не ставятся в очередь.
+    func tickReminders(now moment: Date) {
+        guard !store.activeTasks.isEmpty else { return }
+        guard !isQuietHour(moment) else { return }
+        guard !isSuppressed else { return }
+
+        let cooldown = CompanionSettings.frequentReminders
+            ? CharacterConfig.reminderFrequentCooldown
+            : CharacterConfig.reminderGlobalCooldown
+        if let last = lastNoticeableReminder, moment.timeIntervalSince(last) < cooldown { return }
+        if CompanionSettings.frequentReminders {
+            reminderTimestamps.removeAll { moment.timeIntervalSince($0) > 3600 }
+            guard reminderTimestamps.count < CharacterConfig.reminderFrequentHourlyLimit else { return }
         }
 
-        let idleSeconds = IdleTimeProvider.secondsSinceLastEvent()
-        let isIdleNow = idleSeconds >= CharacterConfig.reminderIdleThreshold
-        defer { wasIdleBeyondThreshold = isIdleNow }
-
-        let justStuck = isIdleNow && !wasIdleBeyondThreshold
-        let justReturned = !isIdleNow && wasIdleBeyondThreshold
-        guard justStuck || justReturned else { return }
-
-        // Ночная тишина — переход как таковой мы всё равно зафиксировали
-        // (через `defer` выше), просто не показываем напоминание, чтобы
-        // утром не выстрелить мгновенно на первом же движении мыши без
-        // нового захода за порог.
-        guard !isQuietHour(now) else { return }
-
-        // Не встревать поверх уже идущей другой временной реакции
-        // (`.celebrating`/`.listening`) — напоминание не должно её обрывать.
-        guard stateMachine.state == .idle || stateMachine.state == .burning else { return }
-
-        if let lastReminderAt, now.timeIntervalSince(lastReminderAt) < CharacterConfig.reminderCooldown {
-            return
-        }
-
-        lastReminderAt = now
-        stateMachine.setState(.reminding)
-        scheduleReturnToRestingState(after: CharacterConfig.reminderDisplayDuration)
+        guard let (task, index, text) = dueReminder(now: moment) else { return }
+        lastNoticeableReminder = moment
+        reminderTimestamps.append(moment)
+        store.markReminded(task.id, at: moment)
+        reminderCaption = text
+        // Взгляд вниз к нужной строке — по её позиции в полке.
+        stateMachine.react(
+            .reminder,
+            gazeOffset: CGSize(width: 0, height: 2 + CGFloat(index)),
+            duration: CharacterConfig.reminderDuration
+        )
+        taskBag.replace(.reminderCaption, with: Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(CharacterConfig.reminderCaptionDuration * 1_000_000_000))
+            guard !Task.isCancelled, let self else { return }
+            self.reminderCaption = nil
+        })
     }
 
-    /// Ночная тишина (`CharacterConfig.reminderQuietHourStart/End`),
-    /// с оборачиванием через полночь: интервал 23:00-08:00 значит
-    /// `start > end`, и час либо не меньше начала, либо меньше конца.
+    /// Ищет задачу, которой пора напомнить. Возвращает её, номер строки и текст.
+    private func dueReminder(now moment: Date) -> (CompanionTask, Int, String)? {
+        for (index, task) in store.activeTasks.enumerated() {
+            let total = task.expiresAt.timeIntervalSince(task.startedAt)
+            let remaining = task.remainingSeconds(now: moment)
+            guard remaining > 0 else { continue }
+
+            let secondDue = remaining <= CharacterConfig.reminderSecondLeadTime
+            let firstDue = total > 0 && remaining <= total * CharacterConfig.reminderFirstFraction
+
+            // Второй сигнал имеет право повториться после первого, поэтому
+            // сравниваем с моментом последнего напоминания именно этой задачи.
+            if secondDue, task.lastRemindedAt.map({ $0 < task.expiresAt.addingTimeInterval(-CharacterConfig.reminderSecondLeadTime) }) ?? true {
+                return (task, index, "До срока 5 минут")
+            }
+            if firstDue, task.lastRemindedAt == nil {
+                return (task, index, "Вернёмся к задаче «\(task.title)»?")
+            }
+        }
+        return nil
+    }
+
+    /// Громкие реакции подавляются в «Не беспокоить», при наборе текста в
+    /// панели и при демонстрации экрана — если состояние достоверно известно.
+    var isSuppressed = false
+
     private func isQuietHour(_ date: Date) -> Bool {
         let hour = Calendar.current.component(.hour, from: date)
         let start = CharacterConfig.reminderQuietHourStart
         let end = CharacterConfig.reminderQuietHourEnd
-        if start > end {
-            return hour >= start || hour < end
-        }
+        if start > end { return hour >= start || hour < end }
         return hour >= start && hour < end
+    }
+
+    /// «Не напоминать 30 минут»: подавляет сигналы, но НЕ меняет срок задачи.
+    func snoozeReminders(minutes: Int = 30) {
+        lastNoticeableReminder = Date().addingTimeInterval(
+            Double(minutes) * 60 - CharacterConfig.reminderGlobalCooldown
+        )
+    }
+
+    // MARK: - Фикстуры
+
+    /// Загружает воспроизводимое состояние: данные замораживаются, диск не
+    /// трогается, реальных сроков ждать не нужно.
+    func loadFixture(_ fixture: CompanionFixture) {
+        isFixtureActive = true
+        now = Date()
+        store.replaceForFixture(fixture.tasks(now: now))
+        recentlyExpired = nil
+        runningDisposal = nil
+        slotsFullMessage = nil
+        reminderCaption = nil
+        catchUpMessage = nil
+        if fixture == .expiredWithUndo {
+            recentlyExpired = store.history.first { $0.status == .expired }
+            if let expired = recentlyExpired {
+                playDisposal(for: [expired])
+            }
+        }
+    }
+
+    /// Возврат к настоящим данным пользователя.
+    func leaveFixture() {
+        isFixtureActive = false
+        store.replaceForFixture(TaskPersistence.load())
+        now = Date()
     }
 }
