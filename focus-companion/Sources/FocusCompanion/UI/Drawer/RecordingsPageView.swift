@@ -334,38 +334,69 @@ struct RecordingsPageView: View {
     @ViewBuilder
     private func transcriptColumn(_ recording: Recording) -> some View {
         if recording.segments.isEmpty {
-            Text(recording.status == .processing
-                ? "Обрабатываю запись…"
-                : "Транскрипт пока пуст.")
+            Text(emptyTranscriptMessage(for: recording))
                 .font(DesignTokens.Typography.transcript())
                 .foregroundStyle(DesignTokens.Palette.textTertiary)
         } else {
-            ScrollView {
-                VStack(alignment: .leading, spacing: DesignTokens.Spacing.xs) {
-                    ForEach(recording.segments) { segment in
-                        HStack(alignment: .top, spacing: DesignTokens.Spacing.xs) {
-                            Text(segment.timecode)
-                                .font(DesignTokens.Typography.meta())
-                                .foregroundStyle(DesignTokens.Palette.textTertiary)
-                                .frame(width: 44, alignment: .leading)
-                            VStack(alignment: .leading, spacing: 1) {
-                                // Метка спикера — только если она реально есть.
-                                if let speaker = segment.speaker {
-                                    Text(speaker)
-                                        .font(DesignTokens.Typography.caption())
-                                        .foregroundStyle(DesignTokens.Palette.textSecondary)
-                                }
-                                Text(segment.text)
-                                    .font(DesignTokens.Typography.transcript())
-                                    .foregroundStyle(segment.uncertain
-                                        ? DesignTokens.Palette.textSecondary
-                                        : DesignTokens.Palette.textPrimary)
-                                    .textSelection(.enabled)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
+            // Значок и текст — одной колонкой: без VStack они разъехались бы
+            // по горизонтали в режиме «Рядом», где родитель — HStack.
+            VStack(alignment: .leading, spacing: DesignTokens.Spacing.xs) {
+                liveTranscriptBadge(for: recording)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: DesignTokens.Spacing.xs) {
+                        ForEach(recording.segments) { segment in
+                            transcriptRow(segment)
                         }
                     }
                 }
+            }
+        }
+    }
+
+    private func transcriptRow(_ segment: TranscriptSegment) -> some View {
+        HStack(alignment: .top, spacing: DesignTokens.Spacing.xs) {
+            Text(segment.timecode)
+                .font(DesignTokens.Typography.meta())
+                .foregroundStyle(DesignTokens.Palette.textTertiary)
+                .frame(width: 44, alignment: .leading)
+            VStack(alignment: .leading, spacing: 1) {
+                // Метка спикера — только если она реально есть.
+                if let speaker = segment.speaker {
+                    Text(speaker)
+                        .font(DesignTokens.Typography.caption())
+                        .foregroundStyle(DesignTokens.Palette.textSecondary)
+                }
+                Text(segment.text)
+                    .font(DesignTokens.Typography.transcript())
+                    .foregroundStyle(segment.uncertain
+                        ? DesignTokens.Palette.textSecondary
+                        : DesignTokens.Palette.textPrimary)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    /// Пустой транскрипт объясняется по-разному: во время записи текст ещё
+    /// только распознаётся, после неё идёт закрывающая обработка.
+    private func emptyTranscriptMessage(for recording: Recording) -> String {
+        if recordings.liveRecordingID == recording.id {
+            return "Идёт запись. Текст появится, как только распознается первый фрагмент."
+        }
+        return recording.status == .processing ? "Обрабатываю запись…" : "Транскрипт пока пуст."
+    }
+
+    /// Пока идёт запись, текст дописывается — это видно, а не додумывается.
+    @ViewBuilder
+    private func liveTranscriptBadge(for recording: Recording) -> some View {
+        if recordings.liveRecordingID == recording.id {
+            HStack(spacing: DesignTokens.Spacing.xxs) {
+                Circle()
+                    .fill(DesignTokens.Palette.accentRecording)
+                    .frame(width: 6, height: 6)
+                Text("Идёт запись — текст дописывается")
+                    .font(DesignTokens.Typography.caption())
+                    .foregroundStyle(DesignTokens.Palette.textSecondary)
             }
         }
     }
@@ -410,9 +441,16 @@ struct RecordingsPageView: View {
                         .foregroundStyle(DesignTokens.Palette.textTertiary)
                 }
                 if summary.isStale {
-                    Text("Появились новые фрагменты — саммари устарело. Обновить.")
-                        .font(DesignTokens.Typography.caption())
-                        .foregroundStyle(DesignTokens.Palette.accentWarning)
+                    HStack(spacing: DesignTokens.Spacing.xs) {
+                        Text("Появились новые фрагменты — саммари устарело.")
+                            .font(DesignTokens.Typography.caption())
+                            .foregroundStyle(DesignTokens.Palette.accentWarning)
+                        Button("Обновить") { recordings.requestSummary() }
+                            .buttonStyle(.plain)
+                            .font(DesignTokens.Typography.caption())
+                            .foregroundStyle(DesignTokens.Palette.accentSelection)
+                            .disabled(!recordings.canSummarize)
+                    }
                 }
                 if !summary.overview.isEmpty {
                     Text(summary.overview)

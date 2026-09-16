@@ -26,6 +26,7 @@ import signal
 import subprocess
 import sys
 import threading
+from datetime import datetime
 from pathlib import Path
 
 from .config import Settings, data_dir
@@ -222,6 +223,31 @@ def _finish_catchup(store, mid, process):
         process.wait()
 
 
+# --- progress -----------------------------------------------------------------
+
+
+def command_progress(args):
+    """Сколько реплик распознано у записи прямо сейчас.
+
+    Компаньон опрашивает это по ходу записи, чтобы показывать живой текст.
+    Отдельная короткая команда, а не чтение базы из Swift напрямую: путь к
+    базе и её схема — дело Samarizator, и знать их снаружи незачем.
+    """
+    store = Store()
+    try:
+        row = store.meeting(args.mid)
+    except ValueError as exc:
+        emit("error", stage="progress", mid=args.mid, message=str(exc))
+        return 1
+    emit(
+        "progress",
+        mid=args.mid,
+        segmentCount=_segment_count(store, args.mid),
+        status=row["status"],
+    )
+    return 0
+
+
 # --- transcribe / summarize -------------------------------------------------
 
 
@@ -237,11 +263,19 @@ def command_transcribe(args):
 
 
 def command_summarize(args):
+    """Сводка по тому тексту, который есть НА ЭТОТ МОМЕНТ.
+
+    Во время записи это снимок: запись продолжается, а сводка подписывается
+    временем, на которое она сделана. Позже появившиеся фрагменты делают её
+    устаревшей — считать это компаньон сможет по числу реплик, которое
+    возвращается здесь же.
+    """
     settings = Settings.load()
     store = Store()
 
     # Материала нет — честно об этом говорим, а не запускаем пустую обработку.
-    if not store.segments(args.mid, limit=1):
+    segments = store.segments(args.mid, limit=1)
+    if not segments:
         emit("error", stage="summary", mid=args.mid, message="У записи ещё нет распознанного текста.")
         return 1
     try:
@@ -250,13 +284,38 @@ def command_summarize(args):
         emit("error", stage="summary", mid=args.mid, message=str(exc))
         return 1
 
-    emit("summarizing", mid=args.mid)
+    before = store.meeting(args.mid)["status"]
+    was_recording = before == "recording"
+    counted = _segment_count(store, args.mid)
+
+    emit("summarizing", mid=args.mid, segmentCount=counted, snapshot=was_recording)
     failure = _run_worker("summary", args.mid, settings.memory_gb)
+
+    # `worker summary` в конце безусловно ставит статус "done". Для снимка во
+    # время записи это ложь: запись продолжается. Возвращаем статус на место —
+    # иначе и компаньон, и сам Samarizator показали бы запись законченной.
+    if was_recording and store.meeting(args.mid)["status"] == "done":
+        store.update(args.mid, status="recording")
+
     if failure:
         emit("error", stage="summary", mid=args.mid, message=failure)
         return 1
-    emit("summarized", mid=args.mid)
+    emit(
+        "summarized",
+        mid=args.mid,
+        segmentCount=counted,
+        snapshot=was_recording,
+        at=datetime.now().astimezone().strftime("%H:%M"),
+    )
     return 0
+
+
+def _segment_count(store, mid):
+    """Сколько реплик распознано сейчас. По росту этого числа видно, что
+    сводка устарела, — и это факт, а не догадка."""
+    with store.connect() as db:
+        row = db.execute("SELECT COUNT(*) AS n FROM segments WHERE meeting=?", (mid,)).fetchone()
+    return int(row["n"]) if row else 0
 
 
 # --- CLI --------------------------------------------------------------------
@@ -277,6 +336,9 @@ def build_parser():
     summarize = commands.add_parser("summarize", help="сделать сводку")
     summarize.add_argument("mid")
 
+    progress = commands.add_parser("progress", help="сколько реплик распознано сейчас")
+    progress.add_argument("mid")
+
     return parser
 
 
@@ -285,6 +347,7 @@ HANDLERS = {
     "record": command_record,
     "transcribe": command_transcribe,
     "summarize": command_summarize,
+    "progress": command_progress,
 }
 
 

@@ -50,6 +50,14 @@ final class RecordingsController {
     /// а запись и сводка живут независимо друг от друга.
     private var captureProcess: CompanionProcess?
     private var summaryProcess: CompanionProcess?
+
+    /// Запись, которая пишется прямо сейчас. Её текст надо перечитывать по
+    /// ходу дела: распознавание идёт параллельно и дописывает базу.
+    private(set) var liveRecordingID: String?
+    private let taskBag = TaskBag()
+    /// Как часто спрашивать, сколько уже распознано. Реплики появляются
+    /// фрагментами по несколько секунд — чаще незачем.
+    private let liveTickInterval: Double = 2.0
     private(set) var recordings: [Recording] = []
     private(set) var selectedID: String?
     private(set) var loadError: String?
@@ -94,6 +102,12 @@ final class RecordingsController {
         reload()
     }
 
+    deinit {
+        // `deinit` у @MainActor-класса выполняется вне актора; `taskBag` —
+        // Sendable-контейнер в `let`-свойстве именно поэтому.
+        taskBag.cancelAll()
+    }
+
     // MARK: - Загрузка
 
     func reload() {
@@ -117,6 +131,7 @@ final class RecordingsController {
             loadError = nil
             if selectedID == nil { selectedID = recordings.first?.id }
             loadSegmentsForSelection()
+            applySnapshots()
             refreshSummaryState()
         } catch {
             recordings = []
@@ -324,8 +339,11 @@ final class RecordingsController {
         switch event.name {
         case "recording":
             // Запись существует в базе с первой секунды — показываем её сразу.
-            if let mid = event.mid { selectedID = mid }
-            reloadRecordingsOnly()
+            if let mid = event.mid {
+                selectedID = mid
+                reloadRecordingsOnly()
+                startLiveRefresh(for: mid)
+            }
         case "stopped":
             captureState = .transcribing
             reloadRecordingsOnly()
@@ -335,13 +353,16 @@ final class RecordingsController {
             reloadRecordingsOnly()
         case "transcribed":
             captureState = .idle
+            stopLiveRefresh()
             reload()
         case "discarded":
             captureState = .idle
+            stopLiveRefresh()
             selectedID = nil
             reload()
         case "error":
             captureState = .error(event.message ?? "Запись прервалась.")
+            stopLiveRefresh()
             reload()
         default:
             break
@@ -357,6 +378,67 @@ final class RecordingsController {
                 : .error("Запись завершилась неожиданно (код \(code)).")
         }
         reload()
+    }
+
+    // MARK: - Живой транскрипт
+
+    /// Пока идёт запись, текст дописывается параллельным распознаванием.
+    /// Показываем его по мере появления, а не после остановки.
+    private func startLiveRefresh(for mid: String) {
+        liveRecordingID = mid
+        taskBag.replace(.livePoll, with: Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: UInt64((self?.liveTickInterval ?? 2) * 1_000_000_000))
+                guard !Task.isCancelled, let self else { return }
+                self.refreshLiveTranscript()
+            }
+        })
+    }
+
+    private func stopLiveRefresh() {
+        taskBag.cancel(.livePoll)
+        liveRecordingID = nil
+    }
+
+    private func refreshLiveTranscript() {
+        guard !isDemo, let mid = liveRecordingID, availability.isAvailable else { return }
+        guard let index = recordings.firstIndex(where: { $0.id == mid }) else {
+            // Записи ещё нет в списке — перечитаем список, она появится.
+            reloadRecordingsOnly()
+            return
+        }
+        guard let segments = try? SamarizatorBridge.loadSegments(recordingID: mid) else { return }
+        guard segments.count != recordings[index].segments.count else { return }
+        recordings[index].segments = segments
+        // Появился текст — сводку уже можно сделать по снимку.
+        if summaryState == .unavailable, !segments.isEmpty {
+            summaryState = .readyToGenerate
+        }
+        applySnapshot(to: index)
+    }
+
+    /// Проставляет подпись снимка и признак устаревания по сохранённому факту.
+    private func applySnapshot(to index: Int) {
+        let recording = recordings[index]
+        guard let snapshot = SummarySnapshotStore.snapshot(for: recording.id) else { return }
+        let stale = snapshot.isStale(currentSegmentCount: recording.segments.count)
+        for format in SummaryFormat.allCases {
+            guard var summary = recordings[index].summaries[format] else { continue }
+            summary.isStale = stale
+            // Подпись «По состоянию на 12:34» — только у снимка во время записи.
+            summary.snapshotLabel = snapshot.duringRecording
+                ? "По состоянию на \(snapshot.at)"
+                : nil
+            recordings[index].summaries[format] = summary
+        }
+        if stale, summaryState == .ready { summaryState = .stale }
+    }
+
+    /// Применяет снимки ко всем записям — после полной перезагрузки списка.
+    private func applySnapshots() {
+        for index in recordings.indices {
+            applySnapshot(to: index)
+        }
     }
 
     // MARK: - Саммаризация
@@ -407,6 +489,16 @@ final class RecordingsController {
         case "summarizing":
             summaryState = .generating
         case "summarized":
+            if let mid = event.mid, let count = Int(event.text("segmentCount") ?? "") {
+                SummarySnapshotStore.save(
+                    SummarySnapshot(
+                        segmentCount: count,
+                        at: event.text("at") ?? "",
+                        duringRecording: event.flag("snapshot")
+                    ),
+                    for: mid
+                )
+            }
             summaryState = .ready
             reload()
         case "error":

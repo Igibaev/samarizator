@@ -20,6 +20,7 @@ final class TaskBag: @unchecked Sendable {
         case disposal
         case undoWindow
         case clipboardPoll
+        case livePoll
         case copyConfirmation
     }
 

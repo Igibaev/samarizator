@@ -319,3 +319,100 @@ def test_signal_handler_requests_stop_and_is_removed_afterwards():
 def test_unknown_command_fails_loudly():
     with pytest.raises(SystemExit):
         companion.main(["nonsense"])
+
+
+# --- снимок сводки во время записи ------------------------------------------
+
+
+def test_summary_during_recording_does_not_mark_the_recording_finished(
+    meeting, capsys, monkeypatch
+):
+    """`worker summary` в конце ставит статус done — для снимка это ложь.
+
+    Запись продолжается, и показать её законченной нельзя ни в компаньоне,
+    ни в самом Samarizator.
+    """
+    store, mid, settings = meeting
+    store.save_chunk(mid, 0, [dict(start=0.0, end=1.0, speaker="", text="привет")])
+    store.update(mid, status="recording")
+    monkeypatch.setattr(companion.Settings, "load", staticmethod(lambda: settings))
+
+    def finish_like_the_worker(*_args, **_kwargs):
+        store.update(mid, status="done")
+        return 0
+
+    monkeypatch.setattr("samarizator.process.supervise", finish_like_the_worker)
+
+    code, out = run(["summarize", mid], capsys)
+
+    assert code == 0
+    assert store.meeting(mid)["status"] == "recording"
+    assert out[-1]["snapshot"] is True
+
+
+def test_finished_recording_keeps_the_done_status(meeting, capsys, monkeypatch):
+    """У законченной записи статус трогать не надо — там done уместен."""
+    store, mid, settings = meeting
+    store.save_chunk(mid, 0, [dict(start=0.0, end=1.0, speaker="", text="привет")])
+    store.update(mid, status="transcribing")
+    monkeypatch.setattr(companion.Settings, "load", staticmethod(lambda: settings))
+
+    def finish_like_the_worker(*_args, **_kwargs):
+        store.update(mid, status="done")
+        return 0
+
+    monkeypatch.setattr("samarizator.process.supervise", finish_like_the_worker)
+
+    code, _ = run(["summarize", mid], capsys)
+
+    assert code == 0
+    assert store.meeting(mid)["status"] == "done"
+
+
+def test_summary_reports_the_segment_count_it_was_made_from(meeting, capsys, monkeypatch):
+    """По росту этого числа компаньон видит, что сводка устарела."""
+    store, mid, settings = meeting
+    store.save_chunk(
+        mid,
+        0,
+        [
+            dict(start=0.0, end=1.0, speaker="", text="первая"),
+            dict(start=1.0, end=2.0, speaker="", text="вторая"),
+        ],
+    )
+    monkeypatch.setattr(companion.Settings, "load", staticmethod(lambda: settings))
+    monkeypatch.setattr("samarizator.process.supervise", lambda *a, **k: 0)
+
+    code, out = run(["summarize", mid], capsys)
+
+    assert code == 0
+    # В JSON это настоящие числа: приводить их к строкам на стороне
+    # протокола незачем, разбор на стороне компаньона сделает это сам.
+    assert out[0]["segmentCount"] == 2
+    assert out[-1]["segmentCount"] == 2
+    # Время снимка выходит наружу, чтобы подписать результат.
+    assert ":" in out[-1]["at"]
+
+
+# --- progress ---------------------------------------------------------------
+
+
+def test_progress_reports_recognised_count_and_status(meeting, capsys):
+    store, mid, _ = meeting
+    store.update(mid, status="recording")
+    store.save_chunk(mid, 0, [dict(start=0.0, end=1.0, speaker="", text="привет")])
+
+    code, out = run(["progress", mid], capsys)
+
+    assert code == 0
+    assert out[0]["event"] == "progress"
+    assert out[0]["segmentCount"] == 1
+    assert out[0]["status"] == "recording"
+
+
+def test_progress_on_a_missing_recording_is_an_error_not_a_zero(meeting, capsys):
+    code, out = run(["progress", "нет-такой-записи"], capsys)
+
+    assert code == 1
+    assert out[-1]["event"] == "error"
+    assert out[-1]["stage"] == "progress"
