@@ -37,11 +37,14 @@ final class NotchWindowController {
 
     private func wireHoverDetector() {
         hoverDetector.currentStateProvider = { [weak self] in
-            guard let self else { return (taskCount: 0, isFocusOpen: false, isRecording: false) }
+            guard let self else {
+                return (taskCount: 0, isFocusOpen: false, isRecording: false, hasNotice: false)
+            }
             return (
                 taskCount: self.taskPanel.store.activeTasks.count,
                 isFocusOpen: self.navigation.isFocusOpen,
-                isRecording: self.recordings.captureState.isRecording
+                isRecording: self.recordings.captureState.isRecording,
+                hasNotice: self.taskPanel.hasCompactNotice
             )
         }
         hoverDetector.onOpenFocus = { [weak self] in
@@ -135,7 +138,8 @@ final class NotchWindowController {
         screen.companionGeometry(
             activeTaskCount: taskPanel.store.activeTasks.count,
             isFocusOpen: navigation.isFocusOpen,
-            isRecording: recordings.captureState.isRecording
+            isRecording: recordings.captureState.isRecording,
+            hasCompactNotice: taskPanel.hasCompactNotice
         )
     }
 

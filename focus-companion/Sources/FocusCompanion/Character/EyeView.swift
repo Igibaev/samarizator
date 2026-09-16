@@ -47,9 +47,11 @@ struct EyeView: View {
                 // Верхнее веко: наклон внутрь читается как нахмуренная бровь.
                 Rectangle()
                     .fill(lidColor)
-                    .frame(height: max(0, height * clampedUpperLid))
+                    // Шире глаза: при наклоне угол иначе срезает само веко,
+                    // и вместо клина получается просто укороченная полоса.
+                    .frame(width: width * 2.6, height: max(0, height * clampedUpperLid))
                     .rotationEffect(.degrees(lidTiltDegrees), anchor: .center)
-                    .offset(y: -height * 0.02)
+                    .offset(y: -height * 0.04)
             }
             .overlay(alignment: .bottom) {
                 Rectangle()
@@ -76,7 +78,7 @@ struct EyeView: View {
     private var tear: some View {
         if showsTear {
             TearShape()
-                .fill(CharacterConfig.eyeColor.opacity(0.45))
+                .fill(CharacterConfig.tearColor.opacity(0.85))
                 .frame(width: width * 0.45, height: width * 0.7)
                 .offset(y: width * 0.9)
                 .allowsHitTesting(false)

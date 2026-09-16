@@ -161,11 +161,47 @@ struct RecordingsPageView: View {
                     errorBlock(error, recording: recording)
                 }
                 readerBody(recording)
+                Spacer(minLength: 0)
+                localityFooter
             }
         } else {
             Text("Спокойное пустое состояние: записей ещё нет.")
                 .font(DesignTokens.Typography.transcript())
                 .foregroundStyle(DesignTokens.Palette.textTertiary)
+        }
+    }
+
+    /// Подвал с меткой обработки. В макете он один и говорит «Локальная
+    /// обработка»; в рабочем продукте так писать можно только про то, что
+    /// действительно считается локально (design.md §10). Распознавание в
+    /// Samarizator локальное, саммаризация — по адресу из настроек.
+    @ViewBuilder
+    private var localityFooter: some View {
+        if recordings.isDemo {
+            EmptyView()
+        } else {
+            HStack(spacing: DesignTokens.Spacing.xs) {
+                Image(systemName: "lock.shield")
+                    .font(.system(size: 11, weight: .regular))
+                    .foregroundStyle(recordings.locality.transcriptIsLocal
+                        ? DesignTokens.Palette.accentSuccess
+                        : DesignTokens.Palette.textTertiary)
+                Text(recordings.locality.transcriptIsLocal
+                    ? "Текст: локальная обработка"
+                    : "Текст: обработка не подтверждена")
+                    .font(DesignTokens.Typography.caption())
+                    .foregroundStyle(DesignTokens.Palette.textTertiary)
+                Text("·")
+                    .font(DesignTokens.Typography.caption())
+                    .foregroundStyle(DesignTokens.Palette.textTertiary)
+                Text("Саммари: " + recordings.locality.summaryLabel)
+                    .font(DesignTokens.Typography.caption())
+                    .foregroundStyle(recordings.locality.summaryIsLocal
+                        ? DesignTokens.Palette.textTertiary
+                        : DesignTokens.Palette.accentWarning)
+                Spacer(minLength: 0)
+            }
+            .padding(.top, DesignTokens.Spacing.xs)
         }
     }
 

@@ -55,12 +55,23 @@ struct CompanionRootView: View {
                 .frame(width: focus.width, height: focus.height)
                 .offset(x: focus.minX, y: focus.minY)
                 .transition(.opacity)
-        } else if let shelfRect = geometry.shelfRect {
-            let shelf = geometry.local(shelfRect, in: window)
-            shelfSurface
-                .frame(width: shelf.width, height: shelf.height)
-                .offset(x: shelf.minX, y: shelf.minY)
-                .transition(.opacity)
+        } else {
+            if let shelfRect = geometry.shelfRect {
+                let shelf = geometry.local(shelfRect, in: window)
+                shelfSurface
+                    .frame(width: shelf.width, height: shelf.height)
+                    .offset(x: shelf.minX, y: shelf.minY)
+                    .transition(.opacity)
+            }
+            // 3. Короткое сообщение под полкой: напоминание и «Вернуть» после
+            //    сгорания обязаны быть видны, пока панель закрыта.
+            if let noticeRect = geometry.compactNoticeRect {
+                let notice = geometry.local(noticeRect, in: window)
+                noticeSurface
+                    .frame(width: notice.width, height: notice.height)
+                    .offset(x: notice.minX, y: notice.minY)
+                    .transition(.opacity)
+            }
         }
     }
 
@@ -110,6 +121,22 @@ struct CompanionRootView: View {
                 )
             }
             .clipShape(ShelfShape(cornerRadius: DesignTokens.Radius.shelf))
+    }
+
+    private var noticeSurface: some View {
+        let shape = RoundedRectangle(
+            cornerRadius: CompanionGeometry.Metrics.noticeHeight / 2,
+            style: .continuous
+        )
+        return shape
+            .fill(DesignTokens.Palette.companionBase)
+            .overlay {
+                CompactNoticeView(taskPanel: taskPanel, reduceMotion: reduceMotion)
+            }
+            .overlay {
+                shape.strokeBorder(DesignTokens.Palette.strokeHairline, lineWidth: 1)
+            }
+            .clipShape(shape)
     }
 
     private var focusSurface: some View {

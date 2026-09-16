@@ -87,3 +87,18 @@ struct ClipboardItem: Identifiable, Equatable {
             || (sourceLabel?.lowercased().contains(needle) ?? false)
     }
 }
+
+
+/// «2 мин назад», «12 мин назад», «вчера» — подпись строки буфера.
+enum RelativeTime {
+    static func label(for date: Date, now: Date = Date()) -> String {
+        let seconds = max(0, now.timeIntervalSince(date))
+        if seconds < 60 { return "только что" }
+        let minutes = Int(seconds / 60)
+        if minutes < 60 { return "\(minutes) мин назад" }
+        let hours = minutes / 60
+        if hours < 24 { return "\(hours) ч назад" }
+        let days = hours / 24
+        return days == 1 ? "вчера" : "\(days) дн назад"
+    }
+}

@@ -34,7 +34,7 @@ final class HoverDetector {
     var onWingHoverChange: ((Bool) -> Void)?
 
     /// Поставщик актуального состояния: сколько задач и раскрыт ли focus.
-    var currentStateProvider: (() -> (taskCount: Int, isFocusOpen: Bool, isRecording: Bool))?
+    var currentStateProvider: (() -> (taskCount: Int, isFocusOpen: Bool, isRecording: Bool, hasNotice: Bool))?
 
     private var openPendingSince: Date?
     private var closePendingSince: Date?
@@ -64,11 +64,13 @@ final class HoverDetector {
     /// можно было прогнать вручную, не дожидаясь реального таймера.
     func tick(now: Date) {
         guard let screen = NSScreen.screenWithMouse ?? NSScreen.main else { return }
-        let state = currentStateProvider?() ?? (taskCount: 0, isFocusOpen: false, isRecording: false)
+        let state = currentStateProvider?()
+            ?? (taskCount: 0, isFocusOpen: false, isRecording: false, hasNotice: false)
         let geometry = screen.companionGeometry(
             activeTaskCount: state.taskCount,
             isFocusOpen: state.isFocusOpen,
-            isRecording: state.isRecording
+            isRecording: state.isRecording,
+            hasCompactNotice: state.hasNotice
         )
         self.geometry = geometry
 
@@ -92,8 +94,14 @@ final class HoverDetector {
         var interactive = geometry.wingRect.contains(location)
         if state.isFocusOpen {
             interactive = interactive || geometry.focusRect.contains(location)
-        } else if let shelf = geometry.shelfRect {
-            interactive = interactive || shelf.contains(location)
+        } else {
+            if let shelf = geometry.shelfRect {
+                interactive = interactive || shelf.contains(location)
+            }
+            // У сообщения есть кнопка «Вернуть» — оно обязано принимать клики.
+            if let notice = geometry.compactNoticeRect {
+                interactive = interactive || notice.contains(location)
+            }
         }
         if interactive != wantsMouseEvents {
             wantsMouseEvents = interactive

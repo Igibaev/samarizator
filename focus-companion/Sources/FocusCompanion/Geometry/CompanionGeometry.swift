@@ -51,6 +51,10 @@ struct CompanionGeometry: Equatable {
 
         /// Самостоятельная капсула на экране без выреза.
         static let standaloneWidth: CGFloat = 164
+
+        /// Полоска короткого сообщения под полкой: «Задача сгорела · Вернуть»
+        /// и подпись напоминания. Ширина — как у полки, чтобы не ломать ось.
+        static let noticeHeight: CGFloat = 28
     }
 
     // MARK: - Вход
@@ -69,6 +73,10 @@ struct CompanionGeometry: Equatable {
     let isFocusOpen: Bool
     /// Идёт ли запись: при записи крыло может вырасти под метку времени.
     let isRecording: Bool
+    /// Показывается ли сейчас короткое сообщение под полкой.
+    /// От этого зависит и нижняя граница компаньона, и область кликов:
+    /// у сообщения есть кнопка «Вернуть», а значит оно обязано принимать нажатия.
+    let hasCompactNotice: Bool
 
     init(
         screenFrame: CGRect,
@@ -77,7 +85,8 @@ struct CompanionGeometry: Equatable {
         menuBarHeight: CGFloat,
         activeTaskCount: Int = 0,
         isFocusOpen: Bool = false,
-        isRecording: Bool = false
+        isRecording: Bool = false,
+        hasCompactNotice: Bool = false
     ) {
         self.screenFrame = screenFrame
         self.visibleFrame = visibleFrame
@@ -86,6 +95,7 @@ struct CompanionGeometry: Equatable {
         self.activeTaskCount = max(0, min(3, activeTaskCount))
         self.isFocusOpen = isFocusOpen
         self.isRecording = isRecording
+        self.hasCompactNotice = hasCompactNotice
     }
 
     // MARK: - Корпус
@@ -171,6 +181,21 @@ struct CompanionGeometry: Equatable {
         )
     }
 
+    /// Полоска сообщения под полкой. `nil` — сообщения нет.
+    ///
+    /// Нужна потому, что и подпись напоминания, и «Задача сгорела · Вернуть»
+    /// обязаны быть видны в КОМПАКТНОМ виде: панели не открываются сами
+    /// (design.md §11.3), а окно возврата живёт всего 8 секунд.
+    var compactNoticeRect: CGRect? {
+        guard hasCompactNotice, !isFocusOpen else { return nil }
+        return CGRect(
+            x: bodyCenterX - Metrics.shelfWidth / 2,
+            y: bodyTop - shelfHeight - Metrics.bodyTopGap - Metrics.noticeHeight,
+            width: Metrics.shelfWidth,
+            height: Metrics.noticeHeight
+        )
+    }
+
     /// Раскрытая панель фокуса.
     var focusRect: CGRect {
         CGRect(
@@ -184,8 +209,10 @@ struct CompanionGeometry: Equatable {
     /// Самая нижняя видимая поверхность компаньона — от неё отсчитывается drawer.
     var companionBottom: CGFloat {
         if isFocusOpen { return min(wingRect.minY, focusRect.minY) }
-        if let shelf = shelfRect { return min(wingRect.minY, shelf.minY) }
-        return wingRect.minY
+        var bottom = wingRect.minY
+        if let shelf = shelfRect { bottom = min(bottom, shelf.minY) }
+        if let notice = compactNoticeRect { bottom = min(bottom, notice.minY) }
+        return bottom
     }
 
     /// Прямоугольник окна верхней панели: объединение крыла и всего,
@@ -246,8 +273,9 @@ struct CompanionGeometry: Equatable {
         var union = wingRect
         if isFocusOpen {
             union = union.union(focusRect)
-        } else if let shelf = shelfRect {
-            union = union.union(shelf)
+        } else {
+            if let shelf = shelfRect { union = union.union(shelf) }
+            if let notice = compactNoticeRect { union = union.union(notice) }
         }
         // Коридор: прямоугольник от нижней границы крыла до верха раскрытой
         // поверхности, по горизонтали — от левого края этой поверхности до

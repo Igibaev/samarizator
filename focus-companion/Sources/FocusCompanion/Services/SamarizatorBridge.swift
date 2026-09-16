@@ -52,6 +52,52 @@ struct SamarizatorBridge {
         return base.appendingPathComponent("meetings.sqlite3")
     }
 
+    /// Где на самом деле выполняется обработка.
+    ///
+    /// Метка «Локальная обработка» в макете описывает целевой режим. Ставить
+    /// её всему подряд нельзя (design.md §10): в Samarizator распознавание
+    /// действительно локальное — whisper.cpp с файлом модели на диске, —
+    /// а саммаризация уходит на OpenAI-совместимый адрес из настроек. Локальной
+    /// она будет, только если этот адрес указывает на localhost.
+    struct ProcessingLocality: Equatable {
+        /// Распознавание речи выполняется на этом компьютере.
+        var transcriptIsLocal = true
+        /// Саммаризация выполняется на этом компьютере.
+        var summaryIsLocal = false
+        /// Хост, на который уходит запрос саммаризации; `nil` — API не настроен.
+        var summaryHost: String?
+
+        var summaryLabel: String {
+            guard let summaryHost else { return "Модель для саммари не настроена" }
+            return summaryIsLocal ? "Локальная обработка" : "Саммари уходит на \(summaryHost)"
+        }
+
+        static let unknown = ProcessingLocality(
+            transcriptIsLocal: true,
+            summaryIsLocal: false,
+            summaryHost: nil
+        )
+    }
+
+    /// Читает `settings.json` Samarizator, чтобы сказать правду о том, что
+    /// обрабатывается локально, а что нет.
+    static func processingLocality() -> ProcessingLocality {
+        let url = databaseURL.deletingLastPathComponent().appendingPathComponent("settings.json")
+        guard let data = try? Data(contentsOf: url),
+              let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let baseURL = root["base_url"] as? String,
+              !baseURL.trimmingCharacters(in: .whitespaces).isEmpty,
+              let host = URL(string: baseURL)?.host else {
+            return .unknown
+        }
+        let isLocal = host == "localhost" || host == "127.0.0.1" || host == "::1"
+        return ProcessingLocality(
+            transcriptIsLocal: true,
+            summaryIsLocal: isLocal,
+            summaryHost: host
+        )
+    }
+
     static func availability() -> Availability {
         let url = databaseURL
         guard FileManager.default.fileExists(atPath: url.path) else {

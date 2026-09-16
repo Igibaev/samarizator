@@ -53,6 +53,10 @@ final class RecordingsController {
     /// Данные взяты из демонстрационного набора design.md §15.
     private(set) var isDemo = false
 
+    /// Что обрабатывается локально, а что уходит наружу. Метка ставится по
+    /// факту, а не по умолчанию.
+    private(set) var locality = SamarizatorBridge.ProcessingLocality.unknown
+
     var selectedRecording: Recording? {
         guard let selectedID else { return recordings.first }
         return recordings.first { $0.id == selectedID } ?? recordings.first
@@ -71,6 +75,7 @@ final class RecordingsController {
         }
         isDemo = false
         availability = SamarizatorBridge.availability()
+        locality = SamarizatorBridge.processingLocality()
         guard availability.isAvailable else {
             recordings = []
             loadError = nil

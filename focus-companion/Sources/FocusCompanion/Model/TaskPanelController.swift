@@ -47,6 +47,14 @@ final class TaskPanelController {
     /// Фикстура заморозила данные: не трогаем диск и не гасим задачи по сроку.
     private(set) var isFixtureActive = false
 
+    /// Есть ли сейчас короткое сообщение для компактной полоски под полкой.
+    var hasCompactNotice: Bool {
+        recentlyExpired != nil
+            || reminderCaption != nil
+            || catchUpMessage != nil
+            || slotsFullMessage != nil
+    }
+
     enum AddOutcome: Equatable {
         case added
         case slotsFull

@@ -49,6 +49,7 @@ SYSTEM_TYPES = {
     "Spacer", "State", "StrokeStyle", "Text", "TextField", "Toggle", "UnitPoint",
     "VStack", "View", "ViewBuilder", "ViewModifier", "ZStack", "AnimatablePair",
     "FocusState", "ButtonStyle", "Button", "Content", "Configuration", "Overlay",
+    "EmptyView", "ButtonStyleConfiguration", "Label", "Link", "Slider",
     # CoreGraphics / SQLite
     "CGEventSource", "CGEventType", "SQLITE_OK", "SQLITE_ROW",
 }

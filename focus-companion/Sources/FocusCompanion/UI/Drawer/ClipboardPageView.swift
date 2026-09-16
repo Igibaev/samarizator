@@ -119,6 +119,13 @@ struct ClipboardPageView: View {
                             // Текстовое превью — максимум три строки.
                             .lineLimit(3)
                             .multilineTextAlignment(.leading)
+                        if item.type == .link, item.linkTitle?.isEmpty == false {
+                            Text(item.contentReference)
+                                .font(DesignTokens.Typography.meta())
+                                .foregroundStyle(DesignTokens.Palette.textSecondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
                         if let subtitle = subtitle(for: item) {
                             Text(subtitle)
                                 .font(DesignTokens.Typography.meta())
@@ -126,10 +133,23 @@ struct ClipboardPageView: View {
                         }
                     }
                     Spacer(minLength: 0)
-                    if item.pinned {
-                        Image(systemName: "pin.fill")
-                            .font(.system(size: 9))
-                            .foregroundStyle(DesignTokens.Palette.accentSelection)
+                    VStack(alignment: .trailing, spacing: DesignTokens.Spacing.xxs) {
+                        if item.pinned {
+                            Image(systemName: "pin.fill")
+                                .font(.system(size: 9))
+                                .foregroundStyle(DesignTokens.Palette.accentSelection)
+                        }
+                        Spacer(minLength: 0)
+                        // Копирование доступно прямо из строки: раскрывать
+                        // деталь ради одного нажатия незачем.
+                        Button(clipboard.lastCopiedID == item.id ? "Скопировано" : "Копировать") {
+                            clipboard.copy(item)
+                        }
+                        .buttonStyle(.plain)
+                        .font(DesignTokens.Typography.caption())
+                        .foregroundStyle(clipboard.lastCopiedID == item.id
+                            ? DesignTokens.Palette.accentSuccess
+                            : DesignTokens.Palette.accentSelection)
                     }
                 }
                 .padding(.vertical, DesignTokens.Spacing.xs)
@@ -151,13 +171,14 @@ struct ClipboardPageView: View {
         }
     }
 
-    /// Источник и время показываются, только если эти сведения реально есть.
+    /// Подпись строки: «2 мин назад · Ссылка».
+    /// Источник добавляется, только если он реально известен — придумывать
+    /// приложение-источник компаньон не станет.
     private func subtitle(for item: ClipboardItem) -> String? {
-        var parts: [String] = []
-        if let domain = item.domain { parts.append(domain) }
+        var parts: [String] = [RelativeTime.label(for: item.capturedAt)]
         if let source = item.sourceLabel { parts.append(source) }
-        parts.append(TimecodeFormatter.clockLabel(for: item.capturedAt))
-        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+        parts.append(item.type.displayName)
+        return parts.joined(separator: " · ")
     }
 
     private func detail(_ item: ClipboardItem) -> some View {

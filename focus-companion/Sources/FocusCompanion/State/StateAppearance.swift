@@ -85,8 +85,8 @@ extension StateAppearance {
             widthMultiplier: 0.88,
             heightMultiplier: 0.78,
             offsetY: 1.5,
-            upperLid: 0.42,
-            lidTiltDegrees: 18,
+            upperLid: 0.46,
+            lidTiltDegrees: 26,
             tracksCursor: false
         ),
 
@@ -94,8 +94,8 @@ extension StateAppearance {
         .sad: StateAppearance(
             heightMultiplier: 0.86,
             offsetY: 1,
-            upperLid: 0.26,
-            lidTiltDegrees: -14,
+            upperLid: 0.28,
+            lidTiltDegrees: -18,
             showsTear: true,
             tracksCursor: false
         ),

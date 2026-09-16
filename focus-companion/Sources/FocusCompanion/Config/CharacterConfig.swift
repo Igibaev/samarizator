@@ -18,6 +18,10 @@ enum CharacterConfig {
 
     static let eyeColor: Color = DesignTokens.Palette.textPrimary
 
+    /// Цвет слезы. Единственное цветное пятно на лице — и это не глаз:
+    /// сами капсулы остаются белыми во всех состояниях (design.md §3).
+    static let tearColor: Color = Color(hex: 0x6CB8FF)
+
     // MARK: - Слежение за курсором (design.md §12)
 
     /// Общий сдвиг пары: до ±3 pt по x и ±2 pt по y.

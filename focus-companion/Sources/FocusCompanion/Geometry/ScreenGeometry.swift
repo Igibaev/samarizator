@@ -45,7 +45,8 @@ extension NSScreen {
     func companionGeometry(
         activeTaskCount: Int,
         isFocusOpen: Bool,
-        isRecording: Bool
+        isRecording: Bool,
+        hasCompactNotice: Bool = false
     ) -> CompanionGeometry {
         CompanionGeometry(
             screenFrame: frame,
@@ -54,7 +55,8 @@ extension NSScreen {
             menuBarHeight: menubarHeight,
             activeTaskCount: activeTaskCount,
             isFocusOpen: isFocusOpen,
-            isRecording: isRecording
+            isRecording: isRecording,
+            hasCompactNotice: hasCompactNotice
         )
     }
 
