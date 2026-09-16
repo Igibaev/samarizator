@@ -18,7 +18,7 @@ struct SamarizatorToolchain: Equatable {
     private static let defaultsKey = "companion.samarizatorRoot"
     private static let environmentKey = "FOCUS_SAMARIZATOR_ROOT"
 
-    enum Failure: Equatable {
+    enum Failure: Error, Equatable {
         /// Папку найти не удалось совсем.
         case notFound
         /// Папка есть, но это не Samarizator.

@@ -11,7 +11,8 @@
   2. ссылки на типы проекта: `Foo.bar` и `Foo(...)` — тип должен быть объявлен;
   3. статические члены конфигов проекта: `DesignTokens.Palette.x`,
      `CharacterConfig.x`, `CompanionGeometry.Metrics.x` и т.п.;
-  4. случаи `CompanionState.<case>` и `TaskBag.Key.<case>`.
+  4. случаи `CompanionState.<case>` и `TaskBag.Key.<case>`;
+  5. тип ошибки в `Result<_, X>` — он обязан соответствовать `Error`.
 
 Это НЕ компилятор: проверка ловит класс ошибок «переименовал и забыл», но
 не заменяет сборку на живой машине.
@@ -233,6 +234,44 @@ def main() -> int:
                 problems.append(
                     f"{path.relative_to(ROOT)}:{line}: у {root} нет члена {member}"
                 )
+
+    # 4. Тип ошибки в Result<_, X> обязан соответствовать Error.
+    #
+    # Компилятор ловит это мгновенно, а здесь ошибка стоила автору целого
+    # круга сборки: Result принимает второй параметр только с Error, и по
+    # самому объявлению enum это никак не видно.
+    # Соответствия собираются ПОФАЙЛОВО. Общая карта по короткому имени
+    # склеивала бы вложенные типы: `Failure` объявлен и в SQLiteLite (там он
+    # Error), и в SamarizatorToolchain (там его забыли) — и ошибка второго
+    # пряталась за соответствием первого.
+    conformance_re = re.compile(
+        r"\b(?:struct|class|enum|actor)\s+([A-Z][A-Za-z0-9_]*)\s*:\s*([^{\n]+)"
+    )
+
+    def conformances_in(code: str) -> dict[str, set[str]]:
+        found: dict[str, set[str]] = {}
+        for match in conformance_re.finditer(code):
+            protocols = {p.strip() for p in match.group(2).split(",") if p.strip()}
+            found.setdefault(match.group(1), set()).update(protocols)
+        return found
+
+    error_like = {"Error", "LocalizedError"}
+    result_re = re.compile(r"Result\s*<[^,<>]+,\s*([A-Za-z_][A-Za-z0-9_.]*)\s*>")
+    for path, code in cleaned.items():
+        local = conformances_in(code)
+        for match in result_re.finditer(code):
+            # `Foo.Failure` — проверяем по последнему сегменту имени.
+            failure = match.group(1).split(".")[-1]
+            declared = local.get(failure)
+            if declared is None:
+                continue  # объявлен в другом файле или системный — не наше дело
+            if declared & error_like:
+                continue
+            line = code[: match.start()].count("\n") + 1
+            problems.append(
+                f"{path.relative_to(ROOT)}:{line}: {failure} используется как тип ошибки "
+                "в Result, но не соответствует Error"
+            )
 
     if problems:
         for problem in problems:
