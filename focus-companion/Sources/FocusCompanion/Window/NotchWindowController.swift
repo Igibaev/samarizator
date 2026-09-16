@@ -10,7 +10,6 @@ final class NotchWindowController {
     let navigation = NavigationController()
     let recordings = RecordingsController()
     let clipboard = ClipboardService()
-    let placement = PlacementController()
     let eyes: EyesViewModel
 
     private let hoverDetector = HoverDetector()
@@ -32,15 +31,21 @@ final class NotchWindowController {
 
         wireHoverDetector()
         wireNavigation()
-        wirePlacement()
     }
 
     // MARK: - Связывание
 
     private func wireHoverDetector() {
         hoverDetector.currentStateProvider = { [weak self] in
-            guard let self else { return CompanionRuntimeState() }
-            return self.runtimeState
+            guard let self else {
+                return (taskCount: 0, isFocusOpen: false, isRecording: false, hasNotice: false)
+            }
+            return (
+                taskCount: self.taskPanel.store.activeTasks.count,
+                isFocusOpen: self.navigation.isFocusOpen,
+                isRecording: self.recordings.captureState.isRecording,
+                hasNotice: self.taskPanel.hasCompactNotice
+            )
         }
         hoverDetector.onOpenFocus = { [weak self] in
             guard let self else { return }
@@ -65,9 +70,6 @@ final class NotchWindowController {
         }
         hoverDetector.onMouseLocation = { [weak self] location in
             guard let self, let geometry = self.hoverDetector.geometry else { return }
-            // Пока корпус тащат, курсор стоит ровно на глазах и взгляд бы
-            // дёргался вслед за собственным перемещением капсулы.
-            guard !self.placement.isDragging else { return }
             self.eyes.updateGaze(mouse: location, wing: geometry.wingRect)
         }
         hoverDetector.onWantsMouseEventsChange = { [weak self] wants in
@@ -79,24 +81,6 @@ final class NotchWindowController {
                 self.topPanel?.resignKey()
                 self.topPanel?.makeFirstResponder(nil)
             }
-        }
-    }
-
-    /// Признаки, от которых зависит раскладка. Одно место — чтобы ховер,
-    /// окно и вью не расходились в том, что сейчас нарисовано.
-    private var runtimeState: CompanionRuntimeState {
-        CompanionRuntimeState(
-            activeTaskCount: taskPanel.store.activeTasks.count,
-            isFocusOpen: navigation.isFocusOpen,
-            isRecording: recordings.captureState.isRecording,
-            hasCompactNotice: taskPanel.hasCompactNotice,
-            anchor: placement.anchor
-        )
-    }
-
-    private func wirePlacement() {
-        placement.onChange = { [weak self] in
-            self?.reposition()
         }
     }
 
@@ -116,7 +100,6 @@ final class NotchWindowController {
     func show(on screen: NSScreen? = nil) {
         let targetScreen = screen ?? NSScreen.screenWithMouse ?? NSScreen.main
         guard let targetScreen else { return }
-        placement.load(for: targetScreen)
 
         topPanel?.close()
 
@@ -128,10 +111,7 @@ final class NotchWindowController {
             taskPanel: taskPanel,
             navigation: navigation,
             recordings: recordings,
-            eyes: eyes,
-            onDragChanged: { [weak self] translation in self?.handleDragChanged(translation) },
-            onDragEnded: { [weak self] translation in self?.handleDragEnded(translation) },
-            onReturnToNotch: { [weak self] in self?.returnToNotch() }
+            eyes: eyes
         ))
         // Жест считается «внутри компаньона», если начался в крыле, на полке
         // или в раскрытой панели фокуса — не где угодно по экрану.
@@ -155,36 +135,12 @@ final class NotchWindowController {
     }
 
     private func currentGeometry(for screen: NSScreen) -> CompanionGeometry {
-        screen.companionGeometry(runtimeState)
-    }
-
-    // MARK: - Перетаскивание корпуса
-
-    private var dragScreen: NSScreen? { currentScreen ?? NSScreen.screenWithMouse ?? NSScreen.main }
-
-    private func handleDragChanged(_ translation: CGSize) {
-        guard let screen = dragScreen else { return }
-        let geometry = currentGeometry(for: screen)
-        if !placement.isDragging {
-            placement.beginDrag(geometry: geometry)
-            hoverDetector.isDraggingBody = true
-            // Во время перетаскивания панель не должна схлопываться под рукой.
-            navigation.collapse()
-        }
-        placement.updateDrag(translation: translation, geometry: geometry)
-    }
-
-    private func handleDragEnded(_ translation: CGSize) {
-        guard let screen = dragScreen else { return }
-        placement.updateDrag(translation: translation, geometry: currentGeometry(for: screen))
-        placement.endDrag(geometry: currentGeometry(for: screen), screen: screen)
-        hoverDetector.isDraggingBody = false
-    }
-
-    /// Двойной клик по глазам и пункт меню возвращают компаньона к вырезу.
-    func returnToNotch() {
-        guard let screen = dragScreen else { return }
-        placement.dock(on: screen)
+        screen.companionGeometry(
+            activeTaskCount: taskPanel.store.activeTasks.count,
+            isFocusOpen: navigation.isFocusOpen,
+            isRecording: recordings.captureState.isRecording,
+            hasCompactNotice: taskPanel.hasCompactNotice
+        )
     }
 
     func reposition() {
@@ -194,7 +150,6 @@ final class NotchWindowController {
             show(on: targetScreen)
             return
         }
-        placement.load(for: targetScreen)
         let geometry = currentGeometry(for: targetScreen)
         // Окно верхней панели всегда в максимальном размере: анимировать
         // `setFrame` синхронно со SwiftUI-анимацией — источник рывков.

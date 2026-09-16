@@ -1,18 +1,5 @@
 import AppKit
 
-/// Всё, от чего зависит раскладка компаньона прямо сейчас.
-///
-/// Раньше это был кортеж из трёх полей, который пришлось расширять дважды.
-/// Структура с именованными полями и значениями по умолчанию не заставляет
-/// править каждое место вызова при добавлении следующего признака.
-struct CompanionRuntimeState: Equatable {
-    var activeTaskCount: Int = 0
-    var isFocusOpen: Bool = false
-    var isRecording: Bool = false
-    var hasCompactNotice: Bool = false
-    var anchor: CompanionAnchor = .notch
-}
-
 /// Мост между AppKit и чистой `CompanionGeometry`.
 ///
 /// `auxiliaryTopLeftArea` / `auxiliaryTopRightArea` — публичные API AppKit
@@ -55,23 +42,27 @@ extension NSScreen {
     }
 
     /// Полная геометрия компаньона для этого экрана.
-    func companionGeometry(_ state: CompanionRuntimeState) -> CompanionGeometry {
+    func companionGeometry(
+        activeTaskCount: Int,
+        isFocusOpen: Bool,
+        isRecording: Bool,
+        hasCompactNotice: Bool = false
+    ) -> CompanionGeometry {
         CompanionGeometry(
             screenFrame: frame,
             visibleFrame: visibleFrame,
             notchRect: notchFrame,
             menuBarHeight: menubarHeight,
-            activeTaskCount: state.activeTaskCount,
-            isFocusOpen: state.isFocusOpen,
-            isRecording: state.isRecording,
-            hasCompactNotice: state.hasCompactNotice,
-            anchor: state.anchor
+            activeTaskCount: activeTaskCount,
+            isFocusOpen: isFocusOpen,
+            isRecording: isRecording,
+            hasCompactNotice: hasCompactNotice
         )
     }
 
     var geometryDescription: String {
         let notch = notchSize.map { "\($0.width)x\($0.height)" } ?? "НЕТ"
-        let geometry = companionGeometry(CompanionRuntimeState(activeTaskCount: 3))
+        let geometry = companionGeometry(activeTaskCount: 3, isFocusOpen: false, isRecording: false)
         return "экран \(localizedName)\n"
             + "  frame=\(frame)\n"
             + "  visibleFrame=\(visibleFrame)\n"

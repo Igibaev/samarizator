@@ -47,11 +47,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(makeMenuItem(title: "Буфер", action: #selector(openClipboard)))
         menu.addItem(makeMenuItem(title: "Записи", action: #selector(openRecordings)))
         menu.addItem(.separator())
-        menu.addItem(makeMenuItem(
-            title: "Вернуть к вырезу",
-            action: #selector(returnToNotch)
-        ))
-        menu.addItem(.separator())
         menu.addItem(makeFixtureSubmenuItem())
         menu.addItem(makeStateSubmenuItem())
         menu.addItem(makeMenuItem(
@@ -74,7 +69,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func openClipboard() { windowController.navigation.show(page: .clipboard) }
     @objc private func openRecordings() { windowController.navigation.show(page: .recordings) }
     @objc private func leaveFixture() { windowController.leaveFixture() }
-    @objc private func returnToNotch() { windowController.returnToNotch() }
     @objc private func quit() { NSApp.terminate(nil) }
 
     /// Воспроизводимые состояния для проверки без ожидания реальных сроков.
@@ -145,8 +139,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for screen in NSScreen.screens {
             print(screen.geometryDescription)
         }
-        print("положение корпуса: "
-            + (windowController.placement.anchor.isDocked ? "у выреза" : "перетащен"))
         print("фикстуры: FOCUS_FIXTURE=" + CompanionFixture.allCases.map(\.rawValue).joined(separator: "|"))
         print("====================")
         fflush(stdout)

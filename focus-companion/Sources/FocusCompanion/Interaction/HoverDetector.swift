@@ -27,11 +27,6 @@ final class HoverDetector {
     /// Ввод, drag или открытое контекстное меню удерживают панель открытой.
     var holdsOpen = false
 
-    /// Пока идёт перетаскивание корпуса, панель обязана принимать события
-    /// мыши, даже если курсор убежал за границу капсулы: иначе жест
-    /// оборвётся на первом же резком движении.
-    var isDraggingBody = false
-
     var onOpenFocus: (() -> Void)?
     var onCloseFocus: (() -> Void)?
     var onMouseLocation: ((CGPoint) -> Void)?
@@ -39,7 +34,7 @@ final class HoverDetector {
     var onWingHoverChange: ((Bool) -> Void)?
 
     /// Поставщик актуального состояния: сколько задач и раскрыт ли focus.
-    var currentStateProvider: (() -> CompanionRuntimeState)?
+    var currentStateProvider: (() -> (taskCount: Int, isFocusOpen: Bool, isRecording: Bool, hasNotice: Bool))?
 
     private var openPendingSince: Date?
     private var closePendingSince: Date?
@@ -69,8 +64,14 @@ final class HoverDetector {
     /// можно было прогнать вручную, не дожидаясь реального таймера.
     func tick(now: Date) {
         guard let screen = NSScreen.screenWithMouse ?? NSScreen.main else { return }
-        let state = currentStateProvider?() ?? CompanionRuntimeState()
-        let geometry = screen.companionGeometry(state)
+        let state = currentStateProvider?()
+            ?? (taskCount: 0, isFocusOpen: false, isRecording: false, hasNotice: false)
+        let geometry = screen.companionGeometry(
+            activeTaskCount: state.taskCount,
+            isFocusOpen: state.isFocusOpen,
+            isRecording: state.isRecording,
+            hasCompactNotice: state.hasNotice
+        )
         self.geometry = geometry
 
         let location = NSEvent.mouseLocation
@@ -102,7 +103,6 @@ final class HoverDetector {
                 interactive = interactive || notice.contains(location)
             }
         }
-        if isDraggingBody { interactive = true }
         if interactive != wantsMouseEvents {
             wantsMouseEvents = interactive
             onWantsMouseEventsChange?(interactive)
