@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// Записи: список слева, чтение справа (design.md §9.3).
@@ -14,6 +15,7 @@ struct RecordingsPageView: View {
             if let message = recordings.unavailabilityMessage {
                 unavailable(message)
             } else {
+                missingCapabilities
                 HStack(alignment: .top, spacing: CompanionGeometry.Metrics.recordingsListGap) {
                     if geometry.showsRecordingsList {
                         recordingsList
@@ -42,20 +44,59 @@ struct RecordingsPageView: View {
                 .font(DesignTokens.Typography.transcript())
                 .foregroundStyle(DesignTokens.Palette.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
-            Text("Компаньон читает базу Samarizator только на чтение. Он не запускает "
-                + "запись, транскрибацию и саммаризацию: внешнего управления у приложения "
-                + "пока нет.")
-                .font(DesignTokens.Typography.caption())
-                .foregroundStyle(DesignTokens.Palette.textTertiary)
-                .fixedSize(horizontal: false, vertical: true)
-            Button("Проверить ещё раз") { recordings.reload() }
-                .buttonStyle(.plain)
-                .font(DesignTokens.Typography.transcript())
-                .foregroundStyle(DesignTokens.Palette.accentSelection)
-            Button("Открыть демонстрационный набор") { recordings.loadDemo() }
-                .buttonStyle(.plain)
-                .font(DesignTokens.Typography.caption())
-                .foregroundStyle(DesignTokens.Palette.textSecondary)
+            HStack(spacing: DesignTokens.Spacing.m) {
+                Button("Указать папку Samarizator…") { chooseSamarizatorFolder() }
+                    .buttonStyle(.plain)
+                    .font(DesignTokens.Typography.transcript())
+                    .foregroundStyle(DesignTokens.Palette.accentSelection)
+                Button("Проверить ещё раз") { recordings.reload() }
+                    .buttonStyle(.plain)
+                    .font(DesignTokens.Typography.transcript())
+                    .foregroundStyle(DesignTokens.Palette.textSecondary)
+                Button("Демонстрационный набор") { recordings.loadDemo() }
+                    .buttonStyle(.plain)
+                    .font(DesignTokens.Typography.caption())
+                    .foregroundStyle(DesignTokens.Palette.textTertiary)
+            }
+        }
+    }
+
+    /// Папка Samarizator — та, в которой лежит `start.sh`.
+    private func chooseSamarizatorFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Выбрать"
+        panel.message = "Выберите папку Samarizator — ту, в которой лежит start.sh"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        recordings.selectToolchain(at: url)
+    }
+
+    /// Чего не хватает, чтобы кнопки работали. Показывается над содержимым,
+    /// а не вместо него: готовые записи читаются и без модели Whisper.
+    @ViewBuilder
+    private var missingCapabilities: some View {
+        let missing = recordings.missingCapabilities
+        if !missing.isEmpty {
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(missing, id: \.self) { line in
+                    HStack(alignment: .top, spacing: DesignTokens.Spacing.xxs) {
+                        Image(systemName: "exclamationmark.triangle")
+                            .font(.system(size: 10))
+                            .foregroundStyle(DesignTokens.Palette.accentWarning)
+                        Text(line)
+                            .font(DesignTokens.Typography.caption())
+                            .foregroundStyle(DesignTokens.Palette.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+            .padding(DesignTokens.Spacing.xs)
+            .background(
+                RoundedRectangle(cornerRadius: DesignTokens.Radius.row, style: .continuous)
+                    .fill(DesignTokens.Palette.accentWarning.opacity(0.10))
+            )
         }
     }
 

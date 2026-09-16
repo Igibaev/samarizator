@@ -31,6 +31,7 @@ final class NotchWindowController {
 
         wireHoverDetector()
         wireNavigation()
+        wireRecordings()
     }
 
     // MARK: - Связывание
@@ -81,6 +82,22 @@ final class NotchWindowController {
                 self.topPanel?.resignKey()
                 self.topPanel?.makeFirstResponder(nil)
             }
+        }
+    }
+
+    private func wireRecordings() {
+        recordings.onActivityChange = { [weak self] in
+            guard let self else { return }
+            // Ошибка не должна молча раствориться в фоновом состоянии.
+            if case .error = self.recordings.captureState {
+                self.stateMachine.react(.error)
+            }
+            if case .error = self.recordings.summaryState {
+                self.stateMachine.react(.error)
+            }
+            self.stateMachine.setAmbient(self.recordings.ambientEmotion)
+            // Ширина крыла зависит от того, идёт ли запись.
+            self.reposition()
         }
     }
 

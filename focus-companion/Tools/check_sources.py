@@ -52,6 +52,9 @@ SYSTEM_TYPES = {
     "EmptyView", "ButtonStyleConfiguration", "Label", "Link", "Slider",
     # CoreGraphics / SQLite
     "CGEventSource", "CGEventType", "SQLITE_OK", "SQLITE_ROW",
+    # Foundation: процессы, каналы, диспетчеризация.
+    "DispatchQueue", "Process", "Pipe", "FileHandle", "NSNumber", "UInt8",
+    "Data", "Sendable", "Equatable", "Hashable", "Codable",
 }
 
 # Какие статические члены проверяем поимённо.
