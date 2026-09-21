@@ -501,9 +501,17 @@ struct RecordingsPageView: View {
         .overlay(alignment: .bottomLeading) { replacementPrompt(for: item) }
     }
 
+    /// Формулировка для слота: короткая из передачи Samarizator, если она
+    /// есть для этой записи и этого пункта (`TaskPanelController.proposedTitle`),
+    /// иначе сам пункт сводки.
+    private func focusTitle(for item: SummaryItem) -> String {
+        taskPanel.proposedTitle(recordingID: recordings.selectedRecording?.id, sourceText: item.text)
+            ?? item.text
+    }
+
     /// При трёх занятых слотах предлагаем выбрать замену или отменить.
     private func addToFocus(_ item: SummaryItem) {
-        if taskPanel.addTask(title: item.text) == .slotsFull {
+        if taskPanel.addTask(title: focusTitle(for: item)) == .slotsFull {
             replacementFor = item
         } else {
             replacementFor = nil
@@ -520,7 +528,7 @@ struct RecordingsPageView: View {
                 ForEach(taskPanel.store.activeTasks) { victim in
                     Button(victim.title) {
                         taskPanel.archive(victim)
-                        _ = taskPanel.addTask(title: item.text)
+                        _ = taskPanel.addTask(title: focusTitle(for: item))
                         replacementFor = nil
                     }
                     .buttonStyle(.plain)

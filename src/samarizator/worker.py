@@ -240,12 +240,15 @@ def main():
             elif phase == "retry":
                 retry_uncertain(store, mid, settings, Path(temp))
             elif phase == "summary":
+                from .handoff import safe_handoff
                 from .knowledge import export
                 from .summary import summarize
 
                 result = summarize(store, mid, settings, lambda msg: status(store, mid, msg))
                 store.update(mid, summary=json.dumps(result, ensure_ascii=False))
                 export(store, mid, settings)
+                # Optional: agreed tasks go to the notch character (Focus Companion).
+                safe_handoff(store, mid, settings, lambda msg: status(store, mid, msg))
                 store.update(mid, status="done", error=None)
             elif phase == "export":
                 from .knowledge import export

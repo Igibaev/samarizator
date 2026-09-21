@@ -22,7 +22,7 @@ final class NotchWindowController {
     init() {
         let store = TaskStore()
         let machine = stateMachine
-        self.taskPanel = TaskPanelController(store: store, stateMachine: machine)
+        self.taskPanel = TaskPanelController(store: store, stateMachine: machine, inbox: HandoffInbox())
         self.eyes = EyesViewModel(stateMachine: machine)
 
         if CompanionSettings.demoMode {
@@ -32,6 +32,7 @@ final class NotchWindowController {
         wireHoverDetector()
         wireNavigation()
         wireRecordings()
+        wireHandoff()
     }
 
     // MARK: - Связывание
@@ -98,6 +99,18 @@ final class NotchWindowController {
             self.stateMachine.setAmbient(self.recordings.ambientEmotion)
             // Ширина крыла зависит от того, идёт ли запись.
             self.reposition()
+        }
+    }
+
+    private func wireHandoff() {
+        // «Открыть» на полоске «принёс дела»: страница «Записи» с этой
+        // встречей. Порядок важен: `show(page:)` через `onPresentationChange`
+        // перечитывает базу (`syncDrawer` → `recordings.reload()`), выбор
+        // записи — после этого.
+        taskPanel.onOpenHandoff = { [weak self] meetingID in
+            guard let self else { return }
+            self.navigation.show(page: .recordings)
+            self.recordings.select(meetingID)
         }
     }
 

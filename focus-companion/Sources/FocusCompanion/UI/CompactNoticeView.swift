@@ -2,10 +2,11 @@ import SwiftUI
 
 /// Короткое сообщение под полкой задач в КОМПАКТНОМ виде.
 ///
-/// Нужно ровно для двух вещей из design.md, которые обязаны работать при
-/// закрытой панели:
-/// - подпись напоминания на 4 секунды (§11.3 — панели не открываются сами);
-/// - «Задача сгорела» и кнопка «Вернуть» на 8 секунд (§11.2).
+/// Нужно для вещей, которые обязаны работать при закрытой панели:
+/// - подпись напоминания на 4 секунды (design.md §11.3 — панели не открываются сами);
+/// - «Задача сгорела» и кнопка «Вернуть» на 8 секунд (§11.2);
+/// - реплика «принёс дела со встречи» с кнопкой «Открыть» (передача от
+///   Samarizator, `TaskPanelController.handoffNotice`).
 ///
 /// Если показать их только в раскрытом focus, пользователь их не увидит:
 /// большую часть времени панель закрыта.
@@ -35,6 +36,18 @@ struct CompactNoticeView: View {
                         Capsule().fill(DesignTokens.Palette.accentSelection.opacity(0.18))
                     )
             }
+            if taskPanel.recentlyExpired == nil, taskPanel.handoffNotice != nil {
+                Button("Открыть") { taskPanel.openHandoff() }
+                    .buttonStyle(.plain)
+                    .font(DesignTokens.Typography.caption())
+                    .foregroundStyle(DesignTokens.Palette.accentSelection)
+                    .padding(.horizontal, DesignTokens.Spacing.xs)
+                    .padding(.vertical, 3)
+                    .background(
+                        Capsule().fill(DesignTokens.Palette.accentSelection.opacity(0.18))
+                    )
+                    .help("Страница «Записи» с этой встречей")
+            }
             Button {
                 dismiss()
             } label: {
@@ -61,6 +74,7 @@ struct CompactNoticeView: View {
         if let caption = taskPanel.reminderCaption { return caption }
         if let message = taskPanel.catchUpMessage { return message }
         if let message = taskPanel.slotsFullMessage { return message }
+        if let handoff = taskPanel.handoffNotice { return handoff.line.text }
         return ""
     }
 
@@ -69,6 +83,8 @@ struct CompactNoticeView: View {
             taskPanel.dismissExpiredNotice()
         } else if taskPanel.catchUpMessage != nil {
             taskPanel.dismissCatchUpMessage()
+        } else if taskPanel.handoffNotice != nil {
+            taskPanel.dismissHandoffNotice()
         }
     }
 }

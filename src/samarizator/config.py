@@ -35,6 +35,10 @@ class Settings:
     live_system_backend: str = "screencapturekit"
     audio_cleanup: str = "off"
     live_mix: str = "gentle"
+    # Hand agreed action items to the notch companion (focus-companion/) after a summary.
+    # Only takes effect when the companion has been launched at least once on this Mac;
+    # nothing is written otherwise, so the default is safe on machines without it.
+    companion_handoff: bool = True
 
     def quality_profile(self):
         """Opt-in profile. Preserve the user's ASR model and corporate API configuration."""

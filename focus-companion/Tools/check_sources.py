@@ -54,7 +54,7 @@ SYSTEM_TYPES = {
     # CoreGraphics / SQLite
     "CGEventSource", "CGEventType", "SQLITE_OK", "SQLITE_ROW",
     # Foundation: процессы, каналы, диспетчеризация.
-    "DispatchQueue", "Process", "Pipe", "FileHandle", "NSNumber", "UInt8",
+    "DispatchQueue", "DispatchSource", "Process", "Pipe", "FileHandle", "NSNumber", "UInt8",
     "Data", "Sendable", "Equatable", "Hashable", "Codable",
 }
 

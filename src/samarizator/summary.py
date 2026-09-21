@@ -284,13 +284,26 @@ class ChatClient:
         self.transport = transport
 
     def complete(self, prompt, allowed):
+        """Summary call: system prompt, low temperature, evidence-checked JSON result."""
+        content = self.raw_complete(
+            [dict(role="system", content=SYSTEM), dict(role="user", content=prompt)]
+        )
+        return parse_model_summary(content, allowed)
+
+    def raw_complete(self, messages, temperature=0.1, max_tokens=None):
+        """One Chat Completions call; returns the assistant text without interpreting it.
+
+        Shared by the summary pipeline and the Focus Companion handoff (companion.py):
+        one place owns TLS trust, the no-redirect/no-proxy policy, retries and the
+        rule that error messages never quote the provider's response body.
+        """
         s = self.settings
         headers = {"Authorization": f"Bearer {self.key}", "Content-Type": "application/json"}
         payload = dict(
             model=s.model,
-            temperature=0.1,
-            max_tokens=s.max_output_tokens,
-            messages=[dict(role="system", content=SYSTEM), dict(role="user", content=prompt)],
+            temperature=temperature,
+            max_tokens=max_tokens or s.max_output_tokens,
+            messages=messages,
         )
         # Verify against the OS trust store, so a corporate root installed in the system
         # keychain works the way curl does. certifi alone would reject an intercepted TLS chain.
@@ -332,7 +345,7 @@ class ChatClient:
                     content = choice["message"]["content"]
                     if not isinstance(content, str):
                         raise SummaryFormatError("Модель вернула нетекстовый ответ.")
-                    return parse_model_summary(content, allowed)
+                    return content
                 except httpx.HTTPError:
                     if attempt == 2:
                         raise ValueError(

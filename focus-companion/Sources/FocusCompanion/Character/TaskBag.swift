@@ -22,6 +22,8 @@ final class TaskBag: @unchecked Sendable {
         case clipboardPoll
         case livePoll
         case copyConfirmation
+        /// Автоскрытие реплики «принёс дела» (`TaskPanelController`).
+        case handoffNotice
     }
 
     private let lock = NSLock()

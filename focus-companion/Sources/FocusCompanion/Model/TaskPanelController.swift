@@ -28,6 +28,26 @@ final class TaskPanelController {
     /// Одно спокойное уведомление после сна: «Пока вас не было, истёк срок N задач».
     private(set) var catchUpMessage: String?
 
+    // MARK: - Дела со встречи (Samarizator → компаньон)
+
+    private let inbox: HandoffInbox
+
+    /// Все передачи из папки `inbox/`, старшая первой. Нужны странице
+    /// «Записи»: короткие формулировки для кнопки «В фокус» (`proposedTitle`).
+    private(set) var handoffs: [MeetingHandoff] = []
+
+    /// Передача, о которой персонаж говорит прямо сейчас — реплика на
+    /// компактной полоске под полкой задач с кнопкой «Открыть».
+    private(set) var handoffNotice: MeetingHandoff?
+
+    /// Передача, пришедшая пока человека не было за компьютером: реплика
+    /// откладывается до его возвращения, а не показывается в пустоту.
+    private var deferredHandoff: MeetingHandoff?
+
+    /// «Открыть» на полоске: `NotchWindowController` открывает страницу
+    /// «Записи» с этой встречей.
+    var onOpenHandoff: ((String) -> Void)?
+
     /// Замена при восстановлении из истории: какую задачу возвращаем.
     var pendingRestoreID: UUID?
 
@@ -53,6 +73,7 @@ final class TaskPanelController {
             || reminderCaption != nil
             || catchUpMessage != nil
             || slotsFullMessage != nil
+            || handoffNotice != nil
     }
 
     enum AddOutcome: Equatable {
@@ -61,12 +82,22 @@ final class TaskPanelController {
         case empty
     }
 
-    init(store: TaskStore, stateMachine: CompanionStateMachine) {
+    /// `inbox` передаётся явно, а не default-аргументом: до Swift 5.10 вызов
+    /// `@MainActor`-инициализатора в выражении default-аргумента — ошибка.
+    init(store: TaskStore, stateMachine: CompanionStateMachine, inbox: HandoffInbox) {
         self.store = store
         self.stateMachine = stateMachine
+        self.inbox = inbox
         catchUpAfterSleep()
         startDeadlineTicker()
         startReminderTicker()
+        inbox.onChange = { [weak self] in
+            self?.refreshInbox()
+        }
+        // Передачи, пришедшие пока приложение было закрыто, встречают так же,
+        // как пришедшие только что: человек только что запустил компаньона,
+        // то есть смотрит на экран.
+        refreshInbox()
     }
 
     deinit { taskBag.cancelAll() }
@@ -224,6 +255,72 @@ final class TaskPanelController {
         }
     }
 
+    // MARK: - Дела со встречи (Samarizator → компаньон)
+
+    /// Перечитывает папку передач. Вызывается событием `HandoffInbox`, при
+    /// старте и — запасным путём — тиком напоминаний раз в 30 секунд.
+    func refreshInbox(now: Date = Date()) {
+        handoffs = inbox.load(now: now)
+        // Новая — созданная позже последней, о которой уже сказали.
+        // Несколько новых разом (Samarizator догнал очередь сводок) — одна
+        // реплика, о самой свежей: персонаж не говорит пять раз подряд.
+        let seenAt = CompanionSettings.lastHandoffSeenAt
+        guard let newest = handoffs.last(where: { $0.createdAt > seenAt }) else { return }
+        CompanionSettings.lastHandoffSeenAt = newest.createdAt
+        announce(newest)
+    }
+
+    /// Реплика показывается, только если человек сейчас за компьютером;
+    /// иначе ждёт его возвращения (`tickReminders`).
+    private func announce(_ handoff: MeetingHandoff) {
+        guard IdleTimeProvider.secondsSinceLastEvent() < CharacterConfig.handoffIdleThreshold else {
+            deferredHandoff = handoff
+            return
+        }
+        presentHandoff(handoff)
+    }
+
+    /// Текст — на компактную полоску (`CompactNoticeView`), эмоция — глазам
+    /// через обычный `react` с приоритетами design.md §12.2. Панели не
+    /// открываются сами, системных уведомлений нет.
+    private func presentHandoff(_ handoff: MeetingHandoff) {
+        deferredHandoff = nil
+        handoffNotice = handoff
+        let line = handoff.line
+        // Глаза реагируют только при заметной интенсивности и не в режиме
+        // подавления (design.md §11.3: «Не беспокоить», набор текста, демонстрация).
+        if let reaction = line.emotion.reaction,
+           line.intensity >= CharacterConfig.handoffReactionThreshold,
+           !isSuppressed {
+            stateMachine.react(reaction)
+        }
+        taskBag.replace(.handoffNotice, with: Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(CharacterConfig.handoffNoticeDuration * 1_000_000_000))
+            guard !Task.isCancelled, let self else { return }
+            self.handoffNotice = nil
+        })
+    }
+
+    func dismissHandoffNotice() {
+        handoffNotice = nil
+        taskBag.cancel(.handoffNotice)
+    }
+
+    /// «Открыть» на полоске: страница «Записи» с этой встречей.
+    func openHandoff() {
+        guard let handoff = handoffNotice else { return }
+        dismissHandoffNotice()
+        onOpenHandoff?(handoff.meetingId)
+    }
+
+    /// Короткая формулировка для кнопки «В фокус» у пункта саммари, если
+    /// Samarizator передал её для этой записи. `nil` — брать сам пункт.
+    func proposedTitle(recordingID: String?, sourceText: String) -> String? {
+        guard let recordingID,
+              let handoff = handoffs.last(where: { $0.meetingId == recordingID }) else { return nil }
+        return handoff.proposals.first { $0.sourceText == sourceText }?.text
+    }
+
     // MARK: - Напоминания (design.md §11.3)
 
     private func startReminderTicker() {
@@ -239,6 +336,16 @@ final class TaskPanelController {
     /// Первый тихий сигнал на 50% интервала, второй — за 5 минут до срока.
     /// Пропущенные сигналы объединяются, а не ставятся в очередь.
     func tickReminders(now moment: Date) {
+        // Дела со встречи: запасное перечитывание папки (если событие
+        // `DispatchSource` не пришло) и отложенная реплика — как только человек
+        // снова за компьютером. ДО правила «нет задач — молчать»: реплика не
+        // напоминание, а список задач может быть пуст.
+        refreshInbox(now: moment)
+        if let deferred = deferredHandoff,
+           IdleTimeProvider.secondsSinceLastEvent() < CharacterConfig.handoffIdleThreshold {
+            presentHandoff(deferred)
+        }
+
         guard !store.activeTasks.isEmpty else { return }
         guard !isQuietHour(moment) else { return }
         guard !isSuppressed else { return }

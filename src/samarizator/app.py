@@ -391,6 +391,19 @@ class SettingsDialog(QDialog):
             spin.setValue(getattr(settings, key))
             self.fields[key] = spin
             api.addRow(label, spin)
+        companion = QCheckBox("Передавать согласованные дела ИИ-компаньону")
+        companion.setChecked(settings.companion_handoff)
+        self.fields["companion_handoff"] = companion
+        api.addRow("Персонаж в вырезе", companion)
+        companion_hint = QLabel(
+            "ИИ-компаньон — персонаж в вырезе экрана из этого же репозитория (focus-companion). "
+            "После сводки он получает поручения со статусом «согласовано», говорит об этом одной "
+            "репликой и подставляет короткие формулировки в кнопку «В фокус» на странице «Записи». "
+            "Файл кладётся в его папку на этом Mac, только если он хоть раз запускался. "
+            "Реплику сочиняет та же облачная модель — это один дополнительный короткий запрос."
+        )
+        companion_hint.setWordWrap(True)
+        api.addRow(companion_hint)
         hint = QLabel(
             "Подходит любой OpenAI-совместимый Chat Completions API: OpenAI, OpenRouter, Groq, DeepSeek, "
             "Together, а также локальные Ollama и LM Studio по адресу localhost. Ключ уходит "

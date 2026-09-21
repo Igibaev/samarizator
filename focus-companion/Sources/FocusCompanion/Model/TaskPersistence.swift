@@ -51,6 +51,7 @@ enum CompanionSettings {
         static let gestureHintsShown = "companion.gestureHintsShown"
         static let frequentReminders = "companion.frequentReminders"
         static let demoMode = "companion.demoMode"
+        static let lastHandoffSeenAt = "companion.lastHandoffSeenAt"
     }
 
     static var mood: CharacterMood {
@@ -84,6 +85,13 @@ enum CompanionSettings {
     static var frequentReminders: Bool {
         get { defaults.bool(forKey: Key.frequentReminders) }
         set { defaults.set(newValue, forKey: Key.frequentReminders) }
+    }
+
+    /// Момент создания последней передачи со встречи (`MeetingHandoff`), о
+    /// которой персонаж уже сказал. Всё, что создано позже, — новое.
+    static var lastHandoffSeenAt: Date {
+        get { defaults.object(forKey: Key.lastHandoffSeenAt) as? Date ?? .distantPast }
+        set { defaults.set(newValue, forKey: Key.lastHandoffSeenAt) }
     }
 
     /// Демонстрационный режим: FOCUS_DEMO=1 или переключатель в меню.
