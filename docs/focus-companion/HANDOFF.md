@@ -33,6 +33,12 @@
   формулировки в «В фокус». Первый текст персонажа; библия —
   `CHARACTER-BIBLE.md`, техзадание — `PHASE-6-PROMPT.md`.
 
+- **Дневник (этап 1 плана с автором)** — Python-часть (`journal.py`) покрыта
+  тестами; Swift-часть (`JournalSync.swift`, `meetingId`/`sourceText` у
+  задачи) проходит `Tools/check_sources.py`, но НЕ собиралась. Приёмка —
+  `CHECKLIST.md`: автор проходит его на своём Mac, и до его результатов новые
+  функции не начинать.
+
 Ветка: `ai-companion`. Промты фаз лежат рядом: `PHASE-1-PROMPT.md` …
 `PHASE-4C-PROMPT.md`, `PHASE-6-PROMPT.md` (Фаза 5 шла по `design.md`, без
 отдельного промта). В ветку пушат и другие сессии — перед пушем `git fetch`.

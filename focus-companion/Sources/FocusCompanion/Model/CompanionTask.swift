@@ -39,6 +39,11 @@ struct CompanionTask: Identifiable, Codable, Equatable {
     var completedAt: Date?
     var expiredAt: Date?
     var lastRemindedAt: Date?
+    /// Встреча Samarizator, с которой пришло дело, и исходная формулировка
+    /// пункта сводки. По ним `samarizator.journal` находит поручение в
+    /// «Поручения.md»: заголовок персонаж переписывает, по нему не сверить.
+    var meetingId: String?
+    var sourceText: String?
 
     init(
         id: UUID = UUID(),
@@ -50,7 +55,9 @@ struct CompanionTask: Identifiable, Codable, Equatable {
         order: Int = 0,
         completedAt: Date? = nil,
         expiredAt: Date? = nil,
-        lastRemindedAt: Date? = nil
+        lastRemindedAt: Date? = nil,
+        meetingId: String? = nil,
+        sourceText: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -62,6 +69,8 @@ struct CompanionTask: Identifiable, Codable, Equatable {
         self.completedAt = completedAt
         self.expiredAt = expiredAt
         self.lastRemindedAt = lastRemindedAt
+        self.meetingId = meetingId
+        self.sourceText = sourceText
     }
 
     // MARK: - Производные признаки
@@ -111,6 +120,7 @@ extension CompanionTask {
     private enum CodingKeys: String, CodingKey {
         case id, title, note, startedAt, expiresAt, status, order
         case completedAt, expiredAt, lastRemindedAt
+        case meetingId, sourceText
         // Ключи Фаз 4а/4б — читаются, но больше не пишутся.
         case text, createdAt, isDone, fuseDate, fuseStartedAt
     }
@@ -126,6 +136,8 @@ extension CompanionTask {
         completedAt = try container.decodeIfPresent(Date.self, forKey: .completedAt)
         expiredAt = try container.decodeIfPresent(Date.self, forKey: .expiredAt)
         lastRemindedAt = try container.decodeIfPresent(Date.self, forKey: .lastRemindedAt)
+        meetingId = try container.decodeIfPresent(String.self, forKey: .meetingId)
+        sourceText = try container.decodeIfPresent(String.self, forKey: .sourceText)
 
         if let title = try container.decodeIfPresent(String.self, forKey: .title) {
             self.title = title
@@ -170,5 +182,7 @@ extension CompanionTask {
         try container.encodeIfPresent(completedAt, forKey: .completedAt)
         try container.encodeIfPresent(expiredAt, forKey: .expiredAt)
         try container.encodeIfPresent(lastRemindedAt, forKey: .lastRemindedAt)
+        try container.encodeIfPresent(meetingId, forKey: .meetingId)
+        try container.encodeIfPresent(sourceText, forKey: .sourceText)
     }
 }

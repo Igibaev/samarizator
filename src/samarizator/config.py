@@ -39,6 +39,8 @@ class Settings:
     # Only takes effect when the companion has been launched at least once on this Mac;
     # nothing is written otherwise, so the default is safe on machines without it.
     companion_handoff: bool = True
+    # Keep `Дни/<дата>.md` and `Поручения.md` in the vault up to date (journal.py).
+    companion_journal: bool = True
 
     def quality_profile(self):
         """Opt-in profile. Preserve the user's ASR model and corporate API configuration."""

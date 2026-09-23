@@ -122,6 +122,18 @@ SAMARIZATOR_HOME=/путь .build/release/FocusCompanion # другая база
 - Настройка в Samarizator: «Передавать согласованные дела ИИ-компаньону».
 - Тесты Python-части: `tests/test_handoff.py`.
 
+## Дневник в Obsidian
+
+Задача помнит, с какой встречи пришла (`meetingId`, `sourceText` в
+`tasks.json`; «В фокус» на странице «Записи» заполняет их сам).
+`Services/JournalSync.swift` после каждого сохранения слотов (с паузой 3 с),
+при запуске и раз в час вызывает `python -m samarizator.companion journal`.
+Текст заметок собирает Python (`src/samarizator/journal.py`, тесты
+`tests/test_journal.py`): заметка дня `Дни/<дата>.md` и `Поручения.md`.
+Подробности — в корневом README, раздел «Дневник».
+
+Проверка на живом Mac — [`docs/focus-companion/CHECKLIST.md`](../docs/focus-companion/CHECKLIST.md).
+
 ## Проверка без Swift-тулчейна
 
 ```bash
@@ -132,7 +144,7 @@ cd .. && python3 -m pytest tests/test_focus_companion_design.py -q   # свер�
 Headless-вход, в отличие от Swift-части, покрыт настоящими тестами:
 
 ```bash
-uv run --extra dev python -m pytest tests/test_companion_cli.py tests/test_handoff.py -q
+uv run --extra dev python -m pytest tests/test_companion_cli.py tests/test_handoff.py tests/test_journal.py -q
 ```
 
 Обе проверки — структурные. Они ловят «переименовал и забыл» и дрейф чисел

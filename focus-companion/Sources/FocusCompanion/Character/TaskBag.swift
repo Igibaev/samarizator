@@ -24,6 +24,9 @@ final class TaskBag: @unchecked Sendable {
         case copyConfirmation
         /// Автоскрытие реплики «принёс дела» (`TaskPanelController`).
         case handoffNotice
+        /// Заметка дня: пауза после изменения и часовой тик (`JournalSync`).
+        case journalDebounce
+        case journalHourly
     }
 
     private let lock = NSLock()

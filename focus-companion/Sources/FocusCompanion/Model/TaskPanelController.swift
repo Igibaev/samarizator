@@ -105,10 +105,23 @@ final class TaskPanelController {
     // MARK: - Добавление и правка
 
     @discardableResult
-    func addTask(title: String, note: String = "", minutes: Int = CharacterConfig.defaultDeadlineMinutes) -> AddOutcome {
+    func addTask(
+        title: String,
+        note: String = "",
+        minutes: Int = CharacterConfig.defaultDeadlineMinutes,
+        meetingId: String? = nil,
+        sourceText: String? = nil
+    ) -> AddOutcome {
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return .empty }
-        guard store.add(title: trimmed, note: note, duration: Double(minutes) * 60) != nil else {
+        let added = store.add(
+            title: trimmed,
+            note: note,
+            duration: Double(minutes) * 60,
+            meetingId: meetingId,
+            sourceText: sourceText
+        )
+        guard added != nil else {
             slotsFullMessage = "Три дела уже в фокусе. Освободите слот, чтобы добавить новое."
             return .slotsFull
         }

@@ -10,6 +10,7 @@ final class NotchWindowController {
     let navigation = NavigationController()
     let recordings = RecordingsController()
     let clipboard = ClipboardService()
+    let journal = JournalSync()
     let eyes: EyesViewModel
 
     private let hoverDetector = HoverDetector()
@@ -33,6 +34,7 @@ final class NotchWindowController {
         wireNavigation()
         wireRecordings()
         wireHandoff()
+        wireJournal()
     }
 
     // MARK: - Связывание
@@ -112,6 +114,15 @@ final class NotchWindowController {
             self.navigation.show(page: .recordings)
             self.recordings.select(meetingID)
         }
+    }
+
+    /// Каждое сохранение слотов — повод обновить заметку дня и «Поручения».
+    private func wireJournal() {
+        journal.toolchain = { [weak self] in self?.recordings.toolchain }
+        taskPanel.store.onChange = { [weak self] in
+            self?.journal.schedule()
+        }
+        journal.start()
     }
 
     private func wireNavigation() {

@@ -241,6 +241,7 @@ def main():
                 retry_uncertain(store, mid, settings, Path(temp))
             elif phase == "summary":
                 from .handoff import safe_handoff
+                from .journal import safe_refresh
                 from .knowledge import export
                 from .summary import summarize
 
@@ -249,11 +250,15 @@ def main():
                 export(store, mid, settings)
                 # Optional: agreed tasks go to the notch character (Focus Companion).
                 safe_handoff(store, mid, settings, lambda msg: status(store, mid, msg))
+                # Optional: the day note and the actions list in the vault.
+                safe_refresh(store, mid, settings, lambda msg: status(store, mid, msg))
                 store.update(mid, status="done", error=None)
             elif phase == "export":
+                from .journal import safe_refresh
                 from .knowledge import export
 
                 export(store, mid, settings)
+                safe_refresh(store, mid, settings, lambda msg: status(store, mid, msg))
                 store.update(mid, status="done", error=None)
             else:
                 raise ValueError("Неизвестная операция.")

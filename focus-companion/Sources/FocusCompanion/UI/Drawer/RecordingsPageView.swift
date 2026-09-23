@@ -509,9 +509,18 @@ struct RecordingsPageView: View {
             ?? item.text
     }
 
+    /// Дело помнит встречу и исходный пункт — так его находит «Поручения.md».
+    private func addTask(from item: SummaryItem) -> TaskPanelController.AddOutcome {
+        taskPanel.addTask(
+            title: focusTitle(for: item),
+            meetingId: recordings.selectedRecording?.id,
+            sourceText: item.text
+        )
+    }
+
     /// При трёх занятых слотах предлагаем выбрать замену или отменить.
     private func addToFocus(_ item: SummaryItem) {
-        if taskPanel.addTask(title: focusTitle(for: item)) == .slotsFull {
+        if addTask(from: item) == .slotsFull {
             replacementFor = item
         } else {
             replacementFor = nil
@@ -528,7 +537,7 @@ struct RecordingsPageView: View {
                 ForEach(taskPanel.store.activeTasks) { victim in
                     Button(victim.title) {
                         taskPanel.archive(victim)
-                        _ = taskPanel.addTask(title: focusTitle(for: item))
+                        _ = addTask(from: item)
                         replacementFor = nil
                     }
                     .buttonStyle(.plain)

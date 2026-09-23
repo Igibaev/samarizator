@@ -15,6 +15,10 @@ final class TaskStore {
 
     private(set) var tasks: [CompanionTask]
 
+    /// Вызывается после каждой записи на диск — `JournalSync` обновляет по
+    /// нему заметку дня. Фикстуры диск не трогают и сюда не попадают.
+    @ObservationIgnored var onChange: (() -> Void)?
+
     /// Активные задачи в закреплённом пользователем порядке.
     var activeTasks: [CompanionTask] {
         tasks.filter { $0.status == .active }.sorted { $0.order < $1.order }
@@ -42,7 +46,14 @@ final class TaskStore {
     /// Добавляет задачу в свободный слот. `nil` — слотов нет.
     /// Молча вытеснить существующую задачу нельзя (design.md §9.3).
     @discardableResult
-    func add(title: String, note: String = "", duration: TimeInterval, now: Date = Date()) -> CompanionTask? {
+    func add(
+        title: String,
+        note: String = "",
+        duration: TimeInterval,
+        now: Date = Date(),
+        meetingId: String? = nil,
+        sourceText: String? = nil
+    ) -> CompanionTask? {
         guard hasFreeSlot else { return nil }
         let trimmed = String(title.prefix(CharacterConfig.maxTaskTitleLength))
         let task = CompanionTask(
@@ -51,7 +62,9 @@ final class TaskStore {
             startedAt: now,
             expiresAt: now.addingTimeInterval(duration),
             status: .active,
-            order: nextOrder()
+            order: nextOrder(),
+            meetingId: meetingId,
+            sourceText: sourceText
         )
         tasks.append(task)
         persist()
@@ -198,6 +211,7 @@ final class TaskStore {
 
     private func persist() {
         TaskPersistence.save(tasks)
+        onChange?()
     }
 
     /// Для фикстур и debug-меню: заменить содержимое целиком, не трогая диск.

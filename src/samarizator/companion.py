@@ -13,6 +13,7 @@ headless — `live.LiveRecorder` и `worker` не тянут Qt, — не хва
     python -m samarizator.companion record --source both
     python -m samarizator.companion transcribe <mid>
     python -m samarizator.companion summarize <mid>
+    python -m samarizator.companion journal [--date 2026-09-23]
 
 `record` держит запись, пока идёт сам: остановка — это SIGINT (или SIGTERM)
 процессу. Так тому, кто его запустил, не нужны ни pid-файлы, ни отдельная
@@ -310,6 +311,27 @@ def command_summarize(args):
     return 0
 
 
+def command_journal(args):
+    """Заметка дня и «Поручения» в хранилище Obsidian.
+
+    Компаньон вызывает это после каждого изменения в слотах фокуса: пересборка
+    идёт из фактов (база и tasks.json), поэтому лишний вызов ничего не портит.
+    """
+    from . import journal
+
+    settings = Settings.load()
+    if not settings.companion_journal:
+        emit("journal", written=[], disabled=True)
+        return 0
+    days = [journal.parse_day(args.date)] if args.date else []
+    paths = journal.refresh(Store(), settings, days=days)
+    if not paths:
+        emit("error", stage="journal", message="Папка заметок не найдена: проверьте её в настройках Samarizator.")
+        return 1
+    emit("journal", written=[str(path) for path in paths])
+    return 0
+
+
 def _segment_count(store, mid):
     """Сколько реплик распознано сейчас. По росту этого числа видно, что
     сводка устарела, — и это факт, а не догадка."""
@@ -339,6 +361,9 @@ def build_parser():
     progress = commands.add_parser("progress", help="сколько реплик распознано сейчас")
     progress.add_argument("mid")
 
+    journal = commands.add_parser("journal", help="обновить заметку дня и «Поручения»")
+    journal.add_argument("--date", help="ещё и этот день, ГГГГ-ММ-ДД; сегодняшний обновляется всегда")
+
     return parser
 
 
@@ -348,6 +373,7 @@ HANDLERS = {
     "transcribe": command_transcribe,
     "summarize": command_summarize,
     "progress": command_progress,
+    "journal": command_journal,
 }
 
 

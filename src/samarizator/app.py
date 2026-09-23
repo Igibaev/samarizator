@@ -404,6 +404,18 @@ class SettingsDialog(QDialog):
         )
         companion_hint.setWordWrap(True)
         api.addRow(companion_hint)
+        journal = QCheckBox("Вести заметку дня и «Поручения» в папке заметок")
+        journal.setChecked(settings.companion_journal)
+        self.fields["companion_journal"] = journal
+        api.addRow("Дневник", journal)
+        journal_hint = QLabel(
+            "После каждой сводки и каждого изменения в фокусе компаньона обновляются «Дни/<дата>.md» "
+            "(встречи, поручения, что сделано и что отпущено) и «Поручения.md» (все согласованные дела "
+            "со всех встреч). В заметке дня правится только блок между метками samarizator — "
+            "ваш текст выше и ниже не трогается. Запросов к модели не делает."
+        )
+        journal_hint.setWordWrap(True)
+        api.addRow(journal_hint)
         hint = QLabel(
             "Подходит любой OpenAI-совместимый Chat Completions API: OpenAI, OpenRouter, Groq, DeepSeek, "
             "Together, а также локальные Ollama и LM Studio по адресу localhost. Ключ уходит "
