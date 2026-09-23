@@ -20,6 +20,10 @@ final class EyesViewModel {
     private(set) var jolt: CGFloat = 0
     /// Фаза цикла «думает»: какой глаз сейчас прищурен.
     private(set) var thinkingPhase = 0
+    /// Короткий взгляд в сторону в покое (живость), в pt.
+    private(set) var glanceOffset: CGSize = .zero
+    /// Дыхание во сне: вертикальный сдвиг пары, в pt.
+    private(set) var breath: CGFloat = 0
 
     var reduceMotion = false
 
@@ -34,6 +38,7 @@ final class EyesViewModel {
         self.random = SeededGenerator(seed: UInt64(seedText ?? "") ?? UInt64.random(in: 1...UInt64.max))
         scheduleNextBlink()
         startThinkingCycle()
+        startBreathingCycle()
     }
 
     deinit {
@@ -86,7 +91,10 @@ final class EyesViewModel {
         taskBag.replace(.blink, with: Task { [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             guard !Task.isCancelled, let self else { return }
-            await self.blinkOnce()
+            // Во сне не моргают: там дыхание.
+            if self.stateMachine.state != .asleep {
+                await self.blinkOnce()
+            }
             guard !Task.isCancelled else { return }
             self.scheduleNextBlink()
         })
@@ -129,6 +137,48 @@ final class EyesViewModel {
         guard stateMachine.state == .thinking else { return 0 }
         let active = isRight ? (thinkingPhase == 1) : (thinkingPhase == 0)
         return active ? 0.22 : 0
+    }
+
+    // MARK: - Живость: мелкие движения и дыхание
+
+    /// Одно мелкое движение в покое: взгляд в сторону или двойное моргание.
+    /// Решает `LivelinessController`, когда; здесь только как.
+    func fidget() async {
+        guard !reduceMotion, stateMachine.state == .idle || stateMachine.state == .drowsy else { return }
+        if Bool.random(using: &random) {
+            await blinkOnce()
+            try? await Task.sleep(nanoseconds: 140_000_000)
+            await blinkOnce()
+            return
+        }
+        let target = CGSize(
+            width: (Bool.random(using: &random) ? 1 : -1) * CharacterConfig.glanceShiftX,
+            height: Bool.random(using: &random) ? -CharacterConfig.glanceShiftY : 0
+        )
+        withAnimation(.easeOut(duration: 0.18)) { glanceOffset = target }
+        taskBag.replace(.glance, with: Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(CharacterConfig.glanceHold * 1_000_000_000))
+            guard !Task.isCancelled, let self else { return }
+            withAnimation(.easeInOut(duration: 0.3)) { self.glanceOffset = .zero }
+        })
+    }
+
+    /// Медленный подъём и опускание пары — только пока персонаж спит.
+    private func startBreathingCycle() {
+        taskBag.replace(.breathing, with: Task { [weak self] in
+            while !Task.isCancelled {
+                let half = CharacterConfig.breathingCycle / 2
+                try? await Task.sleep(nanoseconds: UInt64(half * 1_000_000_000))
+                guard !Task.isCancelled, let self else { return }
+                guard self.stateMachine.state == .asleep, !self.reduceMotion else {
+                    if self.breath != 0 { withAnimation(.easeOut(duration: 0.3)) { self.breath = 0 } }
+                    continue
+                }
+                withAnimation(.easeInOut(duration: half)) {
+                    self.breath = self.breath == 0 ? -CharacterConfig.breathingDepth : 0
+                }
+            }
+        })
     }
 
     // MARK: - Толчок в злости

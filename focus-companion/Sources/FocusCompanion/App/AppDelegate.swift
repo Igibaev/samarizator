@@ -47,6 +47,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(makeMenuItem(title: "Буфер", action: #selector(openClipboard)))
         menu.addItem(makeMenuItem(title: "Записи", action: #selector(openRecordings)))
         menu.addItem(.separator())
+        let liveliness = makeMenuItem(title: "Живость (бета)", action: #selector(toggleLiveliness(_:)))
+        liveliness.state = CompanionSettings.liveliness ? .on : .off
+        liveliness.toolTip = "Засыпает, когда вас нет, просыпается, когда вернулись; "
+            + "одна реплика утром и одна вечером"
+        menu.addItem(liveliness)
+        menu.addItem(.separator())
         menu.addItem(makeFixtureSubmenuItem())
         menu.addItem(makeStateSubmenuItem())
         menu.addItem(makeMenuItem(
@@ -70,6 +76,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func openRecordings() { windowController.navigation.show(page: .recordings) }
     @objc private func leaveFixture() { windowController.leaveFixture() }
     @objc private func quit() { NSApp.terminate(nil) }
+
+    @objc private func toggleLiveliness(_ sender: NSMenuItem) {
+        CompanionSettings.liveliness.toggle()
+        sender.state = CompanionSettings.liveliness ? .on : .off
+        windowController.liveliness.tick(now: Date())
+    }
 
     /// Воспроизводимые состояния для проверки без ожидания реальных сроков.
     private func makeFixtureSubmenuItem() -> NSMenuItem {

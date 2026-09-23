@@ -12,6 +12,7 @@ final class NotchWindowController {
     let clipboard = ClipboardService()
     let journal = JournalSync()
     let eyes: EyesViewModel
+    let liveliness: LivelinessController
 
     private let hoverDetector = HoverDetector()
     private var topPanel: NotchPanel?
@@ -23,8 +24,11 @@ final class NotchWindowController {
     init() {
         let store = TaskStore()
         let machine = stateMachine
-        self.taskPanel = TaskPanelController(store: store, stateMachine: machine, inbox: HandoffInbox())
-        self.eyes = EyesViewModel(stateMachine: machine)
+        let panel = TaskPanelController(store: store, stateMachine: machine, inbox: HandoffInbox())
+        let eyesModel = EyesViewModel(stateMachine: machine)
+        self.taskPanel = panel
+        self.eyes = eyesModel
+        self.liveliness = LivelinessController(stateMachine: machine, eyes: eyesModel, taskPanel: panel)
 
         if CompanionSettings.demoMode {
             clipboard.loadDemoItems(DemoFixtures.clipboardItems)
@@ -35,6 +39,7 @@ final class NotchWindowController {
         wireRecordings()
         wireHandoff()
         wireJournal()
+        wireLiveliness()
     }
 
     // MARK: - Связывание
@@ -98,7 +103,7 @@ final class NotchWindowController {
             if case .error = self.recordings.summaryState {
                 self.stateMachine.react(.error)
             }
-            self.stateMachine.setAmbient(self.recordings.ambientEmotion)
+            self.updateAmbient()
             // Ширина крыла зависит от того, идёт ли запись.
             self.reposition()
         }
@@ -123,6 +128,22 @@ final class NotchWindowController {
             self?.journal.schedule()
         }
         journal.start()
+    }
+
+    /// Сон, пробуждение и реплики утром и вечером (переключатель в меню).
+    private func wireLiveliness() {
+        liveliness.toolchain = { [weak self] in self?.recordings.toolchain }
+        liveliness.onRestingChange = { [weak self] in
+            self?.updateAmbient()
+        }
+        liveliness.start()
+    }
+
+    /// Фон персонажа: запись и обработка важнее покоя, а покой — это
+    /// обычный, сонный или спящий вид от `LivelinessController`.
+    func updateAmbient() {
+        let busy = recordings.ambientEmotion
+        stateMachine.setAmbient(busy == .idle ? liveliness.resting : busy)
     }
 
     private func wireNavigation() {

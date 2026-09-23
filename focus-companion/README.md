@@ -134,6 +134,17 @@ SAMARIZATOR_HOME=/путь .build/release/FocusCompanion # другая база
 
 Проверка на живом Mac — [`docs/focus-companion/CHECKLIST.md`](../docs/focus-companion/CHECKLIST.md).
 
+## Живость (бета)
+
+`Character/LivelinessController.swift`, переключатель в меню, по умолчанию
+выключен. Каждые 2 с смотрит на простой ввода (`IdleTimeProvider`): больше
+5 минут — фон `asleep`, вернулся — реакция `waking`, 23:00–6:00 — `drowsy`.
+Фон записи и обработки важнее покоя (`NotchWindowController.updateAmbient`).
+Мелкие движения — `EyesViewModel.fidget()`, дыхание во сне — там же. Реплики
+утром и вечером — `python -m samarizator.companion rhythm morning|evening`
+(`src/samarizator/rhythm.py`, тесты `tests/test_rhythm.py`). Правила — в
+библии персонажа, раздел «Живость».
+
 ## Проверка без Swift-тулчейна
 
 ```bash
@@ -144,7 +155,7 @@ cd .. && python3 -m pytest tests/test_focus_companion_design.py -q   # свер�
 Headless-вход, в отличие от Swift-части, покрыт настоящими тестами:
 
 ```bash
-uv run --extra dev python -m pytest tests/test_companion_cli.py tests/test_handoff.py tests/test_journal.py -q
+uv run --extra dev python -m pytest tests/test_companion_cli.py tests/test_handoff.py tests/test_journal.py tests/test_rhythm.py -q
 ```
 
 Обе проверки — структурные. Они ловят «переименовал и забыл» и дрейф чисел

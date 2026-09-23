@@ -48,6 +48,9 @@ final class TaskPanelController {
     /// «Записи» с этой встречей.
     var onOpenHandoff: ((String) -> Void)?
 
+    /// Утренняя или вечерняя реплика персонажа (`LivelinessController`).
+    private(set) var companionLine: String?
+
     /// Замена при восстановлении из истории: какую задачу возвращаем.
     var pendingRestoreID: UUID?
 
@@ -74,6 +77,7 @@ final class TaskPanelController {
             || catchUpMessage != nil
             || slotsFullMessage != nil
             || handoffNotice != nil
+            || companionLine != nil
     }
 
     enum AddOutcome: Equatable {
@@ -317,6 +321,29 @@ final class TaskPanelController {
     func dismissHandoffNotice() {
         handoffNotice = nil
         taskBag.cancel(.handoffNotice)
+    }
+
+    // MARK: - Ритм дня (живость)
+
+    /// Реплика на полоске на 10 секунд; глаза реагируют по её эмоции, как на
+    /// передачу со встречи. Решение «пора ли говорить» — у `LivelinessController`.
+    func presentCompanionLine(_ text: String, emotion: CompanionEmotion, intensity: Double) {
+        companionLine = text
+        if let reaction = emotion.reaction,
+           intensity >= CharacterConfig.handoffReactionThreshold,
+           !isSuppressed {
+            stateMachine.react(reaction)
+        }
+        taskBag.replace(.companionLine, with: Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(CharacterConfig.rhythmNoticeDuration * 1_000_000_000))
+            guard !Task.isCancelled, let self else { return }
+            self.companionLine = nil
+        })
+    }
+
+    func dismissCompanionLine() {
+        companionLine = nil
+        taskBag.cancel(.companionLine)
     }
 
     /// «Открыть» на полоске: страница «Записи» с этой встречей.

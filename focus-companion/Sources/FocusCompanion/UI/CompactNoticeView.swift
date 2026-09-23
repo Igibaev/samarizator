@@ -75,6 +75,7 @@ struct CompactNoticeView: View {
         if let message = taskPanel.catchUpMessage { return message }
         if let message = taskPanel.slotsFullMessage { return message }
         if let handoff = taskPanel.handoffNotice { return handoff.line.text }
+        if let line = taskPanel.companionLine { return line }
         return ""
     }
 
@@ -85,6 +86,8 @@ struct CompactNoticeView: View {
             taskPanel.dismissCatchUpMessage()
         } else if taskPanel.handoffNotice != nil {
             taskPanel.dismissHandoffNotice()
+        } else if taskPanel.companionLine != nil {
+            taskPanel.dismissCompanionLine()
         }
     }
 }

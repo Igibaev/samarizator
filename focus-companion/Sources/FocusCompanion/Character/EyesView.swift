@@ -41,10 +41,11 @@ struct EyesView: View {
     private var totalOffset: CGSize {
         CGSize(
             width: appearance.offsetX + gazeTargetOffset.width
-                + (appearance.tracksCursor ? model.gazeOffset.width : 0)
+                + (appearance.tracksCursor ? model.gazeOffset.width + model.glanceOffset.width : 0)
                 + model.jolt,
             height: appearance.offsetY + gazeTargetOffset.height
-                + (appearance.tracksCursor ? model.gazeOffset.height : 0)
+                + (appearance.tracksCursor ? model.gazeOffset.height + model.glanceOffset.height : 0)
+                + model.breath
         )
     }
 }

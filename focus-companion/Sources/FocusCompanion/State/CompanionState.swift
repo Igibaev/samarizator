@@ -27,6 +27,12 @@ enum CompanionState: String, CaseIterable, Identifiable {
     case discarding
     /// Ошибка, требующая внимания.
     case error
+    /// Поздний вечер: веки тяжелее, моргает медленнее (переключатель «Живость»).
+    case drowsy
+    /// Человека нет дольше нескольких минут: глаза-щёлочки и медленное дыхание.
+    case asleep
+    /// Человек вернулся: глаза коротко распахиваются.
+    case waking
 
     var id: String { rawValue }
 
@@ -43,6 +49,9 @@ enum CompanionState: String, CaseIterable, Identifiable {
         case .sweeping: return "Подметает"
         case .discarding: return "Выбрасывает"
         case .error: return "Ошибка"
+        case .drowsy: return "Сонный"
+        case .asleep: return "Спит"
+        case .waking: return "Просыпается"
         }
     }
 
@@ -55,16 +64,18 @@ enum CompanionState: String, CaseIterable, Identifiable {
         case .curious: return 50
         case .angry, .sad, .sweeping, .discarding: return 40
         case .happy: return 30
+        // Пробуждение — ответ на возвращение человека, но не важнее радости.
+        case .waking: return 25
         case .reminder: return 20
         case .listening, .thinking: return 10
-        case .idle: return 0
+        case .idle, .drowsy, .asleep: return 0
         }
     }
 
     /// Сколько держится временная реакция. `nil` — состояние фоновое.
     var duration: Double? {
         switch self {
-        case .idle, .listening, .thinking: return nil
+        case .idle, .listening, .thinking, .drowsy, .asleep: return nil
         case .curious: return CharacterConfig.curiousDuration
         case .reminder: return CharacterConfig.reminderDuration
         case .happy: return CharacterConfig.happyDuration
@@ -73,6 +84,7 @@ enum CompanionState: String, CaseIterable, Identifiable {
         case .sweeping: return CharacterConfig.sweepingDuration
         case .discarding: return CharacterConfig.discardingDuration
         case .error: return CharacterConfig.errorDuration
+        case .waking: return CharacterConfig.wakingDuration
         }
     }
 }

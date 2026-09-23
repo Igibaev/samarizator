@@ -125,6 +125,31 @@ extension StateAppearance {
             upperLid: 0.2,
             tracksCursor: false
         ),
+
+        // Сонный: верхние веки прикрывают треть глаза, моргание реже.
+        // За курсором следит — он не спит, просто поздно.
+        .drowsy: StateAppearance(
+            heightMultiplier: 0.94,
+            offsetY: 0.5,
+            upperLid: 0.38,
+            blinkRateMultiplier: 0.6
+        ),
+
+        // Спит: щёлочки у нижнего края, взгляд не следит. Моргания нет,
+        // вместо него медленное дыхание (EyesViewModel).
+        .asleep: StateAppearance(
+            heightMultiplier: 0.9,
+            offsetY: 1.5,
+            upperLid: 0.84,
+            tracksCursor: false
+        ),
+
+        // Просыпается: глаза на мгновение чуть больше и выше обычного.
+        .waking: StateAppearance(
+            heightMultiplier: 1.1,
+            offsetY: -1.5,
+            tracksCursor: false
+        ),
     ]
 
     static func forState(_ state: CompanionState) -> StateAppearance {

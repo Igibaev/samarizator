@@ -27,6 +27,12 @@ final class TaskBag: @unchecked Sendable {
         /// Заметка дня: пауза после изменения и часовой тик (`JournalSync`).
         case journalDebounce
         case journalHourly
+        /// Живость: проверка присутствия, дыхание во сне, взгляд в сторону,
+        /// автоскрытие утренней / вечерней реплики.
+        case presence
+        case breathing
+        case glance
+        case companionLine
     }
 
     private let lock = NSLock()

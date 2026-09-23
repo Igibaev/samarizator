@@ -106,6 +106,34 @@ enum CharacterConfig {
     /// кнопке «В фокус» на странице «Записи».
     static let handoffRetentionDays: Int = 30
 
+    // MARK: - Живость (переключатель в меню, по умолчанию выключен)
+
+    /// Сколько секунд без ввода — и персонаж засыпает.
+    static let asleepAfter: Double = 5 * 60
+    /// Поздний вечер: сонные глаза с этого часа до `drowsyHourEnd`.
+    static let drowsyHourStart: Int = 23
+    static let drowsyHourEnd: Int = 6
+    /// Как часто проверять присутствие человека. Вызов дешёвый —
+    /// `CGEventSource`, — а возвращение хочется заметить сразу.
+    static let presenceTickInterval: Double = 2
+    static let wakingDuration: Double = 0.600
+    /// Человек «активен», если трогал мышь или клавиатуру не дольше этого.
+    static let activeWithin: Double = 60
+    /// Мелкие движения в покое: не чаще раза в полторы минуты.
+    static let fidgetMinInterval: Double = 90
+    static let fidgetMaxInterval: Double = 240
+    static let glanceShiftX: CGFloat = 2.5
+    static let glanceShiftY: CGFloat = 1.5
+    static let glanceHold: Double = 0.9
+    /// Дыхание во сне: подъём на 1 pt и обратно за этот цикл.
+    static let breathingCycle: Double = 2.8
+    static let breathingDepth: CGFloat = 1
+    /// Ритм дня: утренняя реплика — при первой активности с 5:00 до вечера,
+    /// вечерняя — после 18:00, если утром он уже здоровался.
+    static let morningFromHour: Int = 5
+    static let eveningFromHour: Int = 18
+    static let rhythmNoticeDuration: Double = 10.0
+
     // MARK: - Отладка и фикстуры
 
     /// FOCUS_DEBUG=1 — крыло красное и вытянуто вниз, иначе его не отличить

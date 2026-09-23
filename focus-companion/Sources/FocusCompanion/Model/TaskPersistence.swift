@@ -52,6 +52,9 @@ enum CompanionSettings {
         static let frequentReminders = "companion.frequentReminders"
         static let demoMode = "companion.demoMode"
         static let lastHandoffSeenAt = "companion.lastHandoffSeenAt"
+        static let liveliness = "companion.liveliness"
+        static let lastMorningDay = "companion.lastMorningDay"
+        static let lastEveningDay = "companion.lastEveningDay"
     }
 
     static var mood: CharacterMood {
@@ -92,6 +95,24 @@ enum CompanionSettings {
     static var lastHandoffSeenAt: Date {
         get { defaults.object(forKey: Key.lastHandoffSeenAt) as? Date ?? .distantPast }
         set { defaults.set(newValue, forKey: Key.lastHandoffSeenAt) }
+    }
+
+    /// «Живость»: сон, пробуждение, мелкие движения и реплики утром и вечером.
+    /// Выключена по умолчанию, пока базовое поведение не проверено на Mac.
+    static var liveliness: Bool {
+        get { defaults.bool(forKey: Key.liveliness) }
+        set { defaults.set(newValue, forKey: Key.liveliness) }
+    }
+
+    /// День (ГГГГ-ММ-ДД), в который уже прозвучала утренняя / вечерняя реплика.
+    static var lastMorningDay: String {
+        get { defaults.string(forKey: Key.lastMorningDay) ?? "" }
+        set { defaults.set(newValue, forKey: Key.lastMorningDay) }
+    }
+
+    static var lastEveningDay: String {
+        get { defaults.string(forKey: Key.lastEveningDay) ?? "" }
+        set { defaults.set(newValue, forKey: Key.lastEveningDay) }
     }
 
     /// Демонстрационный режим: FOCUS_DEMO=1 или переключатель в меню.

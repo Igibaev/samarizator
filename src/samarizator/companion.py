@@ -14,6 +14,7 @@ headless — `live.LiveRecorder` и `worker` не тянут Qt, — не хва
     python -m samarizator.companion transcribe <mid>
     python -m samarizator.companion summarize <mid>
     python -m samarizator.companion journal [--date 2026-09-23]
+    python -m samarizator.companion rhythm morning|evening
 
 `record` держит запись, пока идёт сам: остановка — это SIGINT (или SIGTERM)
 процессу. Так тому, кто его запустил, не нужны ни pid-файлы, ни отдельная
@@ -332,6 +333,15 @@ def command_journal(args):
     return 0
 
 
+def command_rhythm(args):
+    """Утренняя или вечерняя реплика. Компаньон сам решает, когда её спросить."""
+    from . import rhythm
+
+    spoken = rhythm.line(Store(), Settings.load(), args.kind)
+    emit("line", kind=args.kind, **spoken)
+    return 0
+
+
 def _segment_count(store, mid):
     """Сколько реплик распознано сейчас. По росту этого числа видно, что
     сводка устарела, — и это факт, а не догадка."""
@@ -364,6 +374,9 @@ def build_parser():
     journal = commands.add_parser("journal", help="обновить заметку дня и «Поручения»")
     journal.add_argument("--date", help="ещё и этот день, ГГГГ-ММ-ДД; сегодняшний обновляется всегда")
 
+    rhythm = commands.add_parser("rhythm", help="утренняя или вечерняя реплика персонажа")
+    rhythm.add_argument("kind", choices=("morning", "evening"))
+
     return parser
 
 
@@ -374,6 +387,7 @@ HANDLERS = {
     "summarize": command_summarize,
     "progress": command_progress,
     "journal": command_journal,
+    "rhythm": command_rhythm,
 }
 
 
