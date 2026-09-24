@@ -14,8 +14,9 @@ enum DesignTokens {
         static let companionBase = Color(hex: 0x08090B)
         /// Плотная основа панелей.
         static let surfaceSolid = Color(hex: 0x17181C)
-        /// Базовый fallback «дымчатого стекла».
-        static let surfaceGlass = Color(hex: 0x17181C).opacity(0.92)
+        /// Основа раскрывающихся панелей. Раньше была полупрозрачной, и текст
+        /// окон позади читался сквозь записи — теперь плотная.
+        static let surfaceGlass = Color(hex: 0x17181C)
         /// Выбранная или приподнятая строка.
         static let surfaceRaised = Color(hex: 0x222328)
         /// Наведение на элемент.

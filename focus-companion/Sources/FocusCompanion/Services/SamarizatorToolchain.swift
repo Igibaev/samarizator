@@ -48,19 +48,49 @@ struct SamarizatorToolchain: Equatable {
         if let raw = ProcessInfo.processInfo.environment[environmentKey], !raw.isEmpty {
             return validate(URL(fileURLWithPath: raw, isDirectory: true))
         }
-        if let stored = UserDefaults.standard.string(forKey: defaultsKey), !stored.isEmpty {
-            return validate(URL(fileURLWithPath: stored, isDirectory: true))
+        // Сохранённый выбор, если он всё ещё годится; устаревший (папку
+        // переместили) не должен мешать автопоиску ниже.
+        if let stored = UserDefaults.standard.string(forKey: defaultsKey), !stored.isEmpty,
+           case .success(let toolchain) = validate(URL(fileURLWithPath: stored, isDirectory: true)) {
+            return .success(toolchain)
         }
         // `build-app.sh` кладёт .app внутрь focus-companion/, то есть на один
-        // уровень ниже корня репозитория. Поднимаемся, пока не найдём его.
-        var candidate = Bundle.main.bundleURL
-        for _ in 0..<5 {
-            candidate = candidate.deletingLastPathComponent()
-            if case .success(let toolchain) = validate(candidate) {
-                return .success(toolchain)
+        // уровень ниже корня репозитория. Поднимаемся, пока не найдём его —
+        // от бандла, от самого бинарника (запуск из терминала) и от текущей
+        // папки терминала. Первый найденный корень запоминаем.
+        var starts = [Bundle.main.bundleURL]
+        if let executable = Bundle.main.executableURL { starts.append(executable) }
+        starts.append(URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+            .appendingPathComponent("placeholder"))
+        var lastFailure: Failure = .notFound
+        for start in starts {
+            var candidate = start.resolvingSymlinksInPath()
+            for _ in 0..<7 {
+                candidate = candidate.deletingLastPathComponent()
+                switch validate(candidate) {
+                case .success(let toolchain):
+                    UserDefaults.standard.set(candidate.path, forKey: defaultsKey)
+                    return .success(toolchain)
+                case .failure(.environmentMissing(let path)):
+                    // Папка та, но окружения нет — это полезнее, чем «не найдено».
+                    lastFailure = .environmentMissing(path: path)
+                case .failure:
+                    continue
+                }
             }
         }
-        return .failure(.notFound)
+        return .failure(lastFailure)
+    }
+
+    /// Строка для лога запуска: где искали и что нашли.
+    static func diagnostics() -> String {
+        switch resolve() {
+        case .success(let toolchain):
+            return "найден: \(toolchain.root.path)"
+        case .failure(let failure):
+            return "НЕ найден — \(failure.explanation) Бандл: \(Bundle.main.bundleURL.path), "
+                + "папка терминала: \(FileManager.default.currentDirectoryPath)"
+        }
     }
 
     /// Проверяет папку и запоминает её, если она подходит.

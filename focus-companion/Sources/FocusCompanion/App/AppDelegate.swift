@@ -147,6 +147,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         print("панель пропускает клики: "
             + (windowController.panelIgnoresMouseEvents.map(String.init(describing:)) ?? "панели нет"))
         print("записи: \(windowController.recordings.availability.explanation)")
+        print("Samarizator: \(SamarizatorToolchain.diagnostics())")
         print("передачи со встреч: \(HandoffInbox.directoryURL.path), файлов: \(windowController.taskPanel.handoffs.count)")
         print("экранов: \(NSScreen.screens.count)")
         for screen in NSScreen.screens {
