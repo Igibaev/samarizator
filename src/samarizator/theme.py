@@ -118,6 +118,9 @@ QPushButton#partHeader {{ background: transparent; border-radius: 0; text-align:
 QPushButton#partHeader:hover {{ background: #fafafc; }}
 QPushButton#modelRow {{ background: transparent; text-align: left; padding: 0 8px; color: {SECONDARY}; font-weight: 400; font-size: 12px; }}
 QPushButton#modelRow:hover {{ background: rgba(0,0,0,0.05); }}
+QPushButton#sideRow {{ background: transparent; text-align: left; padding: 6px 10px; color: {TEXT}; font-weight: 400; font-size: 13px; border-radius: 7px; }}
+QPushButton#sideRow:hover {{ background: rgba(0,0,0,0.06); }}
+QPushButton#sideRow:disabled {{ color: {GREY}; }}
 QPushButton#warnRow {{ background: #fdf0dc; color: #8a4b00; text-align: left; padding: 0 10px; font-size: 12px; }}
 QPushButton#warnRow:hover {{ background: #f9e5c4; }}
 QToolButton {{ background: transparent; border: none; border-radius: 7px; padding: 6px; }}

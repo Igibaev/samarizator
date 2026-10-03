@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from PySide6.QtCore import QLockFile, QSize, Qt, QThread, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QDesktopServices, QKeySequence, QShortcut
+from PySide6.QtGui import QAction, QColor, QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -250,6 +250,7 @@ class Window(QMainWindow):
         shell.setSpacing(0)
         shell.addWidget(self.build_sidebar())
         shell.addWidget(self.build_content(), 1)
+        self.build_menus()
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.poll)
         self.timer.start(800)
@@ -304,18 +305,35 @@ class Window(QMainWindow):
         self.model_button.setToolTip("Один раз: после загрузки сводки создаются без интернета.")
         self.model_button.clicked.connect(self.download_missing)
         side.addWidget(self.model_button)
-        bottom = QHBoxLayout()
-        bottom.setSpacing(2)
         self.model_row = QPushButton()
         self.model_row.setObjectName("modelRow")
         self.model_row.setIconSize(QSize(8, 8))
         self.model_row.clicked.connect(self.configure)
-        bottom.addWidget(self.model_row, 1)
-        self.settings_button = tool_button("gear", "Настройки")
+        side.addWidget(self.model_row)
+        # A labelled row, like Finder's sidebar: an unlabeled gear was not read as settings.
+        self.settings_button = QPushButton("Настройки")
+        self.settings_button.setObjectName("sideRow")
+        self.settings_button.setIcon(icon("gear"))
+        self.settings_button.setIconSize(QSize(17, 17))
+        self.settings_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.settings_button.setToolTip("Модели, формат сводки, запись и папка заметок (⌘,)")
         self.settings_button.clicked.connect(self.configure)
-        bottom.addWidget(self.settings_button)
-        side.addLayout(bottom)
+        side.addWidget(self.settings_button)
         return sidebar
+
+    def build_menus(self):
+        """The standard «Настройки…» (⌘,) of every Mac app; Qt puts it into the app menu."""
+        settings = QAction("Настройки…", self)
+        settings.setShortcut(QKeySequence.StandardKey.Preferences)
+        settings.setMenuRole(QAction.MenuRole.PreferencesRole)
+        settings.triggered.connect(self.configure)
+        self.addAction(settings)
+        if sys.platform == "darwin":
+            menu = self.menuBar().addMenu("Файл")
+            menu.addAction(settings)
+            add = menu.addAction("Добавить аудио или видео…", self.add_file)
+            add.setShortcut(QKeySequence.StandardKey.Open)
+        self.settings_action = settings
 
     def build_content(self):
         content = QWidget()
@@ -1788,6 +1806,7 @@ class Window(QMainWindow):
         working = "Дождитесь конца текущей обработки." if self.job else "Идёт запись."
         pick = "Выберите запись в списке слева."
         explain(self.settings_button, not busy, working)
+        self.settings_action.setEnabled(not busy)
         explain(self.add_button, not recording, "Идёт запись.")
         explain(self.model_button, not busy, working)
         # Stopping must stay possible while catch-up recognition is running.
