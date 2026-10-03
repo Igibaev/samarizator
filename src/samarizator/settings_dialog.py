@@ -671,7 +671,7 @@ def download_text(done, total):
 class ModelDownloadDialog(QDialog):
     """One-time resumable download of a model, with a recommendation by RAM."""
 
-    def __init__(self, parent=None, presets=None, title="Модель сводок", intro=None):
+    def __init__(self, parent=None, presets=None, title="Модель сводок", intro=None, preferred=None):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.resize(560, 360)
@@ -693,7 +693,7 @@ class ModelDownloadDialog(QDialog):
             )
         )
         self.choice = QComboBox()
-        best = recommended(self.presets)
+        best = preferred if preferred in self.presets else recommended(self.presets)
         for key, preset in self.presets.items():
             mark = " · рекомендуется" if key == best else ""
             have = " · скачана" if self.target(key).is_file() else ""

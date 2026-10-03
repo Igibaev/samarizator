@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       bundle_llm:
-        description: "Embed a summary model (empty, qwen3-4b, gemma3-12b) — makes the DMG large"
+        description: "Extra summary model on top of models/bundle.json (qwen3-4b, gemma3-12b) — makes the DMG large"
         required: false
         default: ""
   push:
@@ -27,6 +27,8 @@ jobs:
       HAS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE != '' }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          lfs: true  # models/ — see models/README.md
 
       - uses: astral-sh/setup-uv@v6
 
@@ -44,7 +46,7 @@ jobs:
           path: |
             build/macos/src
             build/macos/out-arm64
-          key: deps-arm64-${{ hashFiles('packaging/macos/build.sh', 'native/macos-capture/main.swift') }}
+          key: deps-arm64-${{ hashFiles('packaging/macos/build.sh', 'native/macos-capture/main.swift', 'models/bundle.json') }}
 
       - name: Import signing certificate
         if: env.HAS_CERTIFICATE == 'true'

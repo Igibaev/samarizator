@@ -8,6 +8,7 @@ from html import escape
 
 from PySide6.QtCore import QEvent, Qt, Signal
 from PySide6.QtWidgets import (
+    QBoxLayout,
     QCheckBox,
     QHBoxLayout,
     QLabel,
@@ -26,6 +27,22 @@ STATUS_TAGS = dict(agreed="ok", proposed="proposed", cancelled="cancelled", disp
 KIND_DOTS = dict(decision=GREEN, action=ACCENT, risk=ORANGE, question="#7a3fc4", point=GREY)
 AVATARS = ["#8e5bd8", "#2f8f62", "#d0661a", "#0a7aff", "#c2185b", "#5f6b7a"]
 PART_SIZE = 15  # summaries made before parts existed: group the timeline by this many points
+
+
+def sources_tooltip(lookup, mid, ids):
+    """Current text of the source replies, escaped: the transcript may have been edited."""
+    if not mid:
+        return ""
+    rows = [row for row in (lookup(mid, sid) for sid in ids) if row]
+    if not rows:
+        return ""
+    noun = "реплика" if len(rows) == 1 else "реплики" if len(rows) < 5 else "реплик"
+    excerpts = "".join(
+        f"<p><b>{stamp(row['start'])}–{stamp(row['end'])}</b><br>{escape(str(row['text']))}</p>"
+        for row in rows
+    )
+    hint = "Нажмите, чтобы прослушать по порядку." if len(rows) > 1 else "Нажмите, чтобы прослушать."
+    return f"<p><b>Источники · {len(rows)} {noun}</b></p>{excerpts}<p>{hint}</p>"
 
 
 class EvidenceButton(QPushButton):
@@ -87,10 +104,27 @@ class SummaryPage(QScrollArea):
         outer.addStretch(1)
         self.setWidget(holder)
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.arrange()
+
+    def arrange(self):
+        """Risks and questions side by side when there is room, one under the other when not."""
+        pair = getattr(self, "pair", None)
+        if pair is not None:
+            wide = self.column_widget.width() >= 620
+            try:
+                pair.setDirection(
+                    QBoxLayout.Direction.LeftToRight if wide else QBoxLayout.Direction.TopToBottom
+                )
+            except RuntimeError:  # the layout was deleted with an older summary
+                self.pair = None
+
     # -- public ---------------------------------------------------------------------
 
     def clear(self, message=""):
         self.mid = None
+        self.pair = None
         self.sections = {}
         for layout in (self.column, self.toc):
             while layout.count():
@@ -149,6 +183,7 @@ class SummaryPage(QScrollArea):
         self.add_timeline(detailed)
         self.column.addStretch(1)
         self.toc.addStretch(1)
+        self.arrange()
 
     def plain_text(self, section=None):
         roots = [self.sections[section]] if section else [self.column_widget]
@@ -164,18 +199,7 @@ class SummaryPage(QScrollArea):
         return root.findChildren(EvidenceButton)
 
     def sources_tooltip(self, ids):
-        if not self.mid:
-            return ""
-        rows = [row for row in (self.lookup(self.mid, sid) for sid in ids) if row]
-        if not rows:
-            return ""
-        noun = "реплика" if len(rows) == 1 else "реплики" if len(rows) < 5 else "реплик"
-        excerpts = "".join(
-            f"<p><b>{stamp(row['start'])}–{stamp(row['end'])}</b><br>{escape(str(row['text']))}</p>"
-            for row in rows
-        )
-        hint = "Нажмите, чтобы прослушать по порядку." if len(rows) > 1 else "Нажмите, чтобы прослушать."
-        return f"<p><b>Источники · {len(rows)} {noun}</b></p>{excerpts}<p>{hint}</p>"
+        return sources_tooltip(self.lookup, self.mid, ids)
 
     # -- sections ---------------------------------------------------------------------
 
@@ -335,8 +359,9 @@ class SummaryPage(QScrollArea):
     def add_risks(self, risks, questions):
         count = len(risks) + len(questions)
         layout = self.section("risks", "Риски и вопросы", str(count))
-        pair = QHBoxLayout()
+        pair = QBoxLayout(QBoxLayout.Direction.LeftToRight)
         pair.setSpacing(16)
+        self.pair = pair
         for title, items, icon, color in [
             ("Риски", risks, "warning", "#c46b00"),
             ("Открытые вопросы", questions, "question", ACCENT),

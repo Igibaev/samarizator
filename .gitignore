@@ -6,6 +6,8 @@ __pycache__/
 .DS_Store
 .env
 *.bin
+# Bundled models are tracked through Git LFS (.gitattributes).
+!models/*.bin
 *.onnx
 *.wav
 *.mp4

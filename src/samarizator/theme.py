@@ -39,6 +39,8 @@ ICONS = {
     "sliders": '<path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/>',
     "wave": '<path d="M4 10v4M8 7v10M12 4v16M16 8v8M20 11v2"/>',
     "download": '<path d="M12 4v12M6 11l6 6 6-6M5 20h14"/>',
+    "send": '<path d="M12 19V5M6 11l6-6 6 6"/>',
+    "chat": '<path d="M20 12a8 8 0 0 1-11.6 7.1L4 20l1-4.2A8 8 0 1 1 20 12z"/>',
     "obsidian": '<path d="M14 3h7v7M10 14 21 3M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/>',
 }
 
@@ -131,6 +133,16 @@ QFrame#separator {{ background: #ececf0; border: none; max-height: 1px; min-heig
 QFrame#banner[kind="warn"] {{ background: #fff8ec; border-radius: 12px; }}
 QFrame#banner[kind="error"] {{ background: #fff0f1; border-radius: 12px; }}
 QFrame#banner[kind="info"] {{ background: #eef4fc; border-radius: 12px; }}
+QFrame#chat {{ background: #ffffff; border: none; border-left: 1px solid #e5e5ea; }}
+QWidget#chatHolder {{ background: #ffffff; }}
+QFrame#bubble {{ background: #f0f0f3; border-radius: 14px; }}
+QFrame#bubbleMine {{ background: {ACCENT}; border-radius: 14px; }}
+QFrame#bubbleMine QLabel {{ color: #ffffff; }}
+QFrame#bubbleMuted {{ background: {GROUND}; border-radius: 14px; }}
+QFrame#bubbleMuted QLabel {{ color: {SECONDARY}; }}
+QPushButton#suggestion {{ background: #f0f0f3; text-align: left; padding: 0 12px; min-height: 34px; border-radius: 10px; font-weight: 400; }}
+QPushButton#suggestion:hover {{ background: #e5e5ea; }}
+QPushButton#askButton:checked {{ background: #e8f0fb; color: {ACCENT}; }}
 QFrame#playbar {{ background: #1d1d1f; border-radius: 12px; }}
 QFrame#playbar QLabel {{ color: #ffffff; }}
 QFrame#playbar QPushButton {{ background: #3a3a3c; color: #ffffff; min-height: 28px; }}

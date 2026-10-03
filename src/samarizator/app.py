@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
 from . import local_llm, obsidian
 from . import progress as work
 from .bundle import python_command, tool
+from .chat import ChatEngine, ChatPanel, ChatWorker
 from .config import Settings, data_dir
 from .knowledge import stamp
 from .live import (
@@ -219,6 +220,10 @@ class Window(QMainWindow):
         self.live_recorder = None
         self.recording_id = None
         self.download_job = None
+        self.download_queue = []
+        self.chat_engine = ChatEngine(self)
+        self.chat_worker = None
+        self.times = {}
         self.visible_rows = []
         self.audio_text = ""
         from .build import build_label
@@ -284,10 +289,11 @@ class Window(QMainWindow):
         remove.setContext(Qt.ShortcutContext.WidgetShortcut)
         remove.activated.connect(lambda: self.delete_meeting())
         side.addWidget(self.list, 1)
-        self.model_button = QPushButton("Модель сводок не скачана — скачать")
+        self.model_button = QPushButton("Скачать модель сводок")
+        self.model_button.setIcon(icon("download", "#8a4b00"))
         self.model_button.setObjectName("warnRow")
         self.model_button.setToolTip("Один раз: после загрузки сводки создаются без интернета.")
-        self.model_button.clicked.connect(self.download_model)
+        self.model_button.clicked.connect(self.download_missing)
         side.addWidget(self.model_button)
         bottom = QHBoxLayout()
         bottom.setSpacing(2)
@@ -341,7 +347,16 @@ class Window(QMainWindow):
         for page in [self.welcome, self.empty, self.processing, self.final_page, self.summary_page]:
             self.stack.addWidget(page)
         self.stack.addWidget(self.build_transcript())
-        body.addWidget(self.stack, 1)
+        middle = QHBoxLayout()
+        middle.setSpacing(0)
+        middle.addWidget(self.stack, 1)
+        self.chat_panel = ChatPanel(self.store.segment)
+        self.chat_panel.ask.connect(self.ask_question)
+        self.chat_panel.cleared.connect(self.clear_chat)
+        self.chat_panel.playGroup.connect(self.play_evidence_group)
+        self.chat_panel.setVisible(False)
+        middle.addWidget(self.chat_panel)
+        body.addLayout(middle, 1)
         self.playbar = QFrame()
         self.playbar.setObjectName("playbar")
         play = QHBoxLayout(self.playbar)
@@ -393,6 +408,13 @@ class Window(QMainWindow):
         right = QHBoxLayout()
         right.setSpacing(6)
         right.addStretch(1)
+        self.ask_button = QPushButton("Спросить")
+        self.ask_button.setObjectName("askButton")
+        self.ask_button.setIcon(icon("chat"))
+        self.ask_button.setCheckable(True)
+        self.ask_button.setToolTip("Вопросы по сводке этой записи — модель отвечает только по ней")
+        self.ask_button.toggled.connect(self.toggle_chat)
+        right.addWidget(self.ask_button)
         self.copy_final_button = tool_button("copy", "Копировать итоговый текст в Markdown")
         self.copy_final_button.clicked.connect(self.copy_final)
         right.addWidget(self.copy_final_button)
@@ -547,37 +569,118 @@ class Window(QMainWindow):
         self.adopt_model(dialog.path, dialog.preset)
         return self.has_llm()
 
+    def missing_models(self):
+        """[(role, preset)] the app still needs; the bundled ones are never in this list."""
+        from .setup_models import WHISPER_PRESETS
+
+        missing = []
+        whisper = Path(self.settings.whisper_model).expanduser()
+        if not self.settings.whisper_model.strip() or not whisper.is_file():
+            preset = next((p for p in WHISPER_PRESETS.values() if p.file == whisper.name), WHISPER_PRESETS["small"])
+            missing.append(("whisper", preset))
+        if not self.has_llm():
+            missing.append(("llm", local_llm.PRESETS[recommended(local_llm.PRESETS)]))
+        return missing
+
     def welcome_download(self):
-        """The welcome screen's big button: the recommended model, progress right there."""
-        key = recommended(local_llm.PRESETS)
-        preset = local_llm.PRESETS[key]
-        target = local_llm.preset_path(key)
-        if target.is_file():
-            self.adopt_model(target, key)
+        """The welcome screen's big button: everything missing, one after another, progress right there."""
+        queue = self.missing_models()
+        if not queue:
+            self.show_page()
             return
-        if shutil.disk_usage(target.parent).free < preset.size_gb * 1024**3 * 1.05:
-            QMessageBox.warning(self, "Мало места", "На диске не хватает места для этой модели.")
+        need = sum(preset.size_gb for _, preset in queue) * 1024**3 * 1.05
+        if shutil.disk_usage(local_llm.models_dir()).free < need:
+            QMessageBox.warning(self, "Мало места", "На диске не хватает места для моделей.")
+            return
+        self.download_queue = queue
+        self.download_next()
+
+    def download_next(self):
+        role, preset = self.download_queue[0]
+        target = local_llm.models_dir() / preset.file
+        title = "Модель распознавания" if role == "whisper" else "Модель сводок"
+        step = f" · {title.lower()}" + (f" ({len(self.download_queue)} осталось)" if len(self.download_queue) > 1 else "")
+        if target.is_file():
+            self.welcome_downloaded("", role, preset, target)
             return
         self.download_job = DownloadJob(preset.url, target)
         self.download_job.progress.connect(
             lambda done, total: self.welcome.set_download(
-                True, "Скачано " + download_text(done, total), done / total if total else None
+                True, "Скачано " + download_text(done, total) + step, done / total if total else None
             )
         )
-        self.download_job.done.connect(lambda error: self.welcome_downloaded(error, key, target))
-        self.welcome.set_download(True, "Подключение…", 0)
+        self.download_job.done.connect(lambda error: self.welcome_downloaded(error, role, preset, target))
+        self.welcome.set_download(True, "Подключение…" + step, 0)
         self.download_job.start()
 
-    def welcome_downloaded(self, error, key, target):
-        self.download_job.wait()
-        self.download_job.deleteLater()
-        self.download_job = None
-        self.welcome.set_download(False, error)
-        if not error:
-            self.adopt_model(target, key)
+    def welcome_downloaded(self, error, role, preset, target):
+        if self.download_job:
+            self.download_job.wait()
+            self.download_job.deleteLater()
+            self.download_job = None
+        if error:
+            self.welcome.set_download(False, error)
+            return
+        if role == "whisper":
+            self.adopt_whisper(target)
+        else:
+            self.adopt_model(target, preset.key)
+        self.download_queue = self.download_queue[1:]
+        if self.download_queue:
+            self.download_next()
+        else:
+            self.welcome.set_download(False, "")
+            self.show_page()
+
+    def adopt_whisper(self, path):
+        from .setup_models import whisper_memory_gb
+
+        self.settings.whisper_model = str(path)
+        self.settings.memory_gb = min(64, max(self.settings.memory_gb, whisper_memory_gb(path)))
+        try:
+            self.settings.save()
+        except (ValueError, OSError) as exc:
+            QMessageBox.warning(self, "Настройки", str(exc))
+
+    def download_missing(self):
+        """The sidebar's warning row: fetch whatever the app still lacks, one dialog each."""
+        roles = [role for role, _ in self.missing_models()]
+        if "whisper" in roles:
+            self.ensure_whisper()
+        if "llm" in roles:
+            self.download_model()
+        self.show_page()
+        self.controls()
+
+    def ensure_whisper(self):
+        """Before recognition: the model is there, or the user downloads one now."""
+        from .setup_models import WHISPER_PRESETS
+
+        if Path(self.settings.whisper_model).expanduser().is_file():
+            return True
+        name = Path(self.settings.whisper_model).name
+        preferred = next((k for k, p in WHISPER_PRESETS.items() if p.file == name), "small")
+        dialog = ModelDownloadDialog(
+            self,
+            WHISPER_PRESETS,
+            "Модель распознавания",
+            "Модели распознавания речи нет ни в приложении, ни на этом Mac. Скачайте её один раз — "
+            "дальше распознавание работает без интернета.",
+            preferred=preferred,
+        )
+        if dialog.exec() and dialog.path:
+            self.adopt_whisper(dialog.path)
+            return True
+        return False
 
     def model_summary(self):
         """(ready, name, note) for the sidebar and the welcome screen."""
+        whisper_missing = any(role == "whisper" for role, _ in self.missing_models())
+        if self.has_llm() and whisper_missing:
+            from .setup_models import WHISPER_PRESETS
+
+            small = WHISPER_PRESETS["small"]
+            return False, f"Модель распознавания · {small.size_gb:g} ГБ", "Нужна, чтобы превращать аудио в текст."
         if self.has_llm():
             path = Path(self.settings.llm_model).expanduser()
             preset = next((p for p in local_llm.PRESETS.values() if p.file == path.name), None)
@@ -586,9 +689,10 @@ class Window(QMainWindow):
         key = recommended(local_llm.PRESETS)
         preset = local_llm.PRESETS[key]
         name = preset.label.split("·")[-1].strip()
-        return False, f"{name} · {preset.size_gb:g} ГБ", (
-            f"Лучшее качество для этого Mac ({local_llm.ram_gb():.0f} ГБ памяти)"
-        )
+        note = f"Лучшее качество для этого Mac ({local_llm.ram_gb():.0f} ГБ памяти)"
+        if whisper_missing:
+            note += " · и модель распознавания, 0,2 ГБ"
+        return False, f"{name} · {preset.size_gb:g} ГБ", note
 
     def copy_final(self):
         if not self.mid or not (summary := self.store.meeting(self.mid)["summary"]):
@@ -650,6 +754,77 @@ class Window(QMainWindow):
                 self.progress.setText("Отметка задачи сохранена и в заметке Obsidian.")
             except (OSError, ValueError) as exc:
                 self.progress.setText(f"Отметка сохранена, заметку обновить не удалось: {exc}")
+
+    # -- questions about the summary ---------------------------------------------------
+
+    def toggle_chat(self, shown):
+        self.chat_panel.setVisible(shown)
+        # The page's own table of contents yields its width to the conversation.
+        self.summary_page.toc_widget.setVisible(not shown)
+        if shown:
+            self.chat_panel.field.setFocus()
+
+    def ask_question(self, question):
+        if not self.mid:
+            return
+        meeting = self.store.meeting(self.mid)
+        if not meeting["summary"]:
+            return
+        if self.job is not None and self.job.phase in {"summary", "final"}:
+            self.chat_panel.drop_thinking()
+            self.chat_panel.add_answer(
+                dict(a="Модель сейчас составляет сводку. Спросите, когда она закончит.", found=False)
+            )
+            return
+        if not self.has_llm() and not self.download_model():
+            return
+        history = self.store.checkpoint(self.mid, "chat", 0) or []
+        loading = "Загружаю модель — первый вопрос дольше…" if not self.chat_engine.loaded else ""
+        self.chat_panel.add_thinking()
+        self.chat_panel.set_busy(True, loading)
+        worker = ChatWorker(
+            self.chat_engine,
+            Settings(**asdict(self.settings)),
+            json.loads(meeting["summary"]),
+            dict(self.times),
+            question,
+            history,
+            meeting["title"],
+        )
+        worker.answered.connect(lambda result, mid=self.mid: self.chat_answered(mid, result))
+        worker.failed.connect(self.chat_failed)
+        worker.finished.connect(worker.deleteLater)
+        self.chat_worker = worker
+        worker.start()
+
+    def chat_answered(self, mid, result):
+        self.chat_worker = None
+        self.chat_engine.touch()
+        history = list(self.store.checkpoint(mid, "chat", 0) or [])
+        history.append(result)
+        self.store.save_checkpoint(mid, "chat", 0, history[-50:])
+        if mid == self.mid:
+            self.chat_panel.drop_thinking()
+            self.chat_panel.add_answer(result)
+            self.chat_panel.set_busy(False)
+
+    def chat_failed(self, error):
+        self.chat_worker = None
+        self.chat_panel.drop_thinking()
+        self.chat_panel.add_answer(dict(a=error, found=False))
+        self.chat_panel.set_busy(False)
+
+    def clear_chat(self):
+        if not self.mid or self.chat_worker is not None:
+            return
+        self.store.save_checkpoint(self.mid, "chat", 0, [])
+        self.chat_panel.show_meeting(self.mid, self.times, [])
+
+    def release_chat_model(self):
+        """Free the model's memory before a summary job loads its own copy."""
+        if self.chat_worker is not None:
+            self.chat_worker.wait()
+        self.chat_engine.stop()
 
     # -- adding recordings ------------------------------------------------------------
 
@@ -926,6 +1101,8 @@ class Window(QMainWindow):
             try:
                 result = json.loads(meeting["summary"])
                 times = {r["id"]: r["start"] for r in self.store.iter_segments(self.mid)}
+                self.times = times
+                self.chat_panel.show_meeting(self.mid, times, self.store.checkpoint(self.mid, "chat", 0) or [])
                 self.summary_page.show_summary(
                     self.mid, result, times, self.store.checkpoint(self.mid, "tasks-done", 0) or {}
                 )
@@ -1331,6 +1508,8 @@ class Window(QMainWindow):
         try:
             meeting = self.store.meeting(self.mid)
             original = Settings.from_dict(json.loads(meeting["settings"]))
+            if phase in {"transcribe", "retry"} and not self.ensure_whisper():
+                return
             # Preserve transcription chunk geometry on resume.
             if phase == "transcribe":
                 if not self.store.checkpoint(self.mid, "source", 0):
@@ -1363,6 +1542,7 @@ class Window(QMainWindow):
                 if phase in {"summary", "final"}:
                     if not self.has_llm() and not self.download_model():
                         return
+                    self.release_chat_model()
                     original.llm_model, original.llm_preset = self.settings.llm_model, self.settings.llm_preset
                     original.validate(llm=True)
                     local_llm.check_fits(original)
@@ -1521,6 +1701,9 @@ class Window(QMainWindow):
         self.views.setVisible(ready)
         self.more_button.setVisible(ready)
         self.copy_final_button.setVisible(ready and summarized and self.view == "final")
+        self.ask_button.setVisible(ready and summarized and not here)
+        self.chat_panel.setVisible(ready and summarized and not here and self.ask_button.isChecked())
+        self.summary_page.toc_widget.setVisible(not self.chat_panel.isVisibleTo(self))
         index = self.table.currentRow()
         has_row = ready and 0 <= index < len(self.visible_rows)
         has_retry = has_row and bool(self.visible_rows[index].get("retry_text"))
@@ -1535,10 +1718,20 @@ class Window(QMainWindow):
         if playing:
             self.playbar.setVisible(True)
         self.obsidian.setEnabled(ready and bool(meeting["note"]) and summarized)
-        ok, name, _ = self.model_summary()
-        self.model_button.setVisible(not ok)
-        self.model_row.setVisible(ok)
-        if ok:
+        roles = [role for role, _ in self.missing_models()]
+        self.model_button.setText(
+            "Скачать модели"
+            if len(roles) == 2
+            else "Скачать модель распознавания"
+            if roles == ["whisper"]
+            else "Скачать модель сводок"
+        )
+        self.model_button.setVisible(bool(roles))
+        self.model_row.setVisible(self.has_llm())
+        if self.has_llm():
+            path = Path(self.settings.llm_model).expanduser()
+            preset = next((p for p in local_llm.PRESETS.values() if p.file == path.name), None)
+            name = preset.label.split("·")[-1].strip() if preset else path.stem
             self.model_row.setText(name.removesuffix(" Instruct"))
             self.model_row.setIcon(dot_icon(GREEN))
             self.model_row.setToolTip("Модель сводок работает на этом Mac. Сменить — в настройках.")
@@ -1586,6 +1779,7 @@ class Window(QMainWindow):
         if self.download_job:
             self.download_job.stop.set()
             self.download_job.wait(5000)
+        self.release_chat_model()
         if self.job:
             self.job.stop.set()
             if not self.job.wait(5000):

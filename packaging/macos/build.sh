@@ -2,7 +2,8 @@
 # Builds a self-contained Samarizator.app and a .dmg for the current Mac architecture.
 #
 # Inside the app: Python + Qt (PyInstaller), static FFmpeg/ffprobe, whisper-cli and
-# llama-server (Metal), the ScreenCaptureKit helper, Whisper small + Silero VAD models.
+# llama-server (Metal), the ScreenCaptureKit helper and the models listed in
+# models/bundle.json — taken from the repository (Git LFS), downloaded only if absent.
 # The user downloads the .dmg, drags the app to Applications and runs it: no Homebrew,
 # no Python, no terminal. Only the summary model (2.5–19 GB) is downloaded from inside
 # the app on first use, unless SAMARIZATOR_BUNDLE_LLM embeds it.
@@ -13,7 +14,8 @@
 # Environment:
 #   SAMARIZATOR_SIGN_IDENTITY  "Developer ID Application: …" (default "-" = ad-hoc)
 #   APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD  notarize when all are set
-#   SAMARIZATOR_BUNDLE_LLM     preset key (qwen3-4b, gemma3-12b, qwen3-30b-a3b) to embed
+#   SAMARIZATOR_BUNDLE_LLM     summary model to embed on top of models/bundle.json:
+#                              preset key (qwen3-4b, gemma3-12b, qwen3-30b-a3b) or file name
 #   SAMARIZATOR_BUILD_DIR      work folder (default build/macos), caches third-party builds
 set -euo pipefail
 
@@ -24,8 +26,6 @@ MIN_MACOS=13.0
 FFMPEG_TAG=n7.1.1
 WHISPER_TAG=v1.9.4
 LLAMA_TAG=b11377
-WHISPER_MODEL_URL=https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin
-VAD_MODEL_URL=https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v6.2.0.bin
 WORK="${SAMARIZATOR_BUILD_DIR:-$ROOT/build/macos}"
 SRC="$WORK/src"
 OUT="$WORK/out-$ARCH"
@@ -112,25 +112,18 @@ for binary in "$OUT"/bin/*; do
   fi
 done
 
-say "Модели распознавания"
-download() { # url target; resumes an interrupted .part
-  [[ -s "$2" ]] && return 0
-  curl -fL --retry 5 -C - -o "$2.part" "$1"
-  mv -f "$2.part" "$2"
-}
-download "$WHISPER_MODEL_URL" "$OUT/models/ggml-small-q5_1.bin"
-download "$VAD_MODEL_URL" "$OUT/models/ggml-silero-v6.2.0.bin"
-
 say "Python и Qt (PyInstaller)"
 VENV="$WORK/venv-$ARCH"
 [[ -x "$VENV/bin/python" ]] || uv venv --python 3.12 "$VENV"
 uv pip install --python "$VENV/bin/python" --quiet "$ROOT" "pyinstaller>=6.10,<7"
-if [[ -n "${SAMARIZATOR_BUNDLE_LLM:-}" ]]; then
-  say "Модель сводок $SAMARIZATOR_BUNDLE_LLM внутрь приложения"
-  LLM_URL="$("$VENV/bin/python" -c "from samarizator.local_llm import PRESETS as P; print(P['$SAMARIZATOR_BUNDLE_LLM'].url)")"
-  LLM_FILE="$("$VENV/bin/python" -c "from samarizator.local_llm import PRESETS as P; print(P['$SAMARIZATOR_BUNDLE_LLM'].file)")"
-  download "$LLM_URL" "$OUT/models/$LLM_FILE"
-fi
+
+say "Модели: из models/ (Git LFS), иначе скачивание"
+# models/bundle.json decides what the app carries; SAMARIZATOR_BUNDLE_LLM adds a
+# summary model on top of it for one build.
+rm -f "$OUT/models/bundle.json"
+"$VENV/bin/python" -m samarizator.model_bundle provide --source models --target "$OUT/models" \
+  --llm "${SAMARIZATOR_BUNDLE_LLM:-}"
+
 ICONSET="$WORK/Samarizator.iconset"
 rm -rf "$ICONSET"
 QT_QPA_PLATFORM=offscreen "$VENV/bin/python" packaging/macos/make_icon.py "$ICONSET"
@@ -144,7 +137,15 @@ APP="$WORK/dist/Samarizator.app"
 RES="$APP/Contents/Resources"
 mkdir -p "$RES/bin" "$RES/models"
 cp "$OUT"/bin/* "$RES/bin/"
-cp "$OUT"/models/* "$RES/models/"
+# Only what this build provided: a model left from an earlier build stays out.
+"$VENV/bin/python" - "$OUT/models" "$RES/models" <<'PY'
+import json, shutil, sys
+from pathlib import Path
+source, target = Path(sys.argv[1]), Path(sys.argv[2])
+manifest = json.loads((source / "bundle.json").read_text())
+for name in ["bundle.json", *[manifest[r] for r in ("whisper", "vad", "llm") if manifest.get(r)]]:
+    shutil.copyfile(source / name, target / name)
+PY
 chmod 755 "$RES"/bin/*
 echo "$VERSION · $COMMIT" > "$RES/build.txt"
 

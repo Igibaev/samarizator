@@ -24,3 +24,11 @@ def plain_final_document(request, monkeypatch):
         "samarizator.summary.final_document",
         lambda *a, **k: dict(title="Протокол встречи", format="protocol", text="", warning=""),
     )
+
+
+@pytest.fixture
+def qapp(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+
+    return QApplication.instance() or QApplication([])

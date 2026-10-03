@@ -130,6 +130,11 @@ class Settings:
                 if candidate and Path(candidate).is_file():
                     changes[key] = str(candidate)
                     break
+        # A summary model shipped inside the app is used until the user picks another.
+        if not self.llm_model.strip():
+            shipped = shipped_model("llm")
+            if shipped:
+                changes["llm_model"] = str(shipped)
         return replace(self, **changes) if changes else self
 
     @classmethod
@@ -142,12 +147,37 @@ class Settings:
     @classmethod
     def first_run(cls):
         """Defaults that work out of the box: the bundled models when the app carries them."""
-        models = data_dir() / "models"
-        whisper = bundled_model("ggml-small-q5_1.bin") or models / "ggml-small-q5_1.bin"
-        vad = bundled_model("ggml-silero-v6.2.0.bin")
-        settings = cls(whisper_model=str(whisper), vault=str(Path.home() / "Documents/Samarizator"))
+        from .model_bundle import DEFAULTS
+
+        name = shipped_name("whisper") or DEFAULTS["whisper"]
+        whisper = bundled_model(name) or data_dir() / "models" / name
+        vad = shipped_model("vad")
+        llm = shipped_model("llm")
+        settings = cls(
+            whisper_model=str(whisper),
+            llm_model=str(llm) if llm else "",
+            vault=str(Path.home() / "Documents/Samarizator"),
+        )
         if vad:
             # The portable app ships the VAD model: use speech detection and pause-aligned
             # chunks from the start, as the quality profile does.
             settings.vad, settings.vad_model, settings.pause_boundaries = True, str(vad), True
+        if Path(whisper).is_file():
+            from .setup_models import whisper_memory_gb
+
+            # A large bundled Whisper needs the budget the transcription check accepts.
+            settings.memory_gb = min(64, max(settings.memory_gb, whisper_memory_gb(whisper)))
         return settings
+
+
+def shipped_name(role):
+    """File name the app's models/bundle.json gives for a role, or ""."""
+    from .model_bundle import shipped
+
+    manifest = shipped()
+    return manifest[role] if manifest else ""
+
+
+def shipped_model(role):
+    name = shipped_name(role) or ("ggml-silero-v6.2.0.bin" if role == "vad" else "")
+    return bundled_model(name) if name else None

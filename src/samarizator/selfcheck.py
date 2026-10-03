@@ -32,7 +32,11 @@ def run(strict=True):
         except (OSError, subprocess.SubprocessError) as exc:
             print(f"✗ {name}: {path} — {exc}")
             failures.append(name)
-    for name in MODELS:
+    from .model_bundle import shipped
+
+    manifest = shipped()
+    names = [manifest[role] for role in ("whisper", "vad", "llm") if manifest[role]] if manifest else MODELS
+    for name in names:
         path = bundled_model(name)
         print(f"{'✓' if path else '✗'} модель {name}: {path or 'нет в приложении'}")
         if not path:

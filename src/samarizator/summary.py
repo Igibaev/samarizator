@@ -383,6 +383,15 @@ class LocalClient:
             raise SummaryTooLong("Модель не уложилась в лимит ответа; блок будет разделён.")
         return parse_model_summary(content, allowed)
 
+    def complete_json(self, system, prompt, max_tokens):
+        """Any JSON object under the grammar, for callers with their own schema (questions)."""
+        from .qa import parse_json
+
+        finish, content = self._choice(self._payload(system, prompt, max_tokens, json_mode=True))
+        if finish == "length":
+            raise SummaryTooLong("Модель не уложилась в лимит ответа.")
+        return parse_json(content)
+
     def complete_text(self, system, prompt, max_tokens):
         """Free Markdown text. Returns (text, truncated)."""
         finish, content = self._choice(self._payload(system, prompt, max_tokens, json_mode=False))

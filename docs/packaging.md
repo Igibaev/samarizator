@@ -12,7 +12,7 @@
 | `Contents/Resources/bin/whisper-cli` | whisper.cpp, статически, Metal встроен |
 | `Contents/Resources/bin/llama-server` | llama.cpp, статически, Metal встроен — модель сводок |
 | `Contents/Resources/bin/samarizator-system-audio` | helper ScreenCaptureKit (`native/macos-capture`) |
-| `Contents/Resources/models/` | `ggml-small-q5_1.bin`, `ggml-silero-v6.2.0.bin` (+ модель сводок, если встроена) |
+| `Contents/Resources/models/` | модели из `models/bundle.json` и сам манифест — по нему первый запуск выбирает модели |
 | `Contents/Resources/build.txt` | версия и коммит, видны в заголовке окна |
 
 Пользовательские данные по-прежнему в `~/Library/Application Support/Samarizator`, туда же
@@ -57,6 +57,14 @@ brew install cmake uv           # только на машине сборки
 Переменные: `SAMARIZATOR_SIGN_IDENTITY`, `APPLE_ID`/`APPLE_TEAM_ID`/`APPLE_APP_PASSWORD`,
 `SAMARIZATOR_BUNDLE_LLM`, `SAMARIZATOR_BUILD_DIR` — см. начало скрипта. Сборка для Intel
 делается тем же скриптом на Intel Mac (для FFmpeg желателен `brew install nasm`).
+
+## Модели в сборке
+
+`models/bundle.json` перечисляет, что встроить: `whisper`, `vad`, `llm`. Для каждой модели
+сборка берёт файл из `models/` (Git LFS), иначе склеивает его части `.part-NNN`, иначе
+скачивает, и проверяет `sha256`, если он записан. Как положить модели в репозиторий и
+ограничения GitHub (место в LFS, диск раннера, размер релиза) — [models/README.md](../models/README.md).
+`SAMARIZATOR_BUNDLE_LLM` добавляет модель сводок поверх манифеста для одной сборки.
 
 ## Проверки внутри сборки
 

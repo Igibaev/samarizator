@@ -52,6 +52,9 @@ class Handler(BaseHTTPRequestHandler):
         log.write(json.dumps(body, ensure_ascii=False) + "\n")
         log.flush()
         prompt = body["messages"][-1]["content"]
+        if body["messages"][0]["content"].startswith("Ты отвечаешь на вопросы"):
+            content = json.dumps({"found": True, "answer": "Бюджет согласован [1].", "refs": [1]}, ensure_ascii=False)
+            return self.reply(200, {"choices": [{"finish_reason": "stop", "message": {"content": content}}]})
         if "grammar" not in body:
             content = "# Протокол\n\n## Решения\n1. Бюджет 17 млн — согласовано."
         else:
@@ -347,3 +350,29 @@ def test_ticked_tasks_are_ticked_in_the_obsidian_note(meeting):
     store.save_checkpoint(mid, "tasks-done", 0, {task_key(task): True})
     text = export(store, mid, settings).read_text(encoding="utf-8")
     assert "- [x] Посчитать скидки" in text
+
+
+def test_chat_engine_answers_through_the_local_server_and_releases_it(meeting, fake_server, qapp):
+    from samarizator import qa
+    from samarizator.chat import ChatEngine
+
+    store, mid, settings = meeting
+    script, model = fake_server
+    settings.llm_model = str(model)
+    store.save_chunk(mid, 0, [dict(start=5, end=9, speaker="Речь", text="Утвердили бюджет.")])
+    sid = store.segments(mid)[0]["id"]
+    item = dict(kind="decision", text="Бюджет согласован", evidence=[sid], status="agreed")
+    view = dict(overview="Итог", items=[item], topics=[])
+    summary = dict(**view, brief=view, detailed=dict(**view, resolved=[item]))
+    engine = ChatEngine()
+    with engine.lock:
+        client = engine.client(settings, lambda *_: None)
+        result = qa.ask(client, summary, {sid: 5.0}, "Что решили?")
+        client.close()
+    assert result["found"] and result["sources"][0]["evidence"] == [sid]
+    assert engine.loaded
+    seen = requests_seen(script)
+    question = [body for body in seen if "messages" in body][-1]
+    assert "grammar" in question and "Утвердили бюджет." not in question["messages"][-1]["content"]
+    engine.stop()
+    assert not engine.loaded
