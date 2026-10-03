@@ -11,6 +11,8 @@ dependencies = [
     "PySide6-Essentials>=6.8,<6.11",
     "httpx>=0.28,<0.29",
     "psutil>=7,<8",
+    "pymorphy3>=2,<3",
+    "pymorphy3-dicts-ru>=2.4,<3",
     "truststore>=0.10,<1",
 ]
 

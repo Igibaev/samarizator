@@ -48,6 +48,15 @@ def run(strict=True):
     except ImportError as exc:
         print(f"✗ Qt: {exc}")
         failures.append("Qt")
+    try:
+        from .privacy import classify
+
+        if not classify("Ирине"):
+            raise ValueError("словарь не распознал имя")
+        print("✓ словарь для обезличивания")
+    except (ImportError, OSError, ValueError) as exc:
+        print(f"✗ словарь для обезличивания: {exc}")
+        failures.append("pymorphy3")
     if failures:
         print("Не хватает: " + ", ".join(failures))
     return 1 if failures and strict else 0

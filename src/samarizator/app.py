@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -51,6 +52,7 @@ from .live import (
 )
 from .pages import FinalPage, ProcessingPage, StatePage, WelcomePage, app_icon
 from .playback import evidence_intervals
+from .privacy_page import PrivacyPage
 from .process import supervise
 from .settings_dialog import (
     DownloadJob,
@@ -374,7 +376,15 @@ class Window(QMainWindow):
         self.summary_page = SummaryPage(self.store.segment)
         self.summary_page.playGroup.connect(self.play_evidence_group)
         self.summary_page.taskToggled.connect(self.toggle_task)
-        for page in [self.welcome, self.empty, self.processing, self.final_page, self.summary_page]:
+        self.privacy_page = PrivacyPage(self.store)
+        for page in [
+            self.welcome,
+            self.empty,
+            self.processing,
+            self.final_page,
+            self.summary_page,
+            self.privacy_page,
+        ]:
             self.stack.addWidget(page)
         self.stack.addWidget(self.build_transcript())
         middle = QHBoxLayout()
@@ -430,7 +440,12 @@ class Window(QMainWindow):
         left.setLayout(titles)
         line.addWidget(left, 1)
         self.views = SegmentedControl()
-        for key, title in [("final", "Итоговый текст"), ("summary", "Сводка"), ("transcript", "Расшифровка")]:
+        for key, title in [
+            ("final", "Итоговый текст"),
+            ("summary", "Сводка"),
+            ("transcript", "Расшифровка"),
+            ("privacy", "Обезличивание"),
+        ]:
             self.views.add(key, title)
         self.views.changed.connect(self.set_view)
         self.views.setFixedHeight(30)
@@ -482,6 +497,9 @@ class Window(QMainWindow):
         self.vault_action = menu.addAction(
             "Открыть папку заметок",
             lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(self.settings.vault)),
+        )
+        self.export_transcript_action = menu.addAction(
+            "Экспорт расшифровки в Markdown…", self.export_transcript
         )
         self.audio_action = menu.addAction("Качество звука…", self.show_audio_report)
         menu.addSeparator()
@@ -1259,6 +1277,20 @@ class Window(QMainWindow):
         if self.view == "transcript":
             self.stack.setCurrentWidget(self.transcript_page)
             return
+        if self.view == "privacy":
+            if self.store.segment_counts(self.mid)[0]:
+                self.privacy_page.show_meeting(self.mid)
+                self.stack.setCurrentWidget(self.privacy_page)
+            else:
+                self.empty.set(
+                    "lock",
+                    SECONDARY,
+                    "Обезличивать пока нечего",
+                    "Когда запись будет распознана, здесь появится её копия без имён и номеров — "
+                    "для отправки во внешние нейросети.",
+                )
+                self.stack.setCurrentWidget(self.empty)
+            return
         # A finished summary stays readable while the transcript is re-checked; only a
         # running summary job replaces it with progress.
         if meeting["summary"] and meeting["status"] != "summarizing":
@@ -1643,6 +1675,29 @@ class Window(QMainWindow):
         box.exec()
         return box.clickedButton() is redo
 
+    def export_transcript(self):
+        """The transcript as a Markdown file, with timestamps and doubtful places marked."""
+        from .privacy import clock, transcript_markdown
+
+        if not self.mid or not self.store.segment_counts(self.mid)[0]:
+            return
+        meeting = self.store.meeting(self.mid)
+        name = re.sub(r'[\\/:*?"<>|]+', " ", meeting["title"]).strip() or "Расшифровка"
+        default = str(Path.home() / "Documents" / f"{name} — расшифровка.md")
+        path, _ = QFileDialog.getSaveFileName(self, "Экспорт расшифровки", default, "Markdown (*.md)")
+        if not path:
+            return
+        meta = [self.meta.text()] if self.meta.text() else []
+        if meeting["duration"]:
+            meta.append("длительность " + clock(meeting["duration"]))
+        text = transcript_markdown(self.store.iter_segments(self.mid), meeting["title"], " · ".join(meta))
+        try:
+            Path(path).write_text(text, encoding="utf-8")
+        except OSError as exc:
+            QMessageBox.warning(self, "Экспорт расшифровки", f"Не удалось сохранить файл: {exc.strerror}")
+            return
+        self.progress.setText(f"Расшифровка сохранена: {Path(path).name}")
+
     def rerun_transcription(self):
         if self.job or not self.mid:
             return
@@ -1857,6 +1912,8 @@ class Window(QMainWindow):
         explain(self.source_action, ready, "")
         explain(self.reveal_action, ready and bool(meeting["note"]), "")
         explain(self.audio_action, ready, "")
+        has_text = ready and bool(self.store.segment_counts(self.mid)[0])
+        explain(self.export_transcript_action, has_text, "Расшифровки ещё нет.")
         self.copy_error_button.setVisible(bool(self.error_detail.text()))
         explain(self.copy_error_button, bool(self.error_detail.text()))
         self.error_box.setVisible(bool(self.error_detail.text()))
