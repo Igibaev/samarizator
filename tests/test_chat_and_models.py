@@ -1,9 +1,10 @@
 """Questions answered only from the summary; models taken from the repository first."""
 
-import hashlib
 import json
+from pathlib import Path
 
 import pytest
+from PySide6.QtWidgets import QLabel
 
 from samarizator import model_bundle, qa
 from samarizator.config import Settings
@@ -104,33 +105,20 @@ def test_history_carries_only_grounded_answers_and_material_fits_the_budget():
     assert [line[:3] for line in lines] == ["[1]", "[2]", "[3]"]
 
 
-def lfs_pointer(path):
-    path.write_text("version https://git-lfs.github.com/spec/v1\noid sha256:abc\nsize 123\n")
-
-
-def test_repository_copy_wins_parts_are_joined_and_download_is_the_fallback(tmp_path):
+def test_build_copies_a_local_model_and_downloads_the_rest(tmp_path):
     source, target = tmp_path / "models", tmp_path / "out"
     source.mkdir()
     (source / "whole.bin").write_bytes(b"W" * 4096)
-    big = source / "big.gguf"
-    big.write_bytes(b"GGUF" + bytes(range(256)) * 64)
-    payload = big.read_bytes()
-    model_bundle.split(big, source / "bundle.json", size=5000)
-    assert not big.exists() and len(model_bundle.parts(source, "big.gguf")) == 4
-    lfs_pointer(source / "pointer.bin")
     downloads = []
 
     def fake_download(url, path):
         downloads.append(url)
         path.write_bytes(b"D" * 2048)
 
-    meta = json.loads((source / "bundle.json").read_text())["files"]
-    assert model_bundle.provide("whole.bin", source, target) == "repository"
-    assert model_bundle.provide("big.gguf", source, target, meta["big.gguf"]) == "repository, 4 parts"
-    assert (target / "big.gguf").read_bytes() == payload
-    assert meta["big.gguf"]["sha256"] == hashlib.sha256(payload).hexdigest()
+    assert model_bundle.provide("whole.bin", source, target) == "local copy"
+    assert model_bundle.provide("whole.bin", source, target) == "cached"
     how = model_bundle.provide(
-        "pointer.bin",
+        "absent.bin",
         source,
         target,
         {"url": "https://example.test/p.bin"},
@@ -149,6 +137,59 @@ def test_repository_copy_wins_parts_are_joined_and_download_is_the_fallback(tmp_
         )
     with pytest.raises(ValueError, match="адреса"):
         model_bundle.provide("unknown.bin", source, target, log=lambda *_: None)
+    # By default the app carries only the VAD model; the rest is chosen in the app.
+    manifest = model_bundle.load(Path(__file__).parents[1] / "models" / "bundle.json")
+    assert manifest["whisper"] == manifest["llm"] == "" and manifest["vad"]
+
+
+def test_every_model_states_its_memory_and_whether_it_fits_this_mac():
+    from samarizator import local_llm
+    from samarizator.settings_dialog import gb, preset_facts
+    from samarizator.setup_models import WHISPER_PRESETS
+
+    settings = Settings()
+    gemma = local_llm.PRESETS["gemma3-12b"]
+    # Weights + context + server: the same estimate the summary job checks before it starts.
+    assert local_llm.preset_ram_gb(gemma, settings) > gemma.size_gb + 1
+    assert local_llm.fit(gemma, settings, total_gb=16) == "ok"
+    assert local_llm.fit(gemma, settings, total_gb=8) == "no"
+    assert local_llm.fit(local_llm.PRESETS["qwen3-30b-a3b"], settings, total_gb=24) == "no"
+    assert local_llm.fit(WHISPER_PRESETS["large-v3"], settings, total_gb=16) == "slow"
+    assert preset_facts(gemma, settings).startswith("7,3 ГБ на диске · ≈ ")
+    assert gb(0.55) == "0,6" and gb(18.6) == "19" and gb(2.0) == "2"
+    for presets in (local_llm.PRESETS, WHISPER_PRESETS):
+        for preset in presets.values():
+            assert local_llm.preset_ram_gb(preset, settings) > 0 and preset.note
+
+
+def test_first_run_on_an_8_gb_mac_fits_the_small_summary_model(tmp_path, monkeypatch):
+    from samarizator import local_llm
+
+    monkeypatch.setenv("SAMARIZATOR_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(local_llm, "ram_gb", lambda: 8.0)
+    first = Settings.first_run()
+    assert first.whisper_model == ""  # nothing downloaded yet: the app offers a model
+    assert local_llm.fit(local_llm.PRESETS["qwen3-4b"], first, total_gb=8) != "no"
+
+
+def test_download_dialog_shows_cards_and_blocks_models_that_do_not_fit(tmp_path, monkeypatch, qapp):
+    from samarizator import local_llm
+    from samarizator.settings_dialog import ModelDownloadDialog, ModelOption
+
+    monkeypatch.setenv("SAMARIZATOR_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(local_llm, "ram_gb", lambda: 16.0)
+    dialog = ModelDownloadDialog(settings=Settings())
+    cards = dialog.findChildren(ModelOption)
+    assert [card.key for card in cards] == list(local_llm.PRESETS)
+    by_key = {card.key: card for card in cards}
+    assert not by_key["qwen3-30b-a3b"].isEnabled()
+    assert dialog.selected() == "gemma3-12b"
+    assert dialog.start_button.text() == "Скачать 7,3 ГБ"
+    by_key["qwen3-4b"].radio.setChecked(True)
+    assert dialog.selected() == "qwen3-4b" and dialog.start_button.text() == "Скачать 2,5 ГБ"
+    texts = " ".join(label.text() for label in by_key["qwen3-4b"].findChildren(QLabel))
+    assert "памяти при работе" in texts and "Подходит этому Mac" in texts
+    dialog.deleteLater()
 
 
 def test_app_starts_with_the_models_it_carries(tmp_path, monkeypatch):

@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       bundle_llm:
-        description: "Extra summary model on top of models/bundle.json (qwen3-4b, gemma3-12b) — makes the DMG large"
+        description: "Embed a summary model (qwen3-4b, gemma3-12b) so the app needs no download — makes the DMG large"
         required: false
         default: ""
   push:
@@ -27,8 +27,6 @@ jobs:
       HAS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE != '' }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          lfs: true  # models/ — see models/README.md
 
       - uses: astral-sh/setup-uv@v6
 

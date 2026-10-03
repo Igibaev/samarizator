@@ -101,6 +101,7 @@ QLabel[tag="ok"] {{ background: #e3f4e8; color: #1b6b33; border-radius: 5px; pad
 QLabel[tag="proposed"] {{ background: #fdf0dc; color: #8a4b00; border-radius: 5px; padding: 1px 7px; font-size: 11px; font-weight: 600; }}
 QLabel[tag="cancelled"] {{ background: #f0f0f3; color: {SECONDARY}; border-radius: 5px; padding: 1px 7px; font-size: 11px; font-weight: 600; }}
 QLabel[tag="disputed"] {{ background: #fde8ea; color: #a1001a; border-radius: 5px; padding: 1px 7px; font-size: 11px; font-weight: 600; }}
+QLabel[tag="info"] {{ background: #e8f0fb; color: {ACCENT}; border-radius: 5px; padding: 1px 7px; font-size: 11px; font-weight: 600; }}
 QPushButton {{ background: #e8e8ed; border: none; border-radius: 8px; padding: 0 14px; min-height: 32px; font-weight: 500; }}
 QPushButton:hover {{ background: #dedee3; }}
 QPushButton:pressed {{ background: #d4d4da; }}
@@ -129,6 +130,11 @@ QFrame#segmented QPushButton:checked {{ background: #ffffff; border: 1px solid #
 QFrame#segmented QPushButton:hover:!checked {{ background: rgba(0,0,0,0.04); }}
 QFrame#card {{ background: #ffffff; border: 1px solid #e5e5ea; border-radius: 14px; }}
 QFrame#soft {{ background: {GROUND}; border-radius: 14px; }}
+QFrame#modelOption {{ background: #ffffff; border: 1px solid #e5e5ea; border-radius: 12px; }}
+QFrame#modelOption[selected="true"] {{ border: 2px solid {ACCENT}; background: #f5f9ff; }}
+QFrame#modelOption:disabled {{ background: {GROUND}; }}
+QFrame#modelOption QLabel#facts {{ color: {TEXT}; font-size: 12px; }}
+QFrame#modelOption QLabel:disabled {{ color: {GREY}; }}
 QFrame#separator {{ background: #ececf0; border: none; max-height: 1px; min-height: 1px; }}
 QFrame#banner[kind="warn"] {{ background: #fff8ec; border-radius: 12px; }}
 QFrame#banner[kind="error"] {{ background: #fff0f1; border-radius: 12px; }}

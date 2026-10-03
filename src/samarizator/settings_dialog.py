@@ -8,6 +8,7 @@ from pathlib import Path
 from PySide6.QtCore import QRectF, QSize, Qt, QThread, Signal
 from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -23,6 +24,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QRadioButton,
     QScrollArea,
     QSpinBox,
     QStackedWidget,
@@ -35,8 +37,8 @@ from .bundle import tool
 from .config import FINAL_PROMPT_LIMIT, INSTRUCTIONS_LIMIT, Settings
 from .live import BOTH, DEVICE, MICROPHONE, NATIVE, SYSTEM
 from .summary_prompts import DEFAULT_FORMAT, FINAL_FORMATS
-from .theme import ACCENT, pixmap
-from .widgets import label, primary, separator
+from .theme import ACCENT, pixmap, set_flag
+from .widgets import label, primary, separator, tag
 
 LANGUAGES = [
     ("ru", "Русский"),
@@ -88,13 +90,15 @@ class Switch(QCheckBox):
         painter.drawEllipse(QRectF(x, 2, 18, 18))
 
 
-def model_line(path):
+def model_line(path, presets=None, settings=None):
+    """«Gemma 3 12B · 7,3 ГБ на диске · ≈ 12 ГБ памяти при работе», or ("", False)."""
     file = Path(path).expanduser() if path else None
     if not file or not file.is_file():
         return "", False
-    preset = next((p for p in local_llm.PRESETS.values() if p.file == file.name), None)
-    name = preset.label.split("·")[-1].strip() if preset else file.stem
-    return f"{name} · {file.stat().st_size / 1024**3:.1f} ГБ", True
+    preset = next((p for p in (presets or local_llm.PRESETS).values() if p.file == file.name), None)
+    if preset:
+        return f"{preset_name(preset)} · {preset_facts(preset, settings)}", True
+    return f"{file.stem} · {gb(file.stat().st_size / 1024**3)} ГБ на диске", True
 
 
 class Group:
@@ -249,7 +253,7 @@ class SettingsDialog(QDialog):
         self.whisper_state = label("")
         whisper_button = QPushButton("Сменить…")
         whisper_menu = QMenu(whisper_button)
-        whisper_menu.addAction("Скачать более точную модель…", self.download_whisper)
+        whisper_menu.addAction("Скачать модель…", self.download_whisper)
         whisper_menu.addAction(
             "Выбрать файл .bin…", lambda: self.pick("whisper_model", self.fields["whisper_model"])
         )
@@ -543,7 +547,9 @@ class SettingsDialog(QDialog):
             self.fields["llm_preset"].setText("")
 
     def download_llm(self):
-        dialog = ModelDownloadDialog(self)
+        name = Path(self.fields["llm_model"].text()).name
+        preferred = next((k for k, p in local_llm.PRESETS.items() if p.file == name), None)
+        dialog = ModelDownloadDialog(self, preferred=preferred)
         if dialog.exec() and dialog.path:
             self.fields["llm_model"].setText(str(dialog.path))
             self.fields["llm_preset"].setText(dialog.preset)
@@ -551,12 +557,14 @@ class SettingsDialog(QDialog):
     def download_whisper(self):
         from .setup_models import WHISPER_PRESETS, whisper_memory_gb
 
+        name = Path(self.fields["whisper_model"].text()).name
         dialog = ModelDownloadDialog(
             self,
             WHISPER_PRESETS,
             "Модель распознавания",
-            "Встроенная модель small быстрая, но крупные модели Whisper заметно точнее на живой речи. "
-            "Новые записи распознаются выбранной моделью, старые — через «Распознать заново».",
+            "Крупные модели точнее на живой речи, но медленнее и занимают больше памяти. Новые записи "
+            "распознаются выбранной моделью, старые — через «Распознать заново».",
+            preferred=next((k for k, p in WHISPER_PRESETS.items() if p.file == name), None),
         )
         if dialog.exec() and dialog.path:
             self.fields["whisper_model"].setText(str(dialog.path))
@@ -566,7 +574,7 @@ class SettingsDialog(QDialog):
                 self.fields["memory_gb"].setValue(need)
 
     def describe_llm(self):
-        line, ready = model_line(self.fields["llm_model"].text().strip())
+        line, ready = model_line(self.fields["llm_model"].text().strip(), settings=self.settings)
         self.llm_state.setText("● Готова" if ready else "● Не скачана")
         self.llm_state.setStyleSheet(f"color: {'#1b6b33' if ready else '#c46b00'}; font-size: 12px;")
         if hasattr(self, "llm_detail") and self.llm_detail:
@@ -574,14 +582,13 @@ class SettingsDialog(QDialog):
             self.llm_detail.setVisible(True)
 
     def describe_whisper(self):
-        path = Path(self.fields["whisper_model"].text().strip()).expanduser()
-        ready = path.is_file()
-        self.whisper_state.setText("● Готова" if ready else "● Не найдена")
+        from .setup_models import WHISPER_PRESETS
+
+        line, ready = model_line(self.fields["whisper_model"].text().strip(), WHISPER_PRESETS)
+        self.whisper_state.setText("● Готова" if ready else "● Не скачана")
         self.whisper_state.setStyleSheet(f"color: {'#1b6b33' if ready else '#c46b00'}; font-size: 12px;")
         if hasattr(self, "whisper_detail") and self.whisper_detail:
-            name = path.name.removeprefix("ggml-").removesuffix(".bin") if path.name else "не выбрана"
-            size = f" · {path.stat().st_size / 1024**3:.1f} ГБ" if ready else ""
-            self.whisper_detail.setText(f"Whisper {name}{size}")
+            self.whisper_detail.setText(line or "Скачайте модель — это нужно один раз.")
             self.whisper_detail.setVisible(True)
 
     def pick(self, key, widget):
@@ -656,10 +663,85 @@ class DownloadJob(QThread):
             self.done.emit(str(exc) if isinstance(exc, (ValueError, OSError)) else "Загрузка не удалась.")
 
 
-def recommended(presets):
-    """Largest preset this Mac's memory allows (presets are ordered largest first)."""
-    total = round(local_llm.ram_gb())
-    return next((key for key, preset in presets.items() if total >= preset.min_ram_gb), list(presets)[-1])
+def recommended(presets, settings=None):
+    """Largest preset that suits this Mac (presets are ordered largest first)."""
+    total = local_llm.ram_gb()
+    return next(
+        (key for key, preset in presets.items() if local_llm.fit(preset, settings, total) == "ok"),
+        list(presets)[-1],
+    )
+
+
+def gb(value):
+    """«7,3» / «12» — gigabytes the way a Mac shows them."""
+    text = f"{value:.0f}" if value >= 10 else f"{value:.1f}".removesuffix(".0")
+    return text.replace(".", ",")
+
+
+def preset_name(preset):
+    name = preset.label.split("·")[-1].strip()
+    return f"Whisper {name}" if preset.file.startswith("ggml-") else name
+
+
+def preset_facts(preset, settings=None):
+    """«7,3 ГБ на диске · ≈ 12 ГБ памяти при работе»."""
+    ram = local_llm.preset_ram_gb(preset, settings)
+    return f"{gb(preset.size_gb)} ГБ на диске · ≈ {gb(ram)} ГБ памяти при работе"
+
+
+FIT_TEXT = {
+    "ok": ("#1b6b33", "✓ Подходит этому Mac"),
+    "slow": ("#8a4b00", "Будет работать медленно: лучше от {min} ГБ памяти"),
+    "no": ("#a1001a", "Не поместится в память этого Mac ({total} ГБ)"),
+}
+
+
+class ModelOption(QFrame):
+    """One model as a selectable card: what it is, its size, its memory, whether it fits."""
+
+    def __init__(self, preset, settings, total, best, downloaded):
+        super().__init__()
+        self.setObjectName("modelOption")
+        self.key = preset.key
+        self.fit = local_llm.fit(preset, settings, total)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(14, 12, 16, 12)
+        row.setSpacing(12)
+        self.radio = QRadioButton()
+        row.addWidget(self.radio, 0, Qt.AlignmentFlag.AlignTop)
+        column = QVBoxLayout()
+        column.setSpacing(3)
+        head = QHBoxLayout()
+        head.setSpacing(8)
+        name = label(preset_name(preset))
+        name.setStyleSheet("font-weight: 600; font-size: 14px;")
+        head.addWidget(name)
+        kind = preset.label.split("·")[0].strip()
+        if kind:
+            head.addWidget(label(kind, "secondary"))
+        head.addStretch(1)
+        if preset.key == best:
+            head.addWidget(tag("Рекомендуется", "info"))
+        if downloaded:
+            head.addWidget(tag("Скачана", "ok"))
+        column.addLayout(head)
+        column.addWidget(label(preset.note, "secondary", wrap=True))
+        facts = label(preset_facts(preset, settings))
+        facts.setObjectName("facts")
+        column.addWidget(facts)
+        color, text = FIT_TEXT[self.fit]
+        verdict = label(text.format(min=preset.min_ram_gb, total=f"{total:.0f}"))
+        verdict.setStyleSheet(f"color: {color}; font-size: 12px; font-weight: 600;")
+        column.addWidget(verdict)
+        row.addLayout(column, 1)
+        self.radio.toggled.connect(lambda on: set_flag(self, "selected", on))
+        self.setEnabled(self.fit != "no")
+
+    def mousePressEvent(self, event):
+        if self.isEnabled():
+            self.radio.setChecked(True)
+        super().mousePressEvent(event)
 
 
 def download_text(done, total):
@@ -669,13 +751,16 @@ def download_text(done, total):
 
 
 class ModelDownloadDialog(QDialog):
-    """One-time resumable download of a model, with a recommendation by RAM."""
+    """One-time resumable download of a model: every option with its size and memory."""
 
-    def __init__(self, parent=None, presets=None, title="Модель сводок", intro=None, preferred=None):
+    def __init__(
+        self, parent=None, presets=None, title="Модель сводок", intro=None, preferred=None, settings=None
+    ):
         super().__init__(parent)
         self.setWindowTitle(title)
-        self.resize(560, 360)
+        self.setMinimumWidth(600)
         self.presets = presets or local_llm.PRESETS
+        self.settings = settings or getattr(parent, "settings", None) or Settings()
         self.path = None
         self.preset = ""
         self.job = None
@@ -686,31 +771,43 @@ class ModelDownloadDialog(QDialog):
         layout.addWidget(
             label(
                 intro
-                or "Сводки составляет локальная модель. Её нужно скачать один раз — дальше всё работает "
-                "без интернета.",
+                or "Сводки и ответы на вопросы готовит локальная модель. Её нужно скачать один раз — "
+                "дальше всё работает без интернета.",
                 "hint",
                 wrap=True,
             )
         )
-        self.choice = QComboBox()
-        best = preferred if preferred in self.presets else recommended(self.presets)
+        total = local_llm.ram_gb()
+        free = shutil.disk_usage(local_llm.models_dir()).free / 1024**3
+        self.mac = label(
+            f"Этот Mac: {total:.0f} ГБ памяти · свободно на диске {free:.0f} ГБ. Модели работают "
+            "по очереди, поэтому память нужна под одну из них за раз.",
+            "secondary",
+            wrap=True,
+        )
+        layout.addWidget(self.mac)
+        best = preferred if preferred in self.presets else recommended(self.presets, self.settings)
+        self.group = QButtonGroup(self)
+        self.options = {}
         for key, preset in self.presets.items():
-            mark = " · рекомендуется" if key == best else ""
-            have = " · скачана" if self.target(key).is_file() else ""
-            self.choice.addItem(f"{preset.label} — {preset.size_gb:g} ГБ{mark}{have}", key)
-        self.choice.setCurrentIndex(max(0, self.choice.findData(best)))
-        self.choice.currentIndexChanged.connect(self.describe)
-        layout.addWidget(self.choice)
-        self.note = label("", "secondary", wrap=True)
-        layout.addWidget(self.note)
+            option = ModelOption(preset, self.settings, total, best, self.target(key).is_file())
+            self.group.addButton(option.radio)
+            self.options[key] = option
+            layout.addWidget(option)
+        start = (
+            best
+            if self.options[best].isEnabled()
+            else next((k for k, o in self.options.items() if o.isEnabled()), best)
+        )
+        self.options[start].radio.setChecked(True)
         self.bar = QProgressBar()
         self.bar.setRange(0, 1000)
         self.bar.setValue(0)
         self.bar.setTextVisible(False)
+        self.bar.setVisible(False)
         layout.addWidget(self.bar)
         self.state = label("", "secondary", wrap=True)
         layout.addWidget(self.state)
-        layout.addStretch(1)
         row = QHBoxLayout()
         self.close_button = QPushButton("Закрыть")
         self.close_button.clicked.connect(self.close_or_stop)
@@ -719,37 +816,53 @@ class ModelDownloadDialog(QDialog):
         row.addStretch(1)
         row.addWidget(self.close_button)
         row.addWidget(self.start_button)
+        layout.addSpacing(4)
         layout.addLayout(row)
+        self.group.buttonToggled.connect(self.describe)
         self.describe()
+
+    def selected(self):
+        return next((key for key, option in self.options.items() if option.radio.isChecked()), None)
 
     def target(self, key):
         return local_llm.models_dir() / self.presets[key].file
 
     def describe(self, *_):
-        preset = self.presets[self.choice.currentData()]
-        free = shutil.disk_usage(local_llm.models_dir()).free / 1024**3
-        target = self.target(preset.key)
-        self.note.setText(
-            f"{preset.note}\nНужно {preset.size_gb:g} ГБ на диске, свободно {free:.0f} ГБ. "
-            f"Памяти в этом Mac: {local_llm.ram_gb():.0f} ГБ."
-        )
-        self.start_button.setText("Выбрать" if target.is_file() else "Скачать")
+        key = self.selected()
+        if key is None:
+            return
+        preset = self.presets[key]
+        ready = self.target(key).is_file()
+        self.start_button.setText("Выбрать" if ready else f"Скачать {gb(preset.size_gb)} ГБ")
+        self.start_button.setEnabled(self.options[key].isEnabled() and self.job is None)
+
+    def lock(self, busy):
+        for option in self.options.values():
+            option.setEnabled(not busy and option.fit != "no")
+        self.start_button.setEnabled(not busy)
+        self.close_button.setText("Остановить" if busy else "Закрыть")
+        self.bar.setVisible(busy or self.bar.value() > 0)
 
     def start(self):
-        preset = self.presets[self.choice.currentData()]
-        target = self.target(preset.key)
+        key = self.selected()
+        if key is None:
+            return
+        preset = self.presets[key]
+        target = self.target(key)
         if target.is_file():
-            self.finish(preset.key, target)
+            self.finish(key, target)
             return
         if shutil.disk_usage(target.parent).free < preset.size_gb * 1024**3 * 1.05:
-            QMessageBox.warning(self, "Мало места", "На диске не хватает места для этой модели.")
+            QMessageBox.warning(
+                self,
+                "Мало места",
+                f"Для этой модели нужно {gb(preset.size_gb)} ГБ свободного места на диске.",
+            )
             return
         self.job = DownloadJob(preset.url, target)
         self.job.progress.connect(self.show_progress)
-        self.job.done.connect(lambda error: self.downloaded(error, preset.key, target))
-        self.start_button.setEnabled(False)
-        self.choice.setEnabled(False)
-        self.close_button.setText("Остановить")
+        self.job.done.connect(lambda error: self.downloaded(error, key, target))
+        self.lock(True)
         self.state.setText("Подключение…")
         self.job.start()
 
@@ -762,9 +875,8 @@ class ModelDownloadDialog(QDialog):
         self.job.wait()
         self.job.deleteLater()
         self.job = None
-        self.start_button.setEnabled(True)
-        self.choice.setEnabled(True)
-        self.close_button.setText("Закрыть")
+        self.lock(False)
+        self.describe()
         if error:
             self.state.setText(error)
             return

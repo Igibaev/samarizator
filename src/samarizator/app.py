@@ -52,7 +52,16 @@ from .live import (
 from .pages import FinalPage, ProcessingPage, StatePage, WelcomePage, app_icon
 from .playback import evidence_intervals
 from .process import supervise
-from .settings_dialog import DownloadJob, ModelDownloadDialog, SettingsDialog, download_text, recommended
+from .settings_dialog import (
+    DownloadJob,
+    ModelDownloadDialog,
+    SettingsDialog,
+    download_text,
+    gb,
+    preset_facts,
+    preset_name,
+    recommended,
+)
 from .store import Store
 from .summary_page import SummaryPage
 from .summary_prompts import DEFAULT_FORMAT, FINAL_FORMATS
@@ -325,7 +334,9 @@ class Window(QMainWindow):
         self.error_detail = self.error_box.body
         self.error_detail.setStyleSheet("color: #a1001a; font-size: 13px;")
         self.copy_error_button = QPushButton("Скопировать ошибку")
-        self.copy_error_button.clicked.connect(lambda: QApplication.clipboard().setText(self.error_detail.text()))
+        self.copy_error_button.clicked.connect(
+            lambda: QApplication.clipboard().setText(self.error_detail.text())
+        )
         self.error_box.add(self.copy_error_button)
         notices.addWidget(self.error_box)
         body.addLayout(notices)
@@ -333,7 +344,7 @@ class Window(QMainWindow):
         self.welcome = WelcomePage()
         self.welcome.download.connect(self.welcome_download)
         self.welcome.stop_download.connect(lambda: self.download_job and self.download_job.stop.set())
-        self.welcome.other_model.connect(self.download_model)
+        self.welcome.other_model.connect(self.choose_model)
         self.welcome.add_file.connect(self.add_file)
         self.welcome.record.connect(self.toggle_live)
         self.empty = StatePage()
@@ -513,7 +524,9 @@ class Window(QMainWindow):
         edit.setSpacing(8)
         row = QHBoxLayout()
         self.play_button = QPushButton("▶  Прослушать")
-        self.play_button.setToolTip("Исходная запись на выбранной реплике, с запасом по 2 с с каждой стороны.")
+        self.play_button.setToolTip(
+            "Исходная запись на выбранной реплике, с запасом по 2 с с каждой стороны."
+        )
         self.play_button.clicked.connect(self.play_segment)
         row.addWidget(self.play_button)
         self.text = QLineEdit()
@@ -563,23 +576,36 @@ class Window(QMainWindow):
 
     def download_model(self):
         """Pick and fetch the summary model; returns True when one is ready."""
-        dialog = ModelDownloadDialog(self)
+        preferred = next(
+            (k for k, p in local_llm.PRESETS.items() if p.file == Path(self.settings.llm_model).name), None
+        )
+        dialog = ModelDownloadDialog(self, preferred=preferred)
         if not (dialog.exec() and dialog.path):
             return self.has_llm()
         self.adopt_model(dialog.path, dialog.preset)
         return self.has_llm()
 
-    def missing_models(self):
-        """[(role, preset)] the app still needs; the bundled ones are never in this list."""
+    def whisper_preset(self):
+        """The recognition model the settings name, else the one that suits this Mac."""
         from .setup_models import WHISPER_PRESETS
 
+        name = Path(self.settings.whisper_model).name if self.settings.whisper_model.strip() else ""
+        named = next((p for p in WHISPER_PRESETS.values() if p.file == name), None)
+        return named or WHISPER_PRESETS[recommended(WHISPER_PRESETS, self.settings)]
+
+    def has_whisper(self):
+        return (
+            bool(self.settings.whisper_model.strip())
+            and Path(self.settings.whisper_model).expanduser().is_file()
+        )
+
+    def missing_models(self):
+        """[(role, preset)] the app still needs; the bundled ones are never in this list."""
         missing = []
-        whisper = Path(self.settings.whisper_model).expanduser()
-        if not self.settings.whisper_model.strip() or not whisper.is_file():
-            preset = next((p for p in WHISPER_PRESETS.values() if p.file == whisper.name), WHISPER_PRESETS["small"])
-            missing.append(("whisper", preset))
+        if not self.has_whisper():
+            missing.append(("whisper", self.whisper_preset()))
         if not self.has_llm():
-            missing.append(("llm", local_llm.PRESETS[recommended(local_llm.PRESETS)]))
+            missing.append(("llm", local_llm.PRESETS[recommended(local_llm.PRESETS, self.settings)]))
         return missing
 
     def welcome_download(self):
@@ -599,7 +625,9 @@ class Window(QMainWindow):
         role, preset = self.download_queue[0]
         target = local_llm.models_dir() / preset.file
         title = "Модель распознавания" if role == "whisper" else "Модель сводок"
-        step = f" · {title.lower()}" + (f" ({len(self.download_queue)} осталось)" if len(self.download_queue) > 1 else "")
+        step = f" · {title.lower()}" + (
+            f" ({len(self.download_queue)} осталось)" if len(self.download_queue) > 1 else ""
+        )
         if target.is_file():
             self.welcome_downloaded("", role, preset, target)
             return
@@ -652,47 +680,85 @@ class Window(QMainWindow):
         self.show_page()
         self.controls()
 
-    def ensure_whisper(self):
-        """Before recognition: the model is there, or the user downloads one now."""
+    def choose_model(self, role):
+        """«Другая» / «Сменить» on the welcome screen."""
+        if role == "whisper":
+            self.download_whisper()
+        else:
+            self.download_model()
+        self.show_page()
+        self.controls()
+
+    def download_whisper(self, intro=None):
         from .setup_models import WHISPER_PRESETS
 
-        if Path(self.settings.whisper_model).expanduser().is_file():
-            return True
-        name = Path(self.settings.whisper_model).name
-        preferred = next((k for k, p in WHISPER_PRESETS.items() if p.file == name), "small")
         dialog = ModelDownloadDialog(
             self,
             WHISPER_PRESETS,
             "Модель распознавания",
-            "Модели распознавания речи нет ни в приложении, ни на этом Mac. Скачайте её один раз — "
-            "дальше распознавание работает без интернета.",
-            preferred=preferred,
+            intro
+            or "Превращает речь из записи в текст. Крупные модели точнее, но медленнее и занимают больше "
+            "памяти. Скачивается один раз — дальше распознавание работает без интернета.",
+            preferred=self.whisper_preset().key,
         )
         if dialog.exec() and dialog.path:
             self.adopt_whisper(dialog.path)
             return True
         return False
 
-    def model_summary(self):
-        """(ready, name, note) for the sidebar and the welcome screen."""
-        whisper_missing = any(role == "whisper" for role, _ in self.missing_models())
-        if self.has_llm() and whisper_missing:
-            from .setup_models import WHISPER_PRESETS
+    def ensure_whisper(self):
+        """Before recognition: the model is there, or the user downloads one now."""
+        if self.has_whisper():
+            return True
+        return self.download_whisper(
+            "Модели распознавания речи ещё нет на этом Mac. Выберите подходящую и скачайте её один раз — "
+            "дальше распознавание работает без интернета."
+        )
 
-            small = WHISPER_PRESETS["small"]
-            return False, f"Модель распознавания · {small.size_gb:g} ГБ", "Нужна, чтобы превращать аудио в текст."
-        if self.has_llm():
-            path = Path(self.settings.llm_model).expanduser()
-            preset = next((p for p in local_llm.PRESETS.values() if p.file == path.name), None)
-            name = preset.label.split("·")[-1].strip() if preset else path.stem
-            return True, name, f"{path.stat().st_size / 1024**3:.1f} ГБ · работает на этом Mac"
-        key = recommended(local_llm.PRESETS)
-        preset = local_llm.PRESETS[key]
-        name = preset.label.split("·")[-1].strip()
-        note = f"Лучшее качество для этого Mac ({local_llm.ram_gb():.0f} ГБ памяти)"
-        if whisper_missing:
-            note += " · и модель распознавания, 0,2 ГБ"
-        return False, f"{name} · {preset.size_gb:g} ГБ", note
+    def model_rows(self):
+        """What the welcome screen lists: each model, its size and memory, ready or not."""
+        from .setup_models import WHISPER_PRESETS
+
+        rows = []
+        for role, caption, presets, path, wanted in (
+            (
+                "whisper",
+                "Распознавание речи",
+                WHISPER_PRESETS,
+                self.settings.whisper_model,
+                self.whisper_preset,
+            ),
+            (
+                "llm",
+                "Сводки и вопросы по ним",
+                local_llm.PRESETS,
+                self.settings.llm_model,
+                lambda: local_llm.PRESETS[recommended(local_llm.PRESETS, self.settings)],
+            ),
+        ):
+            file = Path(path).expanduser() if path.strip() else None
+            if file and file.is_file():
+                preset = next((p for p in presets.values() if p.file == file.name), None)
+                if preset:
+                    rows.append(
+                        (role, caption, preset_name(preset), preset_facts(preset, self.settings), True)
+                    )
+                else:
+                    size = file.stat().st_size / 1024**3
+                    rows.append((role, caption, file.stem, f"{gb(size)} ГБ на диске · свой файл", True))
+            else:
+                preset = wanted()
+                rows.append((role, caption, preset_name(preset), preset_facts(preset, self.settings), False))
+        missing = self.missing_models()
+        if missing:
+            total = sum(preset.size_gb for _, preset in missing)
+            note = (
+                f"Подобраны под этот Mac ({local_llm.ram_gb():.0f} ГБ памяти), скачать один раз {gb(total)} ГБ. "
+                "Модели работают по очереди: памяти нужно под одну из них."
+            )
+        else:
+            note = "Модели работают на этом Mac без интернета. Сменить их можно в настройках."
+        return rows, note
 
     def copy_final(self):
         if not self.mid or not (summary := self.store.meeting(self.mid)["summary"]):
@@ -1002,7 +1068,8 @@ class Window(QMainWindow):
 
     def describe_item(self, item, meeting):
         complete = meeting["status"] == "review" or (
-            meeting["status"] in {"error", "interrupted"} and self.store.checkpoint(meeting["id"], "asr_complete", 0)
+            meeting["status"] in {"error", "interrupted"}
+            and self.store.checkpoint(meeting["id"], "asr_complete", 0)
         )
         status, dot = list_status(meeting, bool(complete) and not meeting["summary"])
         item.setData(
@@ -1102,7 +1169,9 @@ class Window(QMainWindow):
                 result = json.loads(meeting["summary"])
                 times = {r["id"]: r["start"] for r in self.store.iter_segments(self.mid)}
                 self.times = times
-                self.chat_panel.show_meeting(self.mid, times, self.store.checkpoint(self.mid, "chat", 0) or [])
+                self.chat_panel.show_meeting(
+                    self.mid, times, self.store.checkpoint(self.mid, "chat", 0) or []
+                )
                 self.summary_page.show_summary(
                     self.mid, result, times, self.store.checkpoint(self.mid, "tasks-done", 0) or {}
                 )
@@ -1149,8 +1218,7 @@ class Window(QMainWindow):
     def show_page(self):
         if not self.mid:
             if self.list.count() == 0 and not self.search.text():
-                ready, name, note = self.model_summary()
-                self.welcome.set_model(ready, name, note)
+                self.welcome.set_models(*self.model_rows())
                 self.stack.setCurrentWidget(self.welcome)
             else:
                 self.empty.set(
@@ -1221,7 +1289,11 @@ class Window(QMainWindow):
                 stamp(seconds),
                 [
                     ("Запись звука", source, "current"),
-                    ("Распознавание по ходу записи", message.split(":")[-1].strip() if message else "", "current"),
+                    (
+                        "Распознавание по ходу записи",
+                        message.split(":")[-1].strip() if message else "",
+                        "current",
+                    ),
                     ("Сводка", "после остановки", "todo"),
                 ],
                 "Готовые фрагменты распознаются сразу, поэтому после остановки остаётся только хвост.",
@@ -1447,8 +1519,21 @@ class Window(QMainWindow):
                 excerpt = data_dir() / "work" / "excerpt.wav"
                 excerpt.parent.mkdir(exist_ok=True)
                 subprocess.run(
-                    [tool("ffmpeg"), "-nostdin", "-v", "error", "-y", "-ss", str(start), "-t", str(duration),
-                     "-i", self.playback_source, "-vn", str(excerpt)],
+                    [
+                        tool("ffmpeg"),
+                        "-nostdin",
+                        "-v",
+                        "error",
+                        "-y",
+                        "-ss",
+                        str(start),
+                        "-t",
+                        str(duration),
+                        "-i",
+                        self.playback_source,
+                        "-vn",
+                        str(excerpt),
+                    ],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     timeout=60,
@@ -1543,14 +1628,19 @@ class Window(QMainWindow):
                     if not self.has_llm() and not self.download_model():
                         return
                     self.release_chat_model()
-                    original.llm_model, original.llm_preset = self.settings.llm_model, self.settings.llm_preset
+                    original.llm_model, original.llm_preset = (
+                        self.settings.llm_model,
+                        self.settings.llm_preset,
+                    )
                     original.validate(llm=True)
                     local_llm.check_fits(original)
                     if not self.store.checkpoint(self.mid, "asr_complete", 0):
                         raise ValueError("Сначала завершите распознавание всей записи.")
                     if phase == "final" and not meeting["summary"]:
                         raise ValueError("Сначала создайте сводку.")
-            budget = local_llm.job_budget_gb(original) if phase in {"summary", "final"} else original.memory_gb
+            budget = (
+                local_llm.job_budget_gb(original) if phase in {"summary", "final"} else original.memory_gb
+            )
             self.store.update(
                 self.mid,
                 settings=json.dumps(asdict(original)),
@@ -1659,7 +1749,8 @@ class Window(QMainWindow):
         complete = ready and bool(self.store.checkpoint(self.mid, "asr_complete", 0))
         summarized = ready and bool(meeting["summary"])
         here = ready and (
-            (self.job is not None and self.active_id == self.mid) or (recording and self.recording_id == self.mid)
+            (self.job is not None and self.active_id == self.mid)
+            or (recording and self.recording_id == self.mid)
         )
         explain(
             self.transcribe,
@@ -1675,10 +1766,16 @@ class Window(QMainWindow):
         )
         explain(self.cancel, self.job is not None and not recording, "Сейчас нечего останавливать.")
         explain(self.save_segment, ready and not busy, working if busy else pick)
-        explain(self.retry, ready and not busy and complete, working if busy else "Сначала распознайте запись целиком.")
+        explain(
+            self.retry,
+            ready and not busy and complete,
+            working if busy else "Сначала распознайте запись целиком.",
+        )
         explain(self.retry_action, ready and not busy and complete, "")
         explain(self.rerun_button, ready and not busy, working if busy else pick)
-        explain(self.regenerate_button, summarized and not busy, working if busy else "Сначала создайте сводку.")
+        explain(
+            self.regenerate_button, summarized and not busy, working if busy else "Сначала создайте сводку."
+        )
         explain(self.reexport, ready and not busy and summarized, "")
         explain(self.delete_action, ready and not busy, "")
         explain(self.source_action, ready, "")

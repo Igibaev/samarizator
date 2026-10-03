@@ -96,7 +96,9 @@ class Settings:
                 )
             with path.open("rb") as f:
                 if f.read(4) != b"GGUF":
-                    raise ValueError("Файл модели сводок не в формате GGUF. Выберите файл .gguf для llama.cpp.")
+                    raise ValueError(
+                        "Файл модели сводок не в формате GGUF. Выберите файл .gguf для llama.cpp."
+                    )
 
     def save(self):
         self.validate()
@@ -154,10 +156,16 @@ class Settings:
         vad = shipped_model("vad")
         llm = shipped_model("llm")
         settings = cls(
-            whisper_model=str(whisper),
+            # No recognition model yet: the welcome screen offers the one that suits this Mac.
+            whisper_model=str(whisper) if Path(whisper).is_file() else "",
             llm_model=str(llm) if llm else "",
             vault=str(Path.home() / "Documents/Samarizator"),
         )
+        from .local_llm import ram_gb
+
+        if round(ram_gb()) < 16:
+            # Smaller blocks keep the summary model's context within an 8 GB Mac.
+            settings.input_chars = 8000
         if vad:
             # The portable app ships the VAD model: use speech detection and pause-aligned
             # chunks from the start, as the quality profile does.

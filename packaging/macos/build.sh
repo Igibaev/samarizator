@@ -3,10 +3,10 @@
 #
 # Inside the app: Python + Qt (PyInstaller), static FFmpeg/ffprobe, whisper-cli and
 # llama-server (Metal), the ScreenCaptureKit helper and the models listed in
-# models/bundle.json — taken from the repository (Git LFS), downloaded only if absent.
-# The user downloads the .dmg, drags the app to Applications and runs it: no Homebrew,
-# no Python, no terminal. Only the summary model (2.5–19 GB) is downloaded from inside
-# the app on first use, unless SAMARIZATOR_BUNDLE_LLM embeds it.
+# models/bundle.json (by default only the 1 MB VAD model). The user downloads the .dmg,
+# drags the app to Applications and runs it: no Homebrew, no Python, no terminal. The
+# recognition and summary models are chosen and downloaded inside the app on first
+# launch, unless models/bundle.json or SAMARIZATOR_BUNDLE_LLM embeds them.
 #
 # Needs: macOS 13+, Xcode Command Line Tools, cmake, git, curl, uv.
 #   brew install cmake uv   (only on the build machine)
@@ -117,7 +117,7 @@ VENV="$WORK/venv-$ARCH"
 [[ -x "$VENV/bin/python" ]] || uv venv --python 3.12 "$VENV"
 uv pip install --python "$VENV/bin/python" --quiet "$ROOT" "pyinstaller>=6.10,<7"
 
-say "Модели: из models/ (Git LFS), иначе скачивание"
+say "Модели из models/bundle.json"
 # models/bundle.json decides what the app carries; SAMARIZATOR_BUNDLE_LLM adds a
 # summary model on top of it for one build.
 rm -f "$OUT/models/bundle.json"

@@ -34,6 +34,8 @@ class Preset:
     size_gb: float
     min_ram_gb: int
     note: str
+    # Memory the model occupies while it works; 0 means it is computed (summary models).
+    ram_gb: float = 0.0
 
 
 HF = "https://huggingface.co/"
@@ -48,8 +50,7 @@ PRESETS = {
             + "unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF/resolve/main/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf",
             18.6,
             32,
-            "Mac с 32 ГБ памяти и больше. Смесь экспертов: качество крупной модели при скорости "
-            "небольшой, длинный контекст, уверенный русский и JSON.",
+            "Лучшие сводки: точные формулировки, уверенный русский, длинные встречи.",
         ),
         Preset(
             "gemma3-12b",
@@ -58,7 +59,7 @@ PRESETS = {
             HF + "unsloth/gemma-3-12b-it-GGUF/resolve/main/gemma-3-12b-it-Q4_K_M.gguf",
             7.3,
             16,
-            "Mac с 16–24 ГБ памяти. Хорошо пишет по-русски, медленнее Qwen3 30B-A3B на мощном Mac.",
+            "Хорошие сводки и ответы по-русски.",
         ),
         Preset(
             "qwen3-4b",
@@ -67,8 +68,7 @@ PRESETS = {
             HF + "unsloth/Qwen3-4B-Instruct-2507-GGUF/resolve/main/Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
             2.5,
             8,
-            "Mac с 8–16 ГБ памяти. Заметно проще в формулировках; для длинных встреч лучше "
-            "уменьшить размер блока до 8000 символов.",
+            "Быстрая и лёгкая, но формулирует проще.",
         ),
     ]
 }
@@ -140,6 +140,24 @@ def memory_estimate_gb(settings):
 def job_budget_gb(settings):
     """Watchdog budget of a summary job: the model must fit, whatever the ASR budget is."""
     return max(settings.memory_gb, math.ceil(memory_estimate_gb(settings) * 1.25 + 1))
+
+
+def preset_ram_gb(preset, settings=None):
+    """Memory a model takes while it works, by the same estimate `check_fits` applies."""
+    if preset.ram_gb:
+        return preset.ram_gb
+    from .config import Settings
+
+    tokens = context_tokens(settings or Settings())
+    return preset.size_gb + tokens * KV_BYTES_PER_TOKEN / 1024**3 + SERVER_OVERHEAD_GB
+
+
+def fit(preset, settings=None, total_gb=None):
+    """How a model suits this Mac: "ok", "slow" (below the recommended memory) or "no"."""
+    total_gb = ram_gb() if total_gb is None else total_gb
+    if preset_ram_gb(preset, settings) > total_gb * 0.85:
+        return "no"
+    return "slow" if round(total_gb) < preset.min_ram_gb else "ok"
 
 
 def check_fits(settings, total_gb=None):

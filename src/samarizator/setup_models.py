@@ -35,7 +35,8 @@ WHISPER_PRESETS = {
             WHISPER + LARGE_MODEL,
             2.9,
             32,
-            "Полная мультиязычная модель, лучший выбор для Mac от 32 ГБ. Медленнее остальных.",
+            "Самая точная, но и самая медленная.",
+            ram_gb=3.9,
         ),
         Preset(
             "large-v3-turbo",
@@ -44,7 +45,8 @@ WHISPER_PRESETS = {
             WHISPER + "ggml-large-v3-turbo.bin",
             1.5,
             16,
-            "Почти как large-v3, но в несколько раз быстрее. Для Mac от 16 ГБ.",
+            "Почти как large-v3, но в несколько раз быстрее.",
+            ram_gb=2.0,
         ),
         Preset(
             "large-v3-turbo-q5_0",
@@ -53,7 +55,8 @@ WHISPER_PRESETS = {
             WHISPER + "ggml-large-v3-turbo-q5_0.bin",
             0.55,
             8,
-            "Квантованная turbo: заметно точнее small при умеренном размере.",
+            "Сжатая turbo: заметно точнее small при небольшом размере.",
+            ram_gb=1.0,
         ),
         Preset(
             "small",
@@ -62,7 +65,8 @@ WHISPER_PRESETS = {
             WHISPER + "ggml-small-q5_1.bin",
             0.19,
             0,
-            "Лёгкая модель: работает на любом Mac, но ошибается чаще крупных.",
+            "Лёгкая и быстрая, но ошибается чаще крупных.",
+            ram_gb=0.6,
         ),
     ]
 }
@@ -122,9 +126,7 @@ def main():
     for name, url in models.items():
         download(url, folder / name)
     manifest = {
-        p.name: dict(sha256=digest(p), bytes=p.stat().st_size)
-        for p in folder.iterdir()
-        if p.suffix == ".bin"
+        p.name: dict(sha256=digest(p), bytes=p.stat().st_size) for p in folder.iterdir() if p.suffix == ".bin"
     }
     (folder / "download-manifest.json").write_text(json.dumps(manifest, indent=2))
     llm_path = None

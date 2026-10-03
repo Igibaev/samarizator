@@ -81,7 +81,7 @@ class WelcomePage(QWidget):
     """First run: what the app does, and the one button that makes it work."""
 
     download = Signal()
-    other_model = Signal()
+    other_model = Signal(str)
     add_file = Signal()
     record = Signal()
     stop_download = Signal()
@@ -92,21 +92,21 @@ class WelcomePage(QWidget):
             "#e8f0fb",
             ACCENT,
             "Запись или файл",
-            "Микрофон и звук звонка одновременно или любое аудио и видео — перетащите его в окно.",
+            "Микрофон и звук звонка или любой аудио- и видеофайл.",
         ),
         (
             "lines",
             "#f1e9fb",
             "#7a3fc4",
             "Сводка в вашем формате",
-            "Протокол, резюме или конспект — с решениями, задачами и ссылками на нужное место записи.",
+            "Протокол, резюме или конспект — со ссылками на места в записи.",
         ),
         (
             "lock",
             "#e6f5ea",
             "#1b6b33",
             "Без облака",
-            "Аудио и текст не покидают Mac. Интернет нужен один раз — скачать модель.",
+            "Аудио и текст не покидают Mac. Сеть нужна только скачать модели.",
         ),
     ]
 
@@ -119,9 +119,9 @@ class WelcomePage(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         logo = QLabel()
-        logo.setPixmap(app_icon(96))
+        logo.setPixmap(app_icon(80))
         layout.addWidget(logo, 0, Qt.AlignmentFlag.AlignHCenter)
-        layout.addSpacing(24)
+        layout.addSpacing(18)
         title = label("Добро пожаловать в Samarizator", "h1", wrap=True)
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(title)
@@ -132,7 +132,7 @@ class WelcomePage(QWidget):
         lead.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lead.setStyleSheet("color: #636366; font-size: 16px;")
         layout.addWidget(lead)
-        layout.addSpacing(36)
+        layout.addSpacing(26)
         for name, background, color, heading, text in self.FEATURES:
             row = QHBoxLayout()
             row.setSpacing(16)
@@ -151,24 +151,18 @@ class WelcomePage(QWidget):
             words.itemAt(1).widget().setStyleSheet("color: #636366; font-size: 14px;")
             row.addLayout(words, 1)
             layout.addLayout(row)
-            layout.addSpacing(22)
-        layout.addSpacing(14)
+            layout.addSpacing(16)
+        layout.addSpacing(4)
         self.model_card = QFrame()
         self.model_card.setObjectName("soft")
-        model = QHBoxLayout(self.model_card)
-        model.setContentsMargins(18, 14, 18, 14)
-        words = QVBoxLayout()
-        words.setSpacing(2)
-        self.model_name = label("")
-        self.model_name.setStyleSheet("font-weight: 600; font-size: 14px;")
-        self.model_note = label("", "secondary", wrap=True)
-        words.addWidget(self.model_name)
-        words.addWidget(self.model_note)
-        model.addLayout(words, 1)
-        self.other = QPushButton("Другая модель")
-        self.other.setFlat(True)
-        self.other.clicked.connect(self.other_model)
-        model.addWidget(self.other)
+        self.model_box = QVBoxLayout(self.model_card)
+        self.model_box.setContentsMargins(18, 14, 18, 14)
+        self.model_box.setSpacing(10)
+        self.model_rows = QVBoxLayout()
+        self.model_rows.setSpacing(10)
+        self.model_box.addLayout(self.model_rows)
+        self.model_note = label("", "hint", wrap=True)
+        self.model_box.addWidget(self.model_note)
         layout.addWidget(self.model_card)
         layout.addSpacing(16)
         self.bar = QProgressBar()
@@ -176,7 +170,7 @@ class WelcomePage(QWidget):
         self.bar.setTextVisible(False)
         self.bar.setVisible(False)
         layout.addWidget(self.bar)
-        self.main = primary(QPushButton("Скачать модель и начать"), large=True)
+        self.main = primary(QPushButton("Скачать модели и начать"), large=True)
         self.main.clicked.connect(self.on_main)
         layout.addWidget(self.main)
         layout.addSpacing(8)
@@ -190,6 +184,7 @@ class WelcomePage(QWidget):
         layout.addWidget(self.hint)
         self.ready = False
         self.downloading = False
+        self.rows, self.note = [], ""
         outer.addWidget(centered(column, 520))
 
     def on_main(self):
@@ -200,30 +195,55 @@ class WelcomePage(QWidget):
         else:
             self.download.emit()
 
-    def set_model(self, ready, name, note):
-        self.ready = ready
-        self.model_name.setText(("✓ " if ready else "") + name)
+    def set_models(self, rows, note):
+        """rows: [(role, caption, name, facts, ready)] — what the app uses and what it costs."""
+        while self.model_rows.count():
+            item = self.model_rows.takeAt(0)
+            if widget := item.widget():
+                widget.setParent(None)
+                widget.deleteLater()
+        for role, caption, name, facts, ready in rows:
+            row = QWidget()
+            line = QHBoxLayout(row)
+            line.setContentsMargins(0, 0, 0, 0)
+            words = QVBoxLayout()
+            words.setSpacing(1)
+            words.addWidget(label(caption, "caption"))
+            title = label(("✓ " if ready else "") + name)
+            title.setStyleSheet("font-weight: 600; font-size: 14px;")
+            words.addWidget(title)
+            words.addWidget(label(facts, "secondary", wrap=True))
+            line.addLayout(words, 1)
+            other = QPushButton("Сменить" if ready else "Другая")
+            other.setFlat(True)
+            other.setEnabled(not self.downloading)
+            other.clicked.connect(lambda checked=False, r=role: self.other_model.emit(r))
+            line.addWidget(other, 0, Qt.AlignmentFlag.AlignVCenter)
+            self.model_rows.addWidget(row)
         self.model_note.setText(note)
-        self.other.setText("Сменить" if ready else "Другая модель")
-        self.main.setText("Выбрать аудио или видео" if ready else "Скачать модель и начать")
-        self.second.setVisible(ready)
+        self.ready = all(row[4] for row in rows)
+        self.rows, self.note = rows, note
+        self.main.setText("Выбрать аудио или видео" if self.ready else "Скачать модели и начать")
+        self.second.setVisible(self.ready)
         self.hint.setText(
             "Можно просто перетащить файл в это окно."
-            if ready
+            if self.ready
             else "Загрузку можно прервать — она продолжится с того же места."
         )
 
     def set_download(self, active, text="", fraction=None):
         self.downloading = active
+        for button in self.model_card.findChildren(QPushButton):
+            button.setEnabled(not active)
         self.bar.setVisible(active)
         if fraction is not None:
             self.bar.setValue(int(fraction * 1000))
+        if not active:
+            self.set_models(self.rows, self.note)
         self.main.setText("Остановить загрузку" if active else self.main.text())
         primary(self.main, not active)
         if text:
             self.hint.setText(text)
-        if not active:
-            self.set_model(self.ready, self.model_name.text().removeprefix("✓ "), self.model_note.text())
 
 
 class StatePage(QWidget):
