@@ -272,3 +272,62 @@ def test_chat_panel_shows_grounded_answers_with_sources(tmp_path, monkeypatch):
     w.close()
     w.deleteLater()
     app.processEvents()
+
+
+class FakeHub:
+    """Hugging Face API and file downloads, without the network."""
+
+    def __init__(self, trees, files):
+        self.trees, self.files, self.urls = trees, files, []
+
+    def open(self, request, timeout=None):
+        import io
+
+        url = request.full_url
+        self.urls.append(url)
+        for repo, entries in self.trees.items():
+            if url.startswith(f"https://huggingface.co/api/models/{repo}/tree/main"):
+                body = json.dumps(entries).encode()
+                break
+        else:
+            body = self.files[url]
+        response = io.BytesIO(body)
+        response.status = 200
+        response.headers = {"Content-Length": str(len(body))}
+        return response
+
+
+def test_russian_whisper_is_taken_from_the_repository_listing(tmp_path):
+    from samarizator import local_llm
+    from samarizator.setup_models import PODLODKA, WHISPER_PRESETS
+
+    preset = WHISPER_PRESETS["podlodka-turbo"]
+    assert preset.url == PODLODKA and list(WHISPER_PRESETS)[0] == "podlodka-turbo"
+    mb = 1024**2
+    coreml_only = [
+        {"type": "directory", "path": "ggml-podlodka-turbo-encoder.mlmodelc"},
+        {"type": "file", "path": "ggml-podlodka-turbo-encoder.mlmodelc/weights/weight.bin", "size": 600 * mb},
+        {"type": "file", "path": "README.md", "size": 2000},
+    ]
+    ggml = [
+        {"type": "file", "path": "ggml-model-q5_0.bin", "size": 500 * mb},
+        {"type": "file", "path": "ggml-model.bin", "lfs": {"size": 1600 * mb}, "size": 134},
+        {"type": "file", "path": "ggml-model-q8_0.bin", "size": 870 * mb},
+    ]
+    assert local_llm.pick_ggml(coreml_only) is None
+    assert local_llm.pick_ggml(ggml) == "ggml-model.bin"  # full precision wins
+    weights = local_llm.GGML_MAGIC + b"\0" * 4096
+    file_url = "https://huggingface.co/JoaoZaokk/whisper-podlodka-turbo-ggml/resolve/main/ggml-model.bin"
+    hub = FakeHub(
+        {"smkrv/whisper-podlodka-turbo-coreml": coreml_only, "JoaoZaokk/whisper-podlodka-turbo-ggml": ggml},
+        {file_url: weights},
+    )
+    target = local_llm.download(preset.url, tmp_path / preset.file, opener=hub)
+    assert target.read_bytes() == weights and hub.urls[-1] == file_url
+    assert not list(tmp_path.glob("*.url"))
+    # A file that is not whisper.cpp weights is rejected instead of being used.
+    hub.files[file_url] = b"<html>" + b"x" * 4096
+    with pytest.raises(ValueError, match="whisper.cpp"):
+        local_llm.download(preset.url, tmp_path / "other.bin", opener=hub)
+    with pytest.raises(ValueError, match="Не удалось найти"):
+        local_llm.download("hf-repo:a/b", tmp_path / "x.bin", opener=FakeHub({"a/b": coreml_only}, {}))

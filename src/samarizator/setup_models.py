@@ -25,9 +25,23 @@ QUALITY_MODELS = {
 LARGE_MODEL = "ggml-large-v3.bin"
 WHISPER = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/"
 # More accurate recognition, downloadable from the app's settings.
+# Whisper large-v3-turbo fine-tuned for Russian (bond005/whisper-podlodka-turbo): punctuation,
+# noise robustness, fewer hallucinations on silence. The whisper.cpp file is taken from the
+# repository listing; the second repository is the ggml conversion of the same model.
+PODLODKA = "hf-repo:smkrv/whisper-podlodka-turbo-coreml|JoaoZaokk/whisper-podlodka-turbo-ggml"
 WHISPER_PRESETS = {
     preset.key: preset
     for preset in [
+        Preset(
+            "podlodka-turbo",
+            "Для русской речи · Podlodka Turbo",
+            "ggml-podlodka-turbo.bin",
+            PODLODKA,
+            1.6,
+            8,
+            "Turbo, дообученная на русской речи: пунктуация, устойчивость к шуму, меньше выдумок в тишине.",
+            ram_gb=2.0,
+        ),
         Preset(
             "large-v3",
             "Максимальная точность · large-v3",

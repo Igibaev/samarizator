@@ -8,10 +8,25 @@ from samarizator.summary import LocalClient, SummaryTooLong, system_prompt
 from samarizator.summary_prompts import SYSTEM
 
 
+def tokenizing(handler, chars_per_token=3):
+    """llama-server's /tokenize next to the chat handler under test."""
+
+    def route(req):
+        if req.url.path == "/tokenize":
+            content = json.loads(req.content)["content"]
+            return httpx.Response(200, json={"tokens": list(range(len(content) // chars_per_token))})
+        return handler(req)
+
+    return route
+
+
 def make(handler, **values):
     settings = Settings(**values)
     return LocalClient(
-        settings, "http://127.0.0.1:8123", key="one-time-key", transport=httpx.MockTransport(handler)
+        settings,
+        "http://127.0.0.1:8123",
+        key="one-time-key",
+        transport=httpx.MockTransport(tokenizing(handler)),
     )
 
 

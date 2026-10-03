@@ -190,6 +190,23 @@ class Store:
             )
             db.execute("INSERT INTO checkpoints VALUES(?,?,?,?)", (mid, "asr", part, "true"))
 
+    def summary_progress(self, mid):
+        """True while an unfinished summary left resumable steps behind."""
+        with self.connect() as db:
+            return bool(
+                db.execute(
+                    "SELECT 1 FROM checkpoints WHERE meeting=? AND phase LIKE 'summary%' LIMIT 1", (mid,)
+                ).fetchone()
+            )
+
+    def reset_summary(self, mid):
+        """Forget every intermediate summary step: the next summary starts from scratch.
+
+        The finished summary itself stays until a new one replaces it.
+        """
+        with self.connect() as db:
+            db.execute("DELETE FROM checkpoints WHERE meeting=? AND phase LIKE 'summary%'", (mid,))
+
     def save_checkpoint(self, mid, phase, part, data):
         with self.connect() as db:
             db.execute(

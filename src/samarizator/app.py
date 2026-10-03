@@ -351,6 +351,7 @@ class Window(QMainWindow):
         self.processing = ProcessingPage()
         self.final_page = FinalPage()
         self.final_page.formatChosen.connect(self.choose_format)
+        self.final_page.redo.connect(self.redo_summary)
         self.final_text = self.final_page.browser
         self.summary_page = SummaryPage(self.store.segment)
         self.summary_page.playGroup.connect(self.play_evidence_group)
@@ -454,6 +455,7 @@ class Window(QMainWindow):
         menu = QMenu(self)
         self.retry_action = menu.addAction("Повторить сомнительные реплики", lambda: self.start("retry"))
         self.regenerate_button = menu.addAction("Пересоздать итоговый текст", lambda: self.start("final"))
+        self.redo_action = menu.addAction("Сделать сводку заново…", self.redo_summary)
         self.rerun_button = menu.addAction("Распознать заново…", self.rerun_transcription)
         menu.addSeparator()
         self.source_action = menu.addAction("Открыть исходную запись", self.open_source)
@@ -1246,7 +1248,22 @@ class Window(QMainWindow):
             self.stack.setCurrentWidget(self.processing)
             return
         complete = self.store.checkpoint(self.mid, "asr_complete", 0)
-        if complete:
+        if (
+            complete
+            and meeting["status"] in {"interrupted", "error"}
+            and self.store.summary_progress(self.mid)
+        ):
+            self.empty.set(
+                "lines",
+                ORANGE,
+                "Сводка не завершена",
+                "Готовые шаги сохранены: сводку можно продолжить с места остановки или сделать заново "
+                "с самого начала.",
+                ("Продолжить сводку", lambda: self.start("summary")),
+                ("Сделать заново", self.redo_summary),
+            )
+            self.stack.setCurrentWidget(self.empty)
+        elif complete:
             total, flagged = self.store.segment_counts(self.mid)
             self.empty.set(
                 "lines",
@@ -1313,7 +1330,8 @@ class Window(QMainWindow):
             steps = [("Повторный проход по отмеченным репликам", info["detail"], "current")]
             title, fraction = "Перепроверка реплик", info["fraction"]
         else:
-            final_only = bool(meeting["summary"])
+            # Only the final-text job keeps the summary; a summary redone from scratch shows all steps.
+            final_only = bool(meeting["summary"]) and (not running_here or self.job.phase == "final")
             info = work.summary(message, final_only=final_only)
             fmt = FINAL_FORMATS.get(self.settings.final_format, FINAL_FORMATS[DEFAULT_FORMAT])[0]
             if self.settings.final_prompt:
@@ -1573,6 +1591,37 @@ class Window(QMainWindow):
 
     # -- jobs -------------------------------------------------------------------------
 
+    def redo_summary(self):
+        """Rebuild the whole summary from the transcript, ignoring every saved step."""
+        if self.job or self.live_recorder is not None or not self.mid:
+            return
+        if not self.store.checkpoint(self.mid, "asr_complete", 0):
+            QMessageBox.information(self, "Сводка", "Сначала распознайте запись целиком.")
+            return
+        if not self.confirm_redo(self.store.meeting(self.mid)):
+            return
+        self.store.reset_summary(self.mid)
+        self.start("summary")
+
+    def confirm_redo(self, meeting):
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("Сделать сводку заново")
+        box.setText("Сделать сводку заново?")
+        box.setInformativeText(
+            "Сводка будет построена с нуля по текущей расшифровке и настройкам — это займёт столько "
+            "же времени, сколько первая. "
+            + (
+                "Текущая сводка останется, пока новая не будет готова."
+                if meeting["summary"]
+                else "Сохранённые промежуточные шаги будут отброшены."
+            )
+        )
+        redo = box.addButton("Сделать заново", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Отмена", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        return box.clickedButton() is redo
+
     def rerun_transcription(self):
         if self.job or not self.mid:
             return
@@ -1776,6 +1825,11 @@ class Window(QMainWindow):
         explain(
             self.regenerate_button, summarized and not busy, working if busy else "Сначала создайте сводку."
         )
+        explain(
+            self.redo_action,
+            bool(complete) and not busy,
+            working if busy else "Сначала распознайте запись целиком.",
+        )
         explain(self.reexport, ready and not busy and summarized, "")
         explain(self.delete_action, ready and not busy, "")
         explain(self.source_action, ready, "")
@@ -1792,6 +1846,8 @@ class Window(QMainWindow):
             primary(button, button is step and button.isEnabled())
         self.transcribe.setVisible(ready and not complete and not here)
         self.summarize.setVisible(ready and complete and not summarized and not here)
+        resumable = bool(complete) and not summarized and self.store.summary_progress(self.mid)
+        self.summarize.setText("Продолжить сводку" if resumable else "Создать сводку")
         self.obsidian.setVisible(ready and summarized and not here)
         self.cancel.setVisible(here and not recording)
         self.stop_live_button.setVisible(recording and self.recording_id == self.mid)

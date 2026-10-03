@@ -187,6 +187,15 @@ def download(url, target, progress=lambda done, total: None, cancelled=lambda: F
 
     context = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     opener = opener or urllib.request.build_opener(urllib.request.HTTPSHandler(context=context))
+    whisper_weights = url.startswith(HF_REPO)
+    if whisper_weights:
+        # The file is chosen from the repository listing once; a resumed download keeps it.
+        chosen = part.with_suffix(part.suffix + ".url")
+        if part.exists() and chosen.is_file():
+            url = chosen.read_text().strip()
+        else:
+            url = resolve_hf_repo(url, opener)
+            chosen.write_text(url)
     for attempt in range(6):
         done = part.stat().st_size if part.exists() else 0
         request = urllib.request.Request(url, headers={"User-Agent": "Samarizator"})
@@ -234,8 +243,69 @@ def download(url, target, progress=lambda done, total: None, cancelled=lambda: F
             if f.read(4) != b"GGUF":
                 part.unlink()
                 raise ValueError("Скачанный файл не похож на модель GGUF. Повторите загрузку.")
+    if whisper_weights:
+        with part.open("rb") as f:
+            if f.read(4) != GGML_MAGIC:
+                part.unlink()
+                raise ValueError("Скачанный файл не похож на модель whisper.cpp. Повторите загрузку.")
+        part.with_suffix(part.suffix + ".url").unlink(missing_ok=True)
     part.replace(target)
     return target
+
+
+# "hf-repo:owner/name|owner/fallback": the whisper.cpp weights are picked from the
+# repository listing at download time (community repositories name files differently).
+HF_REPO = "hf-repo:"
+GGML_MAGIC = b"lmgg"  # whisper.cpp ggml files start with 0x67676d6c, little-endian
+
+
+def ggml_rank(path):
+    """Order of preference among whisper.cpp files of one repository: full precision first."""
+    name = Path(path).name.lower()
+    for rank, mark in enumerate(("q8", "q6", "q5", "q4")):
+        if mark in name:
+            return rank + 1
+    return 0
+
+
+def pick_ggml(entries):
+    """The whisper.cpp weights in a Hugging Face tree listing, or None."""
+    files = []
+    for entry in entries:
+        path = str(entry.get("path", ""))
+        name = Path(path).name.lower()
+        size = (entry.get("lfs") or {}).get("size") or entry.get("size") or 0
+        if (
+            entry.get("type", "file") == "file"
+            and name.endswith(".bin")
+            and "ggml" in name
+            and "encoder" not in name
+            and ".mlmodelc" not in path.lower()
+            and size > 100 * 1024**2
+        ):
+            files.append((ggml_rank(path), path))
+    return min(files)[1] if files else None
+
+
+def resolve_hf_repo(spec, opener):
+    """Download address of the whisper.cpp weights in the first repository that has them."""
+    import json
+
+    for repo in spec.removeprefix(HF_REPO).split("|"):
+        request = urllib.request.Request(
+            f"{HF}api/models/{repo}/tree/main?recursive=true", headers={"User-Agent": "Samarizator"}
+        )
+        try:
+            with opener.open(request, timeout=60) as response:
+                entries = json.loads(response.read(8 * 1024**2))
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+            continue
+        if isinstance(entries, list) and (path := pick_ggml(e for e in entries if isinstance(e, dict))):
+            return f"{HF}{repo}/resolve/main/{path}"
+    raise ValueError(
+        "Не удалось найти файл модели whisper.cpp в репозитории Hugging Face. Проверьте интернет и "
+        "повторите загрузку."
+    )
 
 
 def free_port():

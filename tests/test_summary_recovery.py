@@ -24,6 +24,8 @@ def test_invalid_model_json_is_retried_without_changing_endpoint(meeting):
     requests = []
 
     def handler(request):
+        if request.url.path == "/tokenize":
+            return httpx.Response(404)
         requests.append(request)
         content = (
             "broken JSON"
@@ -174,6 +176,8 @@ def test_permanent_bad_json_is_bounded(meeting):
     calls = []
 
     def handler(request):
+        if request.url.path == "/tokenize":
+            return httpx.Response(404)
         calls.append(request)
         return httpx.Response(
             200, json={"choices": [{"message": {"content": "invalid"}, "finish_reason": "stop"}]}
@@ -190,6 +194,8 @@ def test_api_length_signal_is_preserved_for_adaptive_split(meeting):
     calls = []
 
     def handler(request):
+        if request.url.path == "/tokenize":
+            return httpx.Response(404)
         calls.append(request)
         return httpx.Response(
             200, json={"choices": [{"message": {"content": '{"over'}, "finish_reason": "length"}]}

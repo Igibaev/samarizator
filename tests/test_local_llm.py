@@ -49,6 +49,8 @@ class Handler(BaseHTTPRequestHandler):
         if self.headers.get("Authorization") != "Bearer " + key:
             return self.reply(401, {"error": "key"})
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        if self.path == "/tokenize":
+            return self.reply(200, {"tokens": list(range(len(body["content"]) // 3))})
         log.write(json.dumps(body, ensure_ascii=False) + "\n")
         log.flush()
         prompt = body["messages"][-1]["content"]
@@ -239,7 +241,7 @@ def test_custom_template_and_failures_never_lose_the_summary():
         def __init__(self, error=None):
             self.error, self.calls = error, []
 
-        def complete_text(self, system, prompt, max_tokens):
+        def complete_text(self, system, prompt, max_tokens, minimum=1024):
             self.calls.append((system, prompt))
             if self.error:
                 raise self.error

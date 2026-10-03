@@ -386,6 +386,7 @@ class FinalPage(QWidget):
     """The document in the user's format, as a calm reading column."""
 
     formatChosen = Signal(str)
+    redo = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -420,6 +421,12 @@ class FinalPage(QWidget):
         self.warning.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.warning.setStyleSheet("color: #8a4b00; padding: 8px 40px 0 40px;")
         layout.addWidget(self.warning)
+        # A summary that came out incomplete can be rebuilt from scratch right here.
+        self.redo_button = QPushButton("Сделать сводку заново")
+        self.redo_button.setFlat(True)
+        self.redo_button.setStyleSheet(f"color: {ACCENT}; font-weight: 500;")
+        self.redo_button.clicked.connect(self.redo)
+        layout.addWidget(self.redo_button, 0, Qt.AlignmentFlag.AlignHCenter)
         self.browser = CenteredBrowser(700)
         layout.addWidget(self.browser, 1)
 
@@ -429,6 +436,7 @@ class FinalPage(QWidget):
         self.format.setText(self.titles.get(format_key, self.titles["custom"]) + "  ▾")
         self.warning.setText(" ".join((final.get("warning") or "").split()))
         self.warning.setVisible(bool(final.get("warning")))
+        self.redo_button.setVisible(bool(final.get("warning")) or not final.get("text"))
         text = final.get("text") or (
             "Итогового текста у этой сводки нет — она создана до его появления. "
             "Выберите формат выше или «Пересоздать итоговый текст» в меню «⋯»."
