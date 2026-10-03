@@ -251,6 +251,14 @@ def export(store, mid, settings):
         prefix = "- [ ]" if tasks and item["kind"] == "action" and item.get("status") == "agreed" else "-"
         return f"{prefix} {plain(item['text'])}{state}{owner}{due} {links}"
 
+    final = summary.get("final") or {}
+    if final.get("text", "").strip():
+        # The user's own format comes first: it is the document people read. Its Markdown
+        # is kept as written; the generated headings are demoted under this note's title.
+        lines += [f"## Итоговый текст · {plain(final.get('title', ''))}", ""]
+        if final.get("warning"):
+            lines += [f"> {plain(final['warning'])}", ""]
+        lines += [demote_headings(final["text"].strip()), ""]
     sections = [("Кратко · тезисы", brief, True), ("Подробная сводка", detailed, False)]
     if resolved := detailed.get("resolved"):
         sections.append(
@@ -286,6 +294,18 @@ def export(store, mid, settings):
     store.save_checkpoint(mid, "export", 0, dict(files=hashes, base=suffix))
     store.update(mid, note=str(note))
     return note
+
+
+def demote_headings(markdown):
+    """`# x` → `### x`: the final text sits inside the meeting note under a `##` heading."""
+    out, fenced = [], False
+    for line in markdown.splitlines():
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+        if not fenced and re.match(r"#{1,4} ", line):
+            line = "##" + line
+        out.append(line)
+    return "\n".join(out)
 
 
 def summary_text(view, refs):

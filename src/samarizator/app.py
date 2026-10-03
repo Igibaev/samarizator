@@ -33,6 +33,8 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
+    QPlainTextEdit,
+    QProgressBar,
     QPushButton,
     QSizePolicy,
     QSpinBox,
@@ -45,8 +47,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import obsidian, screencapture
-from .config import Settings, data_dir, set_api_key
+from . import local_llm, obsidian, screencapture
+from .bundle import python_command, tool
+from .config import FINAL_PROMPT_LIMIT, INSTRUCTIONS_LIMIT, Settings, data_dir
 from .knowledge import stamp
 from .live import (
     BOTH,
@@ -68,17 +71,7 @@ from .process import supervise
 from .store import Store
 from .summary import summary_views
 from .summary_browser import SummaryBrowser
-
-PROVIDERS = [
-    ("Указать вручную", ""),
-    ("OpenAI", "https://api.openai.com/v1"),
-    ("OpenRouter", "https://openrouter.ai/api/v1"),
-    ("Groq", "https://api.groq.com/openai/v1"),
-    ("DeepSeek", "https://api.deepseek.com/v1"),
-    ("Together", "https://api.together.xyz/v1"),
-    ("Ollama · на этом Mac", "http://localhost:11434/v1"),
-    ("LM Studio · на этом Mac", "http://localhost:1234/v1"),
-]
+from .summary_prompts import DEFAULT_FORMAT, FINAL_FORMATS
 
 STATUS = {
     "new": "Новая",
@@ -101,7 +94,7 @@ NEXT_STEP = {
     "retrying": "Идёт повторный проход по отмеченным репликам.",
     "review": "Проверьте отмеченные реплики, при необходимости исправьте текст — "
     "затем «2. Создать сводку».",
-    "summarizing": "Создаётся сводка. Текст ушёл на выбранный API, аудио не отправляется.",
+    "summarizing": "Локальная модель составляет сводку на этом Mac. Длинная запись — это десятки минут.",
     "done": "Готово. Сводки — во вкладках выше, «Открыть в Obsidian» — внизу.",
     "error": "Шаг не выполнен. Причина ниже; после исправления запустите его заново.",
     "interrupted": "Обработка остановлена. Тот же шаг продолжит с места остановки, "
@@ -117,6 +110,19 @@ def explain(button, enabled, reason=""):
     elif not enabled:
         button.setToolTip("")
     return enabled
+
+
+def final_markdown(final):
+    """Final document as Markdown, with its warnings on top; a hint for older summaries."""
+    if not final:
+        return (
+            "Итогового текста у этой сводки нет — она создана до его появления. "
+            "Нажмите «Пересоздать итоговый текст»."
+        )
+    head = f"*Формат: {final.get('title', '')}*\n\n"
+    if final.get("warning"):
+        head += "> " + " ".join(final["warning"].split()) + "\n\n"
+    return head + (final.get("text") or "")
 
 
 class ElidedLabel(QLabel):
@@ -153,7 +159,7 @@ class Job(QThread):
     def run(self):
         try:
             code = supervise(
-                [sys.executable, "-m", "samarizator.worker", self.phase, self.mid],
+                python_command("samarizator.worker", self.phase, self.mid),
                 self.budget,
                 callback=lambda rss: self.memory.emit(rss / 1024**3),
                 cancelled=self.stop.is_set,
@@ -161,6 +167,144 @@ class Job(QThread):
             self.result.emit("" if code == 0 else "worker-error")
         except Exception as exc:
             self.result.emit(str(exc))
+
+
+class DownloadJob(QThread):
+    progress = Signal(float, float)
+    done = Signal(str)
+
+    def __init__(self, url, target):
+        super().__init__()
+        self.url, self.target = url, target
+        self.stop = threading.Event()
+
+    def run(self):
+        try:
+            local_llm.download(
+                self.url,
+                self.target,
+                progress=lambda done, total: self.progress.emit(float(done), float(total)),
+                cancelled=self.stop.is_set,
+            )
+            self.done.emit("")
+        except local_llm.DownloadCancelled:
+            self.done.emit("Загрузка остановлена. Следующая продолжит с того же места.")
+        except Exception as exc:
+            self.done.emit(str(exc) if isinstance(exc, (ValueError, OSError)) else "Загрузка не удалась.")
+
+
+class ModelDownloadDialog(QDialog):
+    """One-time download of the summary model, resumable, with a recommendation by RAM."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Модель сводок")
+        self.resize(620, 360)
+        self.path = None
+        self.preset = ""
+        self.job = None
+        layout = QVBoxLayout(self)
+        intro = QLabel(
+            "Сводки составляет локальная модель. Её нужно скачать один раз — дальше всё работает "
+            "без интернета. Модель сохраняется в ~/Library/Application Support/Samarizator/models."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+        self.choice = QComboBox()
+        recommended = local_llm.recommended_preset()
+        for key, preset in local_llm.PRESETS.items():
+            mark = " · рекомендуется" if key == recommended else ""
+            have = " · скачана" if local_llm.preset_path(key).is_file() else ""
+            self.choice.addItem(f"{preset.label} — {preset.size_gb:g} ГБ{mark}{have}", key)
+        self.choice.setCurrentIndex(max(0, self.choice.findData(recommended)))
+        self.choice.currentIndexChanged.connect(self.describe)
+        layout.addWidget(self.choice)
+        self.note = QLabel()
+        self.note.setWordWrap(True)
+        layout.addWidget(self.note)
+        self.bar = QProgressBar()
+        self.bar.setRange(0, 1000)
+        self.bar.setValue(0)
+        layout.addWidget(self.bar)
+        self.state = QLabel()
+        self.state.setWordWrap(True)
+        layout.addWidget(self.state)
+        layout.addStretch(1)
+        row = QHBoxLayout()
+        self.start_button = QPushButton("Скачать")
+        self.start_button.setProperty("primary", True)
+        self.start_button.clicked.connect(self.start)
+        self.close_button = QPushButton("Закрыть")
+        self.close_button.clicked.connect(self.close_or_stop)
+        row.addStretch(1)
+        row.addWidget(self.start_button)
+        row.addWidget(self.close_button)
+        layout.addLayout(row)
+        self.describe()
+
+    def describe(self, *_):
+        preset = local_llm.PRESETS[self.choice.currentData()]
+        free = shutil.disk_usage(local_llm.models_dir()).free / 1024**3
+        target = local_llm.preset_path(preset.key)
+        self.note.setText(
+            f"{preset.note}\nНужно {preset.size_gb:g} ГБ на диске, свободно {free:.0f} ГБ. "
+            f"Памяти в этом Mac: {local_llm.ram_gb():.0f} ГБ."
+        )
+        self.start_button.setText("Выбрать" if target.is_file() else "Скачать")
+
+    def start(self):
+        preset = local_llm.PRESETS[self.choice.currentData()]
+        target = local_llm.preset_path(preset.key)
+        if target.is_file():
+            self.finish(preset.key, target)
+            return
+        if shutil.disk_usage(target.parent).free < preset.size_gb * 1024**3 * 1.05:
+            QMessageBox.warning(self, "Мало места", "На диске не хватает места для этой модели.")
+            return
+        self.job = DownloadJob(preset.url, target)
+        self.job.progress.connect(self.show_progress)
+        self.job.done.connect(lambda error: self.downloaded(error, preset.key, target))
+        self.start_button.setEnabled(False)
+        self.choice.setEnabled(False)
+        self.close_button.setText("Остановить")
+        self.state.setText("Подключение…")
+        self.job.start()
+
+    def show_progress(self, done, total):
+        if total:
+            self.bar.setValue(int(done / total * 1000))
+            self.state.setText(f"Скачано {done / 1024**3:.2f} из {total / 1024**3:.2f} ГБ")
+        else:
+            self.state.setText(f"Скачано {done / 1024**3:.2f} ГБ")
+
+    def downloaded(self, error, key, target):
+        self.job.wait()
+        self.job.deleteLater()
+        self.job = None
+        self.start_button.setEnabled(True)
+        self.choice.setEnabled(True)
+        self.close_button.setText("Закрыть")
+        if error:
+            self.state.setText(error)
+            return
+        self.finish(key, target)
+
+    def finish(self, key, target):
+        self.path, self.preset = target, key
+        self.accept()
+
+    def close_or_stop(self):
+        if self.job:
+            self.job.stop.set()
+            self.state.setText("Останавливаю…")
+        else:
+            self.reject()
+
+    def reject(self):
+        if self.job:
+            self.job.stop.set()
+            self.job.wait()
+        super().reject()
 
 
 class SettingsDialog(QDialog):
@@ -178,7 +322,7 @@ class SettingsDialog(QDialog):
         tabs.addTab(local, "Распознавание речи · локально")
         intro = QLabel(
             "Whisper работает на вашем Mac и превращает аудио в текст. Аудио никуда не отправляется.\n"
-            "Облачная модель со второй вкладки работает только с готовым текстом — она составляет сводку."
+            "Сводку по готовому тексту составляет локальная модель — вкладка «Сводка · локальная модель»."
         )
         intro.setWordWrap(True)
         form.addRow(intro)
@@ -353,35 +497,50 @@ class SettingsDialog(QDialog):
         qform.addRow("Ширина поиска Whisper", beam)
         hint = QLabel(
             "Профиль: 16 ГиБ, 8 потоков CPU, фрагменты около 90 секунд, VAD и границы по паузам. "
-            "Выбранная модель и корпоративный API сохраняются. Для загрузки VAD: ./start.sh --quality.\n\n"
+            "Выбранные модели распознавания и сводок сохраняются. VAD входит в приложение.\n\n"
             "Словарь — короткий список ожидаемых слов, а не инструкция. "
             "Он помогает с написанием терминов, но может смещать распознавание. "
             "Если VAD пропускает тихую речь, сравните запись с отключённым VAD."
         )
         hint.setWordWrap(True)
         qform.addRow(hint)
-        corporate = QWidget()
-        api = QFormLayout(corporate)
-        tabs.addTab(corporate, "Облачная модель · сводки")
-        self.provider = QComboBox()
-        for label, url in PROVIDERS:
-            self.provider.addItem(label, url)
-        self.provider.setCurrentIndex(max(0, self.provider.findData(settings.base_url)))
-        self.provider.activated.connect(self.pick_provider)
-        api.addRow("Провайдер", self.provider)
-        for key, label in [
-            ("base_url", "Base URL"),
-            ("model", "Название модели"),
-        ]:
-            line = QLineEdit(getattr(settings, key))
-            self.fields[key] = line
-            api.addRow(label, line)
-        self.fields["base_url"].setPlaceholderText("https://openrouter.ai/api/v1")
-        self.fields["model"].setPlaceholderText("openai/gpt-4o-mini")
-        self.key = QLineEdit()
-        self.key.setEchoMode(QLineEdit.EchoMode.Password)
-        self.key.setPlaceholderText("Пусто — оставить сохранённый ключ")
-        api.addRow("API-ключ → macOS Keychain", self.key)
+        llm = QWidget()
+        lform = QFormLayout(llm)
+        tabs.addTab(llm, "Сводка · локальная модель")
+        llm_intro = QLabel(
+            "Сводку составляет локальная языковая модель (llama.cpp) прямо на этом Mac. "
+            "Текст и аудио никуда не отправляются; интернет нужен только один раз — скачать модель."
+        )
+        llm_intro.setWordWrap(True)
+        lform.addRow(llm_intro)
+        model_row = QHBoxLayout()
+        self.fields["llm_model"] = QLineEdit(settings.llm_model)
+        self.fields["llm_model"].setPlaceholderText("Файл .gguf — скачайте модель кнопкой ниже")
+        model_row.addWidget(self.fields["llm_model"])
+        choose = QPushButton("Выбрать…")
+        choose.clicked.connect(self.pick_llm)
+        model_row.addWidget(choose)
+        lform.addRow("Модель сводок (.gguf)", model_row)
+        self.fields["llm_preset"] = QLineEdit(settings.llm_preset)
+        self.fields["llm_preset"].setVisible(False)
+        download = QPushButton("Скачать или сменить модель…")
+        download.clicked.connect(self.download_llm)
+        lform.addRow(download)
+        recommended = local_llm.PRESETS[local_llm.recommended_preset()]
+        self.llm_state = QLabel()
+        self.llm_state.setWordWrap(True)
+        lform.addRow(self.llm_state)
+        self.fields["llm_model"].textChanged.connect(self.describe_llm)
+        self.describe_llm()
+        ram_hint = QLabel(
+            f"В этом Mac {local_llm.ram_gb():.0f} ГБ памяти — рекомендуется «{recommended.label}»."
+        )
+        ram_hint.setWordWrap(True)
+        lform.addRow(ram_hint)
+        llm_gpu = QCheckBox("Считать сводку на GPU (Metal) — в разы быстрее CPU")
+        llm_gpu.setChecked(settings.llm_gpu)
+        self.fields["llm_gpu"] = llm_gpu
+        lform.addRow("Ускорение", llm_gpu)
         for key, label, lo, hi in [
             ("input_chars", "Символов текста на запрос", 4000, 48000),
             ("max_output_tokens", "Лимит токенов ответа", 512, 64000),
@@ -390,16 +549,53 @@ class SettingsDialog(QDialog):
             spin.setRange(lo, hi)
             spin.setValue(getattr(settings, key))
             self.fields[key] = spin
-            api.addRow(label, spin)
-        hint = QLabel(
-            "Подходит любой OpenAI-совместимый Chat Completions API: OpenAI, OpenRouter, Groq, DeepSeek, "
-            "Together, а также локальные Ollama и LM Studio по адресу localhost. Ключ уходит "
-            "заголовком Authorization: Bearer; для localhost его можно оставить любым непустым.\n"
-            "Аудио не отправляется. Текст уходит на этот адрес только при нажатии «Создать сводку». "
-            "Размер блока и лимит ответа определяют, сколько токенов расходуется на одну запись."
+            lform.addRow(label, spin)
+        llm_hint = QLabel(
+            "Запись любой длины делится на блоки: каждый блок разбирается и затем проверяется по "
+            "расшифровке, потом всё сводится в краткую сводку и итоговый текст. Двухчасовая встреча — "
+            "это 20–40 запросов к модели: на Mac с M-процессором обычно 15–60 минут в зависимости от "
+            "модели. Меньший блок — точнее у небольших моделей, но дольше.\n"
+            "Контекст и память для модели рассчитываются автоматически из размера блока."
         )
-        hint.setWordWrap(True)
-        api.addRow(hint)
+        llm_hint.setWordWrap(True)
+        lform.addRow(llm_hint)
+        fmt = QWidget()
+        fform = QFormLayout(fmt)
+        tabs.addTab(fmt, "Формат сводки")
+        instructions = QPlainTextEdit(settings.summary_instructions)
+        instructions.setPlaceholderText(
+            "Например: «Сводка для отдела продаж. Выделяй цены, сроки поставки и возражения клиентов. "
+            "QBS — название нашей методики, не расшифровывай»."
+        )
+        instructions.setFixedHeight(90)
+        self.fields["summary_instructions"] = instructions
+        fform.addRow("Указания для всей сводки", instructions)
+        final_format = QComboBox()
+        for key, (label, _) in FINAL_FORMATS.items():
+            final_format.addItem(label, key)
+        final_format.setCurrentIndex(max(0, final_format.findData(settings.final_format)))
+        final_format.activated.connect(self.pick_format)
+        self.fields["final_format"] = final_format
+        fform.addRow("Итоговый текст", final_format)
+        template = QPlainTextEdit(
+            settings.final_prompt or FINAL_FORMATS.get(settings.final_format, FINAL_FORMATS[DEFAULT_FORMAT])[1]
+        )
+        template.setMinimumHeight(220)
+        self.fields["final_prompt"] = template
+        fform.addRow("Шаблон итогового текста", template)
+        reset = QPushButton("Вернуть стандартный шаблон")
+        reset.clicked.connect(lambda: self.pick_format(final_format.currentIndex()))
+        fform.addRow(reset)
+        format_hint = QLabel(
+            "Шаблон описывает разделы, порядок и стиль документа обычными словами — модель "
+            "следует ему. Указания для всей сводки влияют на все шаги: что считать важным и как "
+            "называть вещи. Правила точности (только факты из записи, статусы решений, ссылки на "
+            "реплики) встроены и не отключаются.\n"
+            "Сменили шаблон у готовой записи — нажмите «Пересоздать итоговый текст»: проверенный "
+            "реестр пунктов переиспользуется, повторного разбора записи не будет."
+        )
+        format_hint.setWordWrap(True)
+        fform.addRow(format_hint)
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
         )
@@ -422,14 +618,33 @@ class SettingsDialog(QDialog):
         if not capture_supported():
             return [], []
         try:
-            devices = audio_devices(shutil.which("ffmpeg") or "ffmpeg")
+            devices = audio_devices(tool("ffmpeg"))
         except LiveCaptureError:
             return [], []
         return devices, system_audio_devices(devices)
 
-    def pick_provider(self, index):
-        if url := self.provider.itemData(index):
-            self.fields["base_url"].setText(url)
+    def pick_format(self, index):
+        key = self.fields["final_format"].itemData(index)
+        self.fields["final_prompt"].setPlainText(FINAL_FORMATS[key][1])
+
+    def pick_llm(self):
+        path = QFileDialog.getOpenFileName(self, "Модель сводок", "", "Модель GGUF (*.gguf);;Все файлы (*)")[0]
+        if path:
+            self.fields["llm_model"].setText(path)
+            self.fields["llm_preset"].setText("")
+
+    def download_llm(self):
+        dialog = ModelDownloadDialog(self)
+        if dialog.exec() and dialog.path:
+            self.fields["llm_model"].setText(str(dialog.path))
+            self.fields["llm_preset"].setText(dialog.preset)
+
+    def describe_llm(self):
+        path = Path(self.fields["llm_model"].text().strip()).expanduser()
+        if self.fields["llm_model"].text().strip() and path.is_file():
+            self.llm_state.setText(f"✓ Модель на месте: {path.name}, {path.stat().st_size / 1024**3:.1f} ГБ.")
+        else:
+            self.llm_state.setText("⚠ Модель сводок ещё не выбрана — скачайте её, это нужно один раз.")
 
     def pick(self, key, widget):
         path = (
@@ -451,22 +666,26 @@ class SettingsDialog(QDialog):
                     if isinstance(field, QCheckBox)
                     else field.value()
                     if isinstance(field, (QSpinBox, QDoubleSpinBox))
+                    else field.toPlainText().strip()
+                    if isinstance(field, QPlainTextEdit)
                     else field.text()
                 )
+            # An untouched standard template is stored empty, so improved templates in
+            # future versions reach the user automatically.
+            preset = FINAL_FORMATS.get(values["final_format"], FINAL_FORMATS[DEFAULT_FORMAT])[1]
+            if values["final_prompt"] == preset.strip():
+                values["final_prompt"] = ""
             updated = Settings(**values)
-            updated.validate(api=bool(updated.base_url))
-            if self.key.text():
-                set_api_key(self.key.text())
+            if len(updated.summary_instructions) > INSTRUCTIONS_LIMIT:
+                raise ValueError(f"Указания для сводки: не более {INSTRUCTIONS_LIMIT} символов.")
+            if len(updated.final_prompt) > FINAL_PROMPT_LIMIT:
+                raise ValueError(f"Шаблон итогового текста: не более {FINAL_PROMPT_LIMIT} символов.")
+            updated.validate(llm=bool(updated.llm_model.strip()))
             updated.save()
             self.settings = updated
             self.accept()
-        except Exception as exc:
-            message = (
-                str(exc)
-                if isinstance(exc, ValueError)
-                else "Не удалось сохранить ключ в Keychain. Проверьте доступ к связке ключей."
-            )
-            QMessageBox.warning(self, "Настройки", message)
+        except (ValueError, OSError) as exc:
+            QMessageBox.warning(self, "Настройки", str(exc))
 
 
 class Window(QMainWindow):
@@ -502,6 +721,11 @@ class Window(QMainWindow):
         top.addWidget(title)
         top.addWidget(QLabel("Локальное аудио  ·  Кратко + подробно  ·  " + self.build_label))
         top.addStretch()
+        self.model_button = QPushButton("Скачать модель сводок")
+        self.model_button.setProperty("primary", True)
+        self.model_button.setToolTip("Один раз: после загрузки сводки создаются без интернета.")
+        self.model_button.clicked.connect(self.download_model)
+        top.addWidget(self.model_button)
         self.settings_button = QPushButton("Настройки")
         self.settings_button.clicked.connect(self.configure)
         top.addWidget(self.settings_button)
@@ -641,6 +865,26 @@ class Window(QMainWindow):
         retry_row.addWidget(self.undo_retry_button)
         tbox.addLayout(retry_row)
         self.tabs.addTab(transcript, "Расшифровка")
+        final = QWidget()
+        fbox = QVBoxLayout(final)
+        self.final_text = QTextBrowser()
+        self.final_text.setOpenExternalLinks(False)
+        fbox.addWidget(self.final_text, 1)
+        final_actions = QHBoxLayout()
+        self.copy_final_button = QPushButton("Копировать текст")
+        self.copy_final_button.setToolTip("Копирует итоговый текст в Markdown.")
+        self.copy_final_button.clicked.connect(self.copy_final)
+        self.regenerate_button = QPushButton("Пересоздать итоговый текст")
+        self.regenerate_button.setToolTip(
+            "Только итоговый текст по текущему формату из настроек. Проверенный реестр пунктов "
+            "переиспользуется — это быстрее полной сводки."
+        )
+        self.regenerate_button.clicked.connect(lambda: self.start("final"))
+        final_actions.addWidget(self.copy_final_button)
+        final_actions.addWidget(self.regenerate_button)
+        final_actions.addStretch(1)
+        fbox.addLayout(final_actions)
+        self.tabs.addTab(final, "Итоговый текст")
         self.summary = SummaryBrowser(self.store.segment)
         self.tabs.addTab(self.summary, "Кратко · тезисы")
         self.detailed_summary = SummaryBrowser(self.store.segment)
@@ -690,6 +934,28 @@ class Window(QMainWindow):
         if dialog.exec():
             self.settings = dialog.settings
             self.ram.setText(f"Бюджет: {self.settings.memory_gb:g} ГиБ · CPU")
+        self.controls()
+
+    def has_llm(self):
+        return bool(self.settings.llm_model.strip()) and Path(self.settings.llm_model).expanduser().is_file()
+
+    def download_model(self):
+        """Pick and fetch the summary model; returns True when one is ready."""
+        dialog = ModelDownloadDialog(self)
+        if not (dialog.exec() and dialog.path):
+            return self.has_llm()
+        self.settings.llm_model, self.settings.llm_preset = str(dialog.path), dialog.preset
+        try:
+            self.settings.save()
+        except (ValueError, OSError) as exc:
+            QMessageBox.warning(self, "Настройки", str(exc))
+        self.controls()
+        return self.has_llm()
+
+    def copy_final(self):
+        if not self.mid or not (summary := self.store.meeting(self.mid)["summary"]):
+            return
+        QApplication.clipboard().setText((json.loads(summary).get("final") or {}).get("text", ""))
 
     def add_file(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -866,6 +1132,7 @@ class Window(QMainWindow):
         self.summary.setPlainText("")
         self.detailed_summary.clear()
         self.resolved_summary.clear()
+        self.final_text.clear()
         self.audio_report.clear()
         self.controls()
 
@@ -912,6 +1179,7 @@ class Window(QMainWindow):
         self.load_rows()
         if meeting["summary"]:
             result = json.loads(meeting["summary"])
+            self.final_text.setMarkdown(final_markdown(result.get("final")))
             brief, detailed = summary_views(result)
             refs = {r["id"]: stamp(r["start"]) for r in self.store.iter_segments(self.mid)}
             self.summary.show_summary(self.mid, brief, refs)
@@ -936,8 +1204,11 @@ class Window(QMainWindow):
         else:
             self.summary.setPlainText(
                 "После распознавания проверьте текст. Затем нажмите «Создать сводку».\n\n"
-                "Будет отправлен только текст на выбранный API модели. "
+                "Сводку составит локальная модель на этом Mac — текст никуда не отправляется. "
                 "Результат автоматически сохранится в базе знаний."
+            )
+            self.final_text.setPlainText(
+                "Здесь появится итоговый документ в формате, выбранном в Настройки → «Формат сводки»."
             )
             self.detailed_summary.setPlainText(self.summary.toPlainText())
             self.resolved_summary.setPlainText(self.summary.toPlainText())
@@ -1086,12 +1357,14 @@ class Window(QMainWindow):
                 self, "Запись недоступна", "Исходный аудио- или видеофайл перемещён либо удалён."
             )
             return
-        player = shutil.which("ffplay")
+        # ffplay comes with Homebrew FFmpeg; the portable app plays a cut excerpt with the
+        # system afplay instead.
+        player = shutil.which("ffplay") or shutil.which("afplay")
         if not player:
             QMessageBox.information(
                 self,
                 "Прослушивание недоступно",
-                "ffplay не найден. Обычно он ставится вместе с ffmpeg (brew install ffmpeg). "
+                "Не найден проигрыватель (ffplay или afplay). "
                 "Пока можно открыть всю запись кнопкой «Открыть исходную запись» ниже.",
             )
             return
@@ -1111,8 +1384,20 @@ class Window(QMainWindow):
         start = row["start"]
         duration = max(0.1, row["end"] - start)
         try:
-            self.player_proc = subprocess.Popen(
-                [
+            if Path(self.playback_player).name == "afplay":
+                excerpt = data_dir() / "work" / "excerpt.wav"
+                excerpt.parent.mkdir(exist_ok=True)
+                subprocess.run(
+                    [tool("ffmpeg"), "-nostdin", "-v", "error", "-y", "-ss", str(start), "-t", str(duration),
+                     "-i", self.playback_source, "-vn", str(excerpt)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=60,
+                    check=True,
+                )
+                args = [self.playback_player, str(excerpt)]
+            else:
+                args = [
                     self.playback_player,
                     "-nodisp",
                     "-autoexit",
@@ -1121,13 +1406,11 @@ class Window(QMainWindow):
                     "-t",
                     str(duration),
                     self.playback_source,
-                ],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except OSError:
+                ]
+            self.player_proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except (OSError, subprocess.SubprocessError):
             self.stop_playback()
-            QMessageBox.information(self, "Прослушивание недоступно", "Не удалось запустить ffplay.")
+            QMessageBox.information(self, "Прослушивание недоступно", "Не удалось запустить проигрыватель.")
             return
         part = self.playback_total - len(self.playback_queue)
         position = f" · {part}/{self.playback_total}" if self.playback_total > 1 else ""
@@ -1179,18 +1462,30 @@ class Window(QMainWindow):
                     setattr(original, key, getattr(self.settings, key))
             else:
                 for key in [
-                    "base_url",
-                    "model",
+                    "llm_model",
+                    "llm_preset",
+                    "llm_gpu",
+                    "summary_instructions",
+                    "final_format",
+                    "final_prompt",
                     "input_chars",
                     "max_output_tokens",
                     "vault",
                     "memory_gb",
+                    "threads",
                 ]:
                     setattr(original, key, getattr(self.settings, key))
-                if phase == "summary":
-                    original.validate(api=True)
+                if phase in {"summary", "final"}:
+                    if not self.has_llm() and not self.download_model():
+                        return
+                    original.llm_model, original.llm_preset = self.settings.llm_model, self.settings.llm_preset
+                    original.validate(llm=True)
+                    local_llm.check_fits(original)
                     if not self.store.checkpoint(self.mid, "asr_complete", 0):
                         raise ValueError("Сначала завершите распознавание всей записи.")
+                    if phase == "final" and not meeting["summary"]:
+                        raise ValueError("Сначала создайте сводку.")
+            budget = local_llm.job_budget_gb(original) if phase in {"summary", "final"} else original.memory_gb
             self.store.update(
                 self.mid,
                 settings=json.dumps(asdict(original)),
@@ -1198,11 +1493,9 @@ class Window(QMainWindow):
                 error=None,
             )
             self.active_id = self.mid
-            self.job = Job(phase, self.mid, original.memory_gb)
+            self.job = Job(phase, self.mid, budget)
             self.job.memory.connect(
-                lambda rss: self.ram.setText(
-                    f"RSS приложения и обработчиков: {rss:.2f} ГиБ / {original.memory_gb:g} ГиБ · CPU"
-                )
+                lambda rss: self.ram.setText(f"RSS приложения и обработчиков: {rss:.2f} ГиБ / {budget:g} ГиБ")
             )
             self.job.result.connect(self.job_result)
             self.job.finished.connect(self.job_finished)
@@ -1226,8 +1519,8 @@ class Window(QMainWindow):
     def job_finished(self):
         meeting = self.store.meeting(self.active_id)
         pending, self.pending_phase = self.pending_phase, ""
-        if self.job.phase == "summary" and meeting["summary"] and self.mid == self.active_id:
-            self.tabs.setCurrentWidget(self.summary)
+        if self.job.phase in {"summary", "final"} and meeting["summary"] and self.mid == self.active_id:
+            self.tabs.setCurrentIndex(1)
         self.progress.setText(meeting["error"] or "Готово. Результат сохранён.")
         self.job.deleteLater()
         self.job = None
@@ -1305,6 +1598,15 @@ class Window(QMainWindow):
             working if busy else ("Сначала распознайте запись целиком." if ready else pick),
         )
         explain(self.cancel, busy, "Сейчас нечего останавливать.")
+        self.model_button.setVisible(not self.has_llm())
+        explain(self.model_button, not busy, working)
+        summarized = ready and bool(self.store.meeting(self.mid)["summary"])
+        explain(
+            self.regenerate_button,
+            summarized and not busy,
+            working if busy else "Сначала создайте сводку.",
+        )
+        explain(self.copy_final_button, summarized, "Итогового текста пока нет.")
         explain(self.save_segment, ready and not busy, working if busy else pick)
         # Exactly one step is highlighted, so the next action is never a guess.
         step = self.summarize if complete else self.transcribe

@@ -5,7 +5,7 @@ import pytest
 
 from samarizator.knowledge import export
 from samarizator.summary import (
-    ChatClient,
+    LocalClient,
     SummaryFormatError,
     contextual_blocks,
     review_source,
@@ -63,7 +63,7 @@ def test_http_review_corrects_status_and_adds_omitted_condition_before_synthesis
     calls = []
 
     def handler(request):
-        assert request.url.host == "company.example"
+        assert request.url.host == "127.0.0.1"
         prompt = json.loads(request.content)["messages"][-1]["content"]
         if prompt.startswith(MAP_PROMPT):
             calls.append("map")
@@ -97,7 +97,7 @@ def test_http_review_corrects_status_and_adds_omitted_condition_before_synthesis
             },
         )
 
-    client = ChatClient(settings, transport=httpx.MockTransport(handler), key="test")
+    client = LocalClient(settings, "http://127.0.0.1:9", key="test", transport=httpx.MockTransport(handler))
     result = summarize(store, mid, settings, client=client)
     assert len(result["detailed"]["items"]) == 2
     assert result["detailed"]["items"][0]["status"] == "proposed"

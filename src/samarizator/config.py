@@ -2,7 +2,8 @@ import json
 import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from urllib.parse import urlparse
+
+from .bundle import bundled_model
 
 
 def data_dir() -> Path:
@@ -11,10 +12,13 @@ def data_dir() -> Path:
     return path
 
 
+# Free-text limits: the user's instructions travel inside every summary request.
+INSTRUCTIONS_LIMIT = 4000
+FINAL_PROMPT_LIMIT = 8000
+
+
 @dataclass
 class Settings:
-    base_url: str = ""
-    model: str = ""
     memory_gb: float = 4.0
     threads: int = 4
     chunk_seconds: int = 120
@@ -23,7 +27,7 @@ class Settings:
     whisper_model: str = ""
     vault: str = ""
     input_chars: int = 12000
-    max_output_tokens: int = 3000
+    max_output_tokens: int = 4096
     pause_boundaries: bool = False
     vad: bool = False
     vad_model: str = ""
@@ -35,9 +39,18 @@ class Settings:
     live_system_backend: str = "screencapturekit"
     audio_cleanup: str = "off"
     live_mix: str = "gentle"
+    # Local summary model (GGUF for llama.cpp). Nothing leaves the Mac.
+    llm_model: str = ""
+    llm_preset: str = ""
+    llm_gpu: bool = True
+    # What the user wants from the summary (audience, focus, terminology) and the
+    # shape of the final text. Both are prompts; the evidence rules stay in code.
+    summary_instructions: str = ""
+    final_format: str = "protocol"
+    final_prompt: str = ""
 
     def quality_profile(self):
-        """Opt-in profile. Preserve the user's ASR model and corporate API configuration."""
+        """Opt-in profile. Preserve the user's ASR model and summary model configuration."""
         from dataclasses import replace
 
         return replace(
@@ -52,11 +65,7 @@ class Settings:
             vad_model=self.vad_model or str(data_dir() / "models/ggml-silero-v6.2.0.bin"),
         )
 
-    def chat_url(self):
-        base = self.base_url.strip().rstrip("/")
-        return base if base.endswith("/chat/completions") else base + "/chat/completions"
-
-    def validate(self, api=False):
+    def validate(self, llm=False):
         if not 1 <= self.beam_size <= 8 or len(self.glossary) > 800:
             raise ValueError("Beam size: 1–8; словарь терминов: не более 800 символов.")
         if self.live_source not in {"microphone", "system", "both"}:
@@ -74,20 +83,20 @@ class Settings:
             raise ValueError("Некорректные параметры CPU или длины фрагмента.")
         if not 4000 <= self.input_chars <= 48000 or not 512 <= self.max_output_tokens <= 64000:
             raise ValueError("Некорректный размер контекста.")
-        if api:
-            parsed = urlparse(self.base_url)
-            if (
-                parsed.scheme not in {"https", "http"}
-                or not parsed.hostname
-                or parsed.username
-                or parsed.password
-                or parsed.fragment
-            ):
-                raise ValueError("Укажите base URL совместимого API, например https://openrouter.ai/api/v1.")
-            if parsed.scheme == "http" and parsed.hostname not in {"localhost", "127.0.0.1", "::1"}:
-                raise ValueError("HTTP допустим только для локальной модели на localhost. Иначе HTTPS.")
-            if not self.model.strip():
-                raise ValueError("Укажите название модели.")
+        if len(self.summary_instructions) > INSTRUCTIONS_LIMIT:
+            raise ValueError(f"Указания для сводки: не более {INSTRUCTIONS_LIMIT} символов.")
+        if len(self.final_prompt) > FINAL_PROMPT_LIMIT:
+            raise ValueError(f"Формат итогового текста: не более {FINAL_PROMPT_LIMIT} символов.")
+        if llm:
+            path = Path(self.llm_model).expanduser() if self.llm_model.strip() else None
+            if not path or not path.is_file():
+                raise ValueError(
+                    "Локальная модель сводок не найдена. Откройте Настройки → «Сводка · локальная "
+                    "модель» и скачайте модель или выберите файл .gguf."
+                )
+            with path.open("rb") as f:
+                if f.read(4) != b"GGUF":
+                    raise ValueError("Файл модели сводок не в формате GGUF. Выберите файл .gguf для llama.cpp.")
 
     def save(self):
         self.validate()
@@ -99,34 +108,46 @@ class Settings:
 
     @classmethod
     def from_dict(cls, values):
-        values = dict(values)
-        # Settings saved before the universal API tab held a full chat/completions endpoint.
-        if not values.get("base_url") and values.get("endpoint"):
-            values["base_url"] = values["endpoint"].strip().rstrip("/").removesuffix("/chat/completions")
-        return cls(**{k: v for k, v in values.items() if k in cls.__dataclass_fields__})
+        # Keys of older versions (cloud API base_url/model/endpoint) are simply dropped.
+        return cls(**{k: v for k, v in dict(values).items() if k in cls.__dataclass_fields__})
+
+    def resolved(self):
+        """Re-point model paths that moved together with the app.
+
+        Settings keep absolute paths; dragging Samarizator.app from Downloads to
+        Applications moves the bundled models, so a missing file is looked up by name
+        in the bundle and in Application Support before it is reported as missing.
+        """
+        from dataclasses import replace
+
+        changes = {}
+        for key in ("whisper_model", "vad_model", "llm_model"):
+            value = getattr(self, key)
+            if not value or Path(value).expanduser().is_file():
+                continue
+            name = Path(value).name
+            for candidate in (bundled_model(name), data_dir() / "models" / name):
+                if candidate and Path(candidate).is_file():
+                    changes[key] = str(candidate)
+                    break
+        return replace(self, **changes) if changes else self
 
     @classmethod
     def load(cls):
         path = data_dir() / "settings.json"
         if path.exists():
-            return cls.from_dict(json.loads(path.read_text()))
+            return cls.from_dict(json.loads(path.read_text())).resolved()
+        return cls.first_run()
+
+    @classmethod
+    def first_run(cls):
+        """Defaults that work out of the box: the bundled models when the app carries them."""
         models = data_dir() / "models"
-        return cls(
-            whisper_model=str(models / "ggml-small-q5_1.bin"),
-            vault=str(Path.home() / "Documents/Samarizator"),
-        )
-
-
-def set_api_key(key: str):
-    import keyring
-
-    keyring.set_password("samarizator", "corporate-api", key)
-
-
-def get_api_key() -> str:
-    key = os.environ.get("SAMARIZATOR_API_KEY")
-    if key:
-        return key
-    import keyring
-
-    return keyring.get_password("samarizator", "corporate-api") or ""
+        whisper = bundled_model("ggml-small-q5_1.bin") or models / "ggml-small-q5_1.bin"
+        vad = bundled_model("ggml-silero-v6.2.0.bin")
+        settings = cls(whisper_model=str(whisper), vault=str(Path.home() / "Documents/Samarizator"))
+        if vad:
+            # The portable app ships the VAD model: use speech detection and pause-aligned
+            # chunks from the start, as the quality profile does.
+            settings.vad, settings.vad_model, settings.pause_boundaries = True, str(vad), True
+        return settings

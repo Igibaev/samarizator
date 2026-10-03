@@ -3,20 +3,22 @@
 import hashlib
 import json
 import re
-import ssl
-import time
+from pathlib import Path
 
 import httpx
-import truststore
 
-from .config import get_api_key
 from .summary_prompts import (
     BRIEF_PROMPT,
+    DEFAULT_FORMAT,
+    FINAL_FORMATS,
+    FINAL_PROMPT,
+    FINAL_SYSTEM,
     MAP_PROMPT,
     RECONCILE_PROMPT,
     REDUCE_PROMPT,
     REVIEW_PROMPT,
     SYSTEM,
+    USER_INSTRUCTIONS,
 )
 
 KINDS = {"point", "decision", "action", "risk", "question"}
@@ -274,76 +276,119 @@ def validate_summary(obj, allowed):
     return obj
 
 
-class ChatClient:
-    def __init__(self, settings, transport=None, key=None):
-        settings.validate(api=True)
-        self.settings = settings
-        self.key = get_api_key() if key is None else key
-        if not self.key:
-            raise ValueError("Сохраните API-ключ модели в настройках.")
-        self.transport = transport
+def system_prompt(settings):
+    """Evidence rules first; the user's own wishes ride along without overriding them."""
+    extra = settings.summary_instructions.strip()
+    return SYSTEM + (USER_INSTRUCTIONS + extra if extra else "")
 
-    def complete(self, prompt, allowed):
-        s = self.settings
-        headers = {"Authorization": f"Bearer {self.key}", "Content-Type": "application/json"}
-        payload = dict(
-            model=s.model,
-            temperature=0.1,
-            max_tokens=s.max_output_tokens,
-            messages=[dict(role="system", content=SYSTEM), dict(role="user", content=prompt)],
-        )
-        # Verify against the OS trust store, so a corporate root installed in the system
-        # keychain works the way curl does. certifi alone would reject an intercepted TLS chain.
-        context = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        # No redirect, telemetry, public fallback, or implicit environment proxy.
-        with httpx.Client(
-            verify=context,
+
+def model_identity(settings):
+    """Part of every checkpoint digest: another model or quantization means a new answer."""
+    path = Path(settings.llm_model).expanduser()
+    try:
+        size = path.stat().st_size
+    except OSError:
+        size = 0
+    return f"{path.name}:{size}"
+
+
+THINKING = re.compile(r"<think>.*?</think>", re.S)
+
+# llama.cpp's grammars/json.gbnf: the sampler can only produce a JSON object. Passed as a
+# raw grammar (not response_format) because the server then skips its own chat-format
+# parser, which answers HTTP 500 instead of finish_reason=length on a cut-off JSON.
+JSON_GRAMMAR = r"""root   ::= object
+value  ::= object | array | string | number | ("true" | "false" | "null") ws
+object ::= "{" ws ( string ":" ws value ("," ws string ":" ws value)* )? "}" ws
+array  ::= "[" ws ( value ("," ws value)* )? "]" ws
+string ::= "\"" ( [^"\\\x7F\x00-\x1F] | "\\" (["\\bfnrt] | "u" [0-9a-fA-F]{4}) )* "\"" ws
+number ::= ("-"? ([0-9] | [1-9] [0-9]{0,15})) ("." [0-9]+)? ([eE] [-+]? [0-9] [1-9]{0,15})? ws
+ws ::= | " " | "\n" [ \t]{0,20}
+"""
+
+
+class LocalClient:
+    """OpenAI-compatible chat requests to the llama-server started for this job.
+
+    Requests never leave 127.0.0.1: no proxy from the environment, no redirects.
+    JSON answers are constrained by a llama.cpp grammar, which removes most
+    broken-JSON retries that small local models otherwise need.
+    """
+
+    def __init__(self, settings, url, key="", transport=None):
+        self.settings = settings
+        self.url = url.rstrip("/") + "/v1/chat/completions"
+        self.key = key
+        self.transport = transport
+        self.system = system_prompt(settings)
+        self.client = httpx.Client(
             trust_env=False,
             follow_redirects=False,
-            timeout=httpx.Timeout(180, connect=20),
-            transport=self.transport,
-        ) as client:
-            for attempt in range(3):
-                try:
-                    with client.stream("POST", s.chat_url(), headers=headers, json=payload) as response:
-                        if response.status_code in {429, 502, 503, 504} and attempt < 2:
-                            time.sleep(2**attempt)
-                            continue
-                        if not 200 <= response.status_code < 300:
-                            raise ValueError(
-                                f"API модели: HTTP {response.status_code}. "
-                                "Проверьте base URL, название модели и ключ."
-                            )
-                        raw = bytearray()
-                        for block in response.iter_bytes():
-                            raw.extend(block)
-                            if len(raw) > 2_000_000:
-                                raise ValueError("Ответ модели слишком большой.")
-                    body = json.loads(raw)
-                    choice = body["choices"][0]
-                    if choice.get("finish_reason") == "length":
-                        raise SummaryTooLong(
-                            "Модель обрезала ответ. Уменьшите входной блок или увеличьте лимит ответа."
-                        )
-                    if choice.get("finish_reason") not in {"stop", None}:
-                        raise ValueError(
-                            "API не завершил сводку: проверьте ограничения корпоративной модели."
-                        )
-                    content = choice["message"]["content"]
-                    if not isinstance(content, str):
-                        raise SummaryFormatError("Модель вернула нетекстовый ответ.")
-                    return parse_model_summary(content, allowed)
-                except httpx.HTTPError:
-                    if attempt == 2:
-                        raise ValueError(
-                            "Нет соединения с API модели. Проверьте base URL, VPN и доверие корпоративному сертификату."
-                        ) from None
-                    time.sleep(2**attempt)
-                except (KeyError, IndexError, TypeError, json.JSONDecodeError):
-                    raise ValueError(
-                        "API вернул ответ в неподдерживаемом формате. Нужен Chat Completions JSON."
-                    ) from None
-        raise RuntimeError("API модели недоступен.")
+            # One long generation on a laptop can take many minutes.
+            timeout=httpx.Timeout(3600, connect=10),
+            transport=transport,
+        )
+
+    def close(self):
+        self.client.close()
+
+    def _choice(self, payload):
+        headers = {"Content-Type": "application/json"}
+        if self.key:
+            headers["Authorization"] = f"Bearer {self.key}"
+        for attempt in range(3):
+            try:
+                response = self.client.post(self.url, headers=headers, json=payload)
+            except httpx.HTTPError:
+                if attempt == 2:
+                    raise RuntimeError("Локальная модель сводок перестала отвечать.") from None
+                continue
+            if response.status_code == 503 and attempt < 2:
+                continue  # still loading or busy
+            if response.status_code == 400 and "context" in response.text.lower():
+                raise SummaryTooLong("Запрос не поместился в контекст модели.")
+            if not 200 <= response.status_code < 300:
+                raise RuntimeError(f"Локальная модель сводок: HTTP {response.status_code}.")
+            if len(response.content) > 4_000_000:
+                raise ValueError("Ответ модели слишком большой.")
+            try:
+                choice = response.json()["choices"][0]
+                content = choice["message"]["content"]
+            except (KeyError, IndexError, TypeError, ValueError):
+                raise RuntimeError("Локальная модель вернула ответ в неожиданном формате.") from None
+            if not isinstance(content, str):
+                raise SummaryFormatError("Модель вернула нетекстовый ответ.")
+            return choice.get("finish_reason"), THINKING.sub("", content).strip()
+        raise RuntimeError("Локальная модель сводок недоступна.")
+
+    def _payload(self, system, prompt, max_tokens, json_mode):
+        payload = dict(
+            temperature=0.2,
+            top_p=0.9,
+            max_tokens=max_tokens,
+            messages=[dict(role="system", content=system), dict(role="user", content=prompt)],
+            chat_template_kwargs=dict(enable_thinking=False),
+        )
+        if json_mode:
+            payload["grammar"] = JSON_GRAMMAR
+        return payload
+
+    def complete(self, prompt, allowed):
+        finish, content = self._choice(
+            self._payload(self.system, prompt, self.settings.max_output_tokens, json_mode=True)
+        )
+        if finish == "length":
+            raise SummaryTooLong("Модель не уложилась в лимит ответа; блок будет разделён.")
+        return parse_model_summary(content, allowed)
+
+    def complete_text(self, system, prompt, max_tokens):
+        """Free Markdown text. Returns (text, truncated)."""
+        finish, content = self._choice(self._payload(system, prompt, max_tokens, json_mode=False))
+        if content.startswith("```"):
+            lines = content.splitlines()
+            if lines[-1].strip() == "```":
+                content = "\n".join(lines[1:-1]).strip()
+        return content, finish == "length"
 
 
 def _size_groups(items, max_chars):
@@ -493,7 +538,7 @@ def source_fallback(block, reason):
     if not items:
         raise ValueError("В блоке нет текста, который можно сохранить в резервную сводку.")
     warning = (
-        "Корпоративная модель не вернула корректный JSON для этой части даже после уменьшения "
+        "Модель сводок не вернула корректный JSON для этой части даже после уменьшения "
         "блока. Исходные реплики сохранены без перефразирования; проверьте этот фрагмент. "
         + str(reason)[:300]
     )
@@ -598,8 +643,44 @@ def review_source(client, source, draft, max_chars):
     return dict(_source_result(result, allowed, primary), review_receipts=receipts)
 
 
-def summarize(store, mid, settings, progress=lambda *_: None, client=None):
-    client = client or ChatClient(settings)
+def summarize(store, mid, settings, progress=lambda *_: None, client=None, work=None):
+    """Whole pipeline. Without a client, starts the local model for the duration of the job."""
+    if client is not None:
+        return _summarize(store, mid, settings, progress, client)
+    with local_model(settings, work, progress) as client:
+        return _summarize(store, mid, settings, progress, client)
+
+
+class local_model:
+    """Context manager: llama-server for this job plus a client bound to it."""
+
+    def __init__(self, settings, work, progress):
+        import tempfile
+
+        from .local_llm import LlamaServer, check_fits
+
+        settings.validate(llm=True)
+        check_fits(settings)
+        self.temp = None if work else tempfile.TemporaryDirectory(prefix="samarizator-llm-")
+        self.server = LlamaServer(settings, work or self.temp.name, progress)
+        self.settings = settings
+        self.client = None
+
+    def __enter__(self):
+        self.server.__enter__()
+        self.client = LocalClient(self.settings, self.server.url, self.server.key)
+        return self.client
+
+    def __exit__(self, *exc):
+        if self.client:
+            self.client.close()
+        self.server.__exit__(*exc)
+        if self.temp:
+            self.temp.cleanup()
+        return False
+
+
+def _summarize(store, mid, settings, progress, client):
     maps = []
 
     def map_block(block, index, before, after, node=1, depth=0):
@@ -607,11 +688,10 @@ def summarize(store, mid, settings, progress=lambda *_: None, client=None):
         prompt = MAP_PROMPT + _json(dict(source=source))
         digest = hashlib.sha256(
             (
-                settings.chat_url()
-                + settings.model
+                model_identity(settings)
                 + str(settings.max_output_tokens)
                 + str(settings.input_chars)
-                + SYSTEM
+                + system_prompt(settings)
                 + REVIEW_PROMPT
                 + prompt
             ).encode()
@@ -714,10 +794,9 @@ def summarize(store, mid, settings, progress=lambda *_: None, client=None):
                 seen.add(signature)
     resolve_digest = hashlib.sha256(
         (
-            settings.chat_url()
-            + settings.model
+            model_identity(settings)
             + str(settings.max_output_tokens)
-            + SYSTEM
+            + system_prompt(settings)
             + RECONCILE_PROMPT
             + "safe-resolution-v2"
             + str(settings.input_chars)
@@ -748,6 +827,8 @@ def summarize(store, mid, settings, progress=lambda *_: None, client=None):
                 dict(digest=resolve_digest, result=resolved, warnings=resolve_warnings),
             )
 
+    levels = []
+
     def package(brief):
         result = package_summary(brief, ledger, maps, resolved)
         result["detailed"]["resolution_warning"] = " ".join(resolve_warnings)
@@ -755,6 +836,10 @@ def summarize(store, mid, settings, progress=lambda *_: None, client=None):
         if warning:
             result["brief"]["quality_warning"] = warning
             result["detailed"]["quality_warning"] = warning
+        # Intermediate registers: the final text takes the most detailed one that fits.
+        result["reduce_levels"] = levels
+        times = {row["id"]: row["start"] for row in store.iter_segments(mid)}
+        result["final"] = final_document(client, settings, result, times, progress)
         return result
 
     def fallback_brief(reason):
@@ -818,4 +903,124 @@ def summarize(store, mid, settings, progress=lambda *_: None, client=None):
         if len(json.dumps(reduced)) >= len(json.dumps(current)):
             return fallback_brief("Модель не сократила промежуточный результат.")
         current = reduced
+        levels.append(reduced)
     return fallback_brief("Достигнут предел объединения сводки.")
+
+
+KIND_NAMES = dict(point="Тезис", decision="Решение", action="Задача", risk="Риск", question="Вопрос")
+STATUS_NAMES = dict(
+    proposed="предложено", agreed="согласовано", cancelled="отменено", disputed="оспаривается"
+)
+
+
+def _clock(seconds):
+    seconds = max(0, int(seconds))
+    return f"{seconds // 3600:02}:{seconds // 60 % 60:02}:{seconds % 60:02}"
+
+
+def material_line(item, times):
+    starts = [times[ref] for ref in item.get("evidence", []) if ref in times]
+    parts = [KIND_NAMES.get(item.get("kind"), "Тезис")]
+    if status := STATUS_NAMES.get(item.get("status")):
+        parts.append(status)
+    if item.get("owner"):
+        parts.append("ответственный: " + str(item["owner"]))
+    if item.get("due"):
+        parts.append("срок: " + str(item["due"]))
+    stamp = f"[{_clock(min(starts))}] " if starts else ""
+    return f"- {stamp}{' · '.join(parts)} — {' '.join(str(item['text']).split())}"
+
+
+def render_material(overview, items, resolved, times, parts=None):
+    lines = ["Обзор записи: " + " ".join(str(overview).split())]
+    if parts:
+        lines += ["", "Обзоры частей записи по порядку:", *(" ".join(p.split()) for p in parts if p.strip())]
+    lines += ["", "Пункты в порядке записи:", *(material_line(item, times) for item in items)]
+    if resolved:
+        lines += [
+            "",
+            "Итоговый статус решений и задач с учётом пересмотров (приоритетнее ранних пунктов):",
+            *(material_line(item, times) for item in resolved),
+        ]
+    return "\n".join(lines)
+
+
+def final_material(summary, times, budget):
+    """Most detailed material that fits one request: full ledger → reduced registers → brief."""
+    brief, detailed = summary_views(summary)
+    resolved = detailed.get("resolved") or []
+    overview = brief.get("overview", "")
+    parts = [p for p in str(detailed.get("overview", "")).split("\n\n") if p.strip()]
+    candidates = [
+        ("full", dict(items=detailed["items"], parts=parts)),
+        ("full", dict(items=detailed["items"])),
+        *((f"level-{n + 1}", dict(items=level)) for n, level in enumerate(summary.get("reduce_levels") or [])),
+        ("brief", dict(items=brief["items"])),
+    ]
+    material = ""
+    for name, option in candidates:
+        material = render_material(overview, option["items"], resolved, times, option.get("parts"))
+        if len(material) <= budget:
+            return name, material
+    return "brief", material
+
+
+FINAL_SOURCES = {
+    "full": "",
+    "brief": "Запись слишком длинная для одного запроса: итоговый текст составлен по краткой сводке. "
+    "Подробности — во вкладке «Подробная сводка».",
+}
+
+
+def final_document(client, settings, summary, times, progress=lambda *_: None):
+    """Markdown in the user's format. Optional: a failure here never discards the summaries."""
+    from .local_llm import final_input_chars, final_output_tokens
+
+    key = settings.final_format if settings.final_format in FINAL_FORMATS else DEFAULT_FORMAT
+    custom = settings.final_prompt.strip()
+    template = custom or FINAL_FORMATS[key][1]
+    title = FINAL_FORMATS[key][0] if template == FINAL_FORMATS[key][1] else "Свой формат"
+    source, material = final_material(summary, times, final_input_chars(settings))
+    system = FINAL_SYSTEM
+    if extra := settings.summary_instructions.strip():
+        system += USER_INSTRUCTIONS + extra
+    progress("Итоговый текст по выбранному формату…")
+    try:
+        text, truncated = client.complete_text(
+            system, FINAL_PROMPT.format(template=template, material=material), final_output_tokens(settings)
+        )
+    except (ValueError, RuntimeError, httpx.HTTPError) as exc:
+        return dict(
+            title=title,
+            format=key,
+            text="",
+            warning="Итоговый текст не создан: " + str(exc)[:300] + " Краткая и подробная сводки сохранены.",
+        )
+    warnings = []
+    if source.startswith("level-"):
+        warnings.append(
+            "Запись длинная: итоговый текст составлен по сжатому реестру пунктов. "
+            "Полный список — во вкладке «Подробная сводка»."
+        )
+    elif FINAL_SOURCES.get(source):
+        warnings.append(FINAL_SOURCES[source])
+    if truncated:
+        warnings.append("Текст упёрся в лимит ответа и может быть неполным: увеличьте лимит токенов ответа.")
+    if not text.strip():
+        warnings.append("Модель вернула пустой текст. Попробуйте другой формат или модель.")
+    return dict(title=title, format=key, text=text, source=source, warning=" ".join(warnings))
+
+
+def regenerate_final(store, mid, settings, progress=lambda *_: None, client=None, work=None):
+    """Only the final text, from a stored summary: fast way to try another format."""
+    meeting = store.meeting(mid)
+    if not meeting["summary"]:
+        raise ValueError("Сначала создайте сводку.")
+    summary = json.loads(meeting["summary"])
+    times = {row["id"]: row["start"] for row in store.iter_segments(mid)}
+    if client is not None:
+        summary["final"] = final_document(client, settings, summary, times, progress)
+        return summary
+    with local_model(settings, work, progress) as client:
+        summary["final"] = final_document(client, settings, summary, times, progress)
+    return summary

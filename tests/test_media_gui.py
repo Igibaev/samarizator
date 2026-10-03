@@ -136,11 +136,12 @@ def test_gui_constructs_and_shows_recording(tmp_path, monkeypatch):
     assert dialog.fields["memory_gb"].value() == 16
     assert dialog.fields["vad"].isChecked()
     assert dialog.fields["whisper_model"].text() == old_model
-    dialog.fields["base_url"].setText("https://typed-by-hand.example/v1")
-    dialog.pick_provider(dialog.provider.findData("https://openrouter.ai/api/v1"))
-    assert dialog.fields["base_url"].text() == "https://openrouter.ai/api/v1"
-    dialog.pick_provider(dialog.provider.findData(""))
-    assert dialog.fields["base_url"].text() == "https://openrouter.ai/api/v1"
+    assert not {"base_url", "model"} & dialog.fields.keys()
+    lecture = dialog.fields["final_format"].findData("lecture")
+    dialog.pick_format(lecture)
+    assert "Основные идеи" in dialog.fields["final_prompt"].toPlainText()
+    assert "✓" not in dialog.llm_state.text()  # no summary model downloaded yet
+    assert w.model_button.isVisibleTo(w)
     from PySide6.QtCore import QCoreApplication, QEvent
 
     w.timer.stop()

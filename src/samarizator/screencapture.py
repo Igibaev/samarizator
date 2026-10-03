@@ -17,6 +17,7 @@ import subprocess
 import time
 from pathlib import Path
 
+from .bundle import resources
 from .config import data_dir
 
 SOURCE = Path(__file__).resolve().parents[2] / "native/macos-capture/main.swift"
@@ -28,7 +29,7 @@ MINIMUM_MACOS = 13
 PERMISSION_HELP = (
     "macOS не дала разрешение на запись экрана и системного звука. Откройте Системные "
     "настройки → Конфиденциальность и безопасность → Запись экрана и системного звука, "
-    "включите Terminal (или Samarizator) и перезапустите приложение: разрешение действует "
+    "включите Samarizator (или Terminal при запуске из исходников) и перезапустите приложение: разрешение действует "
     "со следующего запуска. Если пункт недоступен или управляется профилем MDM, запрет "
     "поставлен политикой компании — обход приложение не выполняет, обратитесь к IT."
 )
@@ -43,8 +44,15 @@ class HelperError(RuntimeError):
     pass
 
 
+HELPER_NAME = "samarizator-system-audio"
+
+
 def binary_path():
-    return data_dir() / "bin/samarizator-system-audio"
+    """The helper signed into Samarizator.app; on a checkout, the one start.sh built."""
+    root = resources()
+    if root is not None and (root / "bin" / HELPER_NAME).is_file():
+        return root / "bin" / HELPER_NAME
+    return data_dir() / "bin" / HELPER_NAME
 
 
 def macos_version():

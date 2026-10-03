@@ -3,7 +3,6 @@
 import os
 import platform
 import re
-import shutil
 import subprocess
 import time
 import uuid
@@ -13,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import screencapture
+from .bundle import has_tool, tool
 from .config import data_dir
 
 MICROPHONE = "microphone"
@@ -207,9 +207,9 @@ class LiveRecorder:
         if mix not in MIX_PROFILES:
             raise LiveCaptureError("Неизвестный профиль сведения дорожек.")
         self.mix = mix
-        self.ffmpeg = ffmpeg or shutil.which("ffmpeg")
+        self.ffmpeg = ffmpeg or (tool("ffmpeg") if has_tool("ffmpeg") else None)
         if not self.ffmpeg:
-            raise LiveCaptureError("FFmpeg не найден. Запустите ./start.sh для установки.")
+            raise LiveCaptureError("FFmpeg не найден. Переустановите Samarizator или запустите ./start.sh.")
         self.folder = Path(folder or data_dir() / "recordings")
         self.folder.mkdir(parents=True, exist_ok=True)
         self.folder.chmod(0o700)
