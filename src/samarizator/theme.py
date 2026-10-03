@@ -134,6 +134,8 @@ QFrame#segmented QPushButton:hover:!checked {{ background: rgba(0,0,0,0.04); }}
 QFrame#card {{ background: #ffffff; border: 1px solid #e5e5ea; border-radius: 14px; }}
 QFrame#soft {{ background: {GROUND}; border-radius: 14px; }}
 QWidget#optionList {{ background: transparent; }}
+QPushButton#dangerLink {{ background: transparent; color: {RED}; font-weight: 500; padding: 4px 8px; }}
+QPushButton#dangerLink:hover {{ background: #fde8ea; }}
 QFrame#modelOption {{ background: #ffffff; border: 1px solid #e5e5ea; border-radius: 12px; }}
 QFrame#modelOption[selected="true"] {{ border: 2px solid {ACCENT}; background: #f5f9ff; }}
 QFrame#modelOption:disabled {{ background: {GROUND}; }}

@@ -267,6 +267,10 @@ class SettingsDialog(QDialog):
             self.fields["llm_gpu"],
             subtitle="Metal на Apple Silicon: сводка в разы быстрее, чем на процессоре.",
         )
+        manage = QPushButton("Управлять…")
+        manage.clicked.connect(self.manage_models)
+        self.models_detail = models.row("Скачанные модели", manage, subtitle="")
+        self.describe_storage()
         self.describe_llm()
         self.describe_whisper()
         speech = Group(layout, "Распознавание")
@@ -597,6 +601,29 @@ class SettingsDialog(QDialog):
             self.whisper_detail.setText(line or "Скачайте модель — это нужно один раз.")
             self.whisper_detail.setVisible(True)
 
+    def describe_storage(self):
+        files = downloaded_models()
+        total = sum(size for _, size in files)
+        self.models_detail.setText(
+            f"{len(files)} {plural(len(files), 'файл', 'файла', 'файлов')} · {gb(total / 1024**3)} ГБ на диске"
+            if files
+            else "Пока ничего не скачано."
+        )
+        self.models_detail.setVisible(True)
+
+    def manage_models(self):
+        in_use = {key: self.fields[key].text().strip() for key in ("llm_model", "whisper_model", "vad_model")}
+        dialog = ModelsDialog(in_use, self)
+        dialog.exec()
+        # A deleted model stops being the selected one; the app offers a download instead.
+        for key in dialog.removed_in_use:
+            self.fields[key].setText("")
+            if key == "llm_model":
+                self.fields["llm_preset"].setText("")
+            if key == "vad_model":
+                self.fields["vad"].setChecked(False)
+        self.describe_storage()
+
     def pick(self, key, widget):
         path = (
             QFileDialog.getExistingDirectory(self, "Папка базы знаний")
@@ -643,6 +670,184 @@ class SettingsDialog(QDialog):
             self.accept()
         except (ValueError, OSError) as exc:
             QMessageBox.warning(self, "Настройки", str(exc))
+
+
+def plural(count, one, few, many):
+    if count % 10 == 1 and count % 100 != 11:
+        return one
+    if 2 <= count % 10 <= 4 and not 12 <= count % 100 <= 14:
+        return few
+    return many
+
+
+def downloaded_models():
+    """[(path, bytes)] of model files and unfinished downloads in the app's models folder."""
+    folder = local_llm.models_dir()
+    files = [
+        path for path in folder.iterdir() if path.is_file() and path.suffix in {".gguf", ".bin", ".part"}
+    ]
+    return sorted(((path, path.stat().st_size) for path in files), key=lambda pair: -pair[1])
+
+
+def describe_model_file(path):
+    """(name, role) a person recognises: the preset name when the file is one of ours."""
+    from .setup_models import WHISPER_PRESETS
+
+    if path.suffix == ".part":
+        name = path.name.removesuffix(".part")
+        return f"Недокачанная загрузка · {name}", "Можно удалить: загрузка начнётся заново"
+    for presets in (local_llm.PRESETS, WHISPER_PRESETS):
+        preset = next((p for p in presets.values() if p.file == path.name), None)
+        if preset:
+            return preset_name(
+                preset
+            ), "Сводки и вопросы" if presets is local_llm.PRESETS else "Распознавание речи"
+    if path.suffix == ".gguf":
+        return path.stem, "Сводки и вопросы"
+    if "silero" in path.name or "vad" in path.name.lower():
+        return path.stem, "Выделение речи (VAD)"
+    return path.stem, "Распознавание речи"
+
+
+class ModelsDialog(QDialog):
+    """Downloaded models with their size; any of them can be deleted to free the disk."""
+
+    ROLES = {"llm_model": "модель сводок", "whisper_model": "модель распознавания", "vad_model": "модель VAD"}
+
+    def __init__(self, in_use, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Скачанные модели")
+        self.setMinimumWidth(560)
+        self.in_use = {key: value for key, value in in_use.items() if value}
+        self.removed_in_use = []
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(28, 24, 28, 22)
+        layout.setSpacing(12)
+        layout.addWidget(label("Скачанные модели", "h2"))
+        layout.addWidget(
+            label(
+                "Модели занимают место на диске. Удалённую модель можно скачать снова в любой момент; "
+                "записи и сводки при этом не пропадают.",
+                "hint",
+                wrap=True,
+            )
+        )
+        self.list = QVBoxLayout()
+        self.list.setSpacing(0)
+        holder = QWidget()
+        holder.setObjectName("optionList")
+        holder.setLayout(self.list)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(holder)
+        scroll.setMinimumHeight(240)
+        layout.addWidget(scroll, 1)
+        self.total = label("", "secondary", wrap=True)
+        layout.addWidget(self.total)
+        row = QHBoxLayout()
+        folder = QPushButton("Показать в Finder")
+        folder.clicked.connect(self.reveal)
+        row.addWidget(folder)
+        row.addStretch(1)
+        done = primary(QPushButton("Готово"))
+        done.clicked.connect(self.accept)
+        row.addWidget(done)
+        layout.addLayout(row)
+        self.fill()
+
+    def using(self, path):
+        return [key for key, value in self.in_use.items() if Path(value).expanduser() == path]
+
+    def fill(self):
+        while self.list.count():
+            item = self.list.takeAt(0)
+            if widget := item.widget():
+                widget.setParent(None)
+                widget.deleteLater()
+        files = downloaded_models()
+        group = QFrame()
+        group.setObjectName("card")
+        group.setStyleSheet("QFrame#card { border-radius: 10px; }")
+        rows = QVBoxLayout(group)
+        rows.setContentsMargins(0, 0, 0, 0)
+        rows.setSpacing(0)
+        for index, (path, size) in enumerate(files):
+            if index:
+                rows.addWidget(separator())
+            name, role = describe_model_file(path)
+            line = QWidget()
+            box = QHBoxLayout(line)
+            box.setContentsMargins(14, 10, 14, 10)
+            box.setSpacing(12)
+            words = QVBoxLayout()
+            words.setSpacing(1)
+            head = QHBoxLayout()
+            head.setSpacing(8)
+            title = label(name, wrap=True)
+            title.setStyleSheet("font-weight: 600;")
+            title.setMinimumWidth(120)
+            head.addWidget(title, 1)
+            if self.using(path):
+                head.addWidget(tag("Используется", "info"))
+            words.addLayout(head)
+            words.addWidget(label(f"{role} · {gb(size / 1024**3)} ГБ", "secondary"))
+            box.addLayout(words, 1)
+            remove = QPushButton("Удалить")
+            remove.setObjectName("dangerLink")
+            remove.setFlat(True)
+            remove.clicked.connect(lambda checked=False, p=path: self.remove(p))
+            box.addWidget(remove)
+            rows.addWidget(line)
+        if files:
+            self.list.addWidget(group)
+        else:
+            self.list.addWidget(label("Скачанных моделей нет.", "secondary"))
+        self.list.addStretch(1)
+        free = shutil.disk_usage(local_llm.models_dir()).free / 1024**3
+        used = sum(size for _, size in files) / 1024**3
+        self.total.setText(f"Занято моделями: {gb(used)} ГБ · свободно на диске: {free:.0f} ГБ")
+
+    def remove(self, path):
+        name, _ = describe_model_file(path)
+        roles = self.using(path)
+        text = f"Удалить «{name}»? Освободится {gb(path.stat().st_size / 1024**3)} ГБ."
+        if roles:
+            what = ", ".join(self.ROLES[key] for key in roles)
+            text += (
+                f"\n\nЭто текущая {what}. Без неё обработка не начнётся, пока вы не скачаете её снова "
+                "или не выберете другую."
+            )
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning if roles else QMessageBox.Icon.Question)
+        box.setWindowTitle("Удалить модель")
+        box.setText(text)
+        confirm = box.addButton("Удалить", QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton("Отмена", QMessageBox.ButtonRole.RejectRole)
+        if not self.confirm(box, confirm):
+            return
+        try:
+            path.unlink()
+            path.with_suffix(path.suffix + ".url").unlink(missing_ok=True)
+        except OSError as exc:
+            QMessageBox.warning(self, "Удалить модель", f"Не удалось удалить файл: {exc.strerror}")
+            return
+        for key in roles:
+            self.removed_in_use.append(key)
+            self.in_use.pop(key, None)
+        self.fill()
+
+    @staticmethod
+    def confirm(box, button):
+        box.exec()
+        return box.clickedButton() is button
+
+    def reveal(self):
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(local_llm.models_dir())))
 
 
 class DownloadJob(QThread):

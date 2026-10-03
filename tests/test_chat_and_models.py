@@ -357,3 +357,39 @@ def test_summary_models_are_picked_from_their_repositories(tmp_path):
     assert target.name == preset.file and target.read_bytes() == weights
     for key in ("gigachat3.1-lightning", "gemma4-12b", "gemma4-26b-a4b"):
         assert local_llm.PRESETS[key].url.startswith(local_llm.HF_REPO)
+
+
+def test_downloaded_models_can_be_deleted_to_free_the_disk(tmp_path, monkeypatch, qapp):
+    from samarizator import local_llm
+    from samarizator.settings_dialog import ModelsDialog, SettingsDialog, downloaded_models
+
+    monkeypatch.setenv("SAMARIZATOR_HOME", str(tmp_path / "home"))
+    folder = local_llm.models_dir()
+    llm = folder / local_llm.PRESETS["gemma4-12b"].file
+    llm.write_bytes(b"GGUF" + b"\0" * 4096)
+    whisper = folder / "ggml-podlodka-turbo.bin"
+    whisper.write_bytes(b"lmgg" + b"\0" * 2048)
+    partial = folder / "gemma-4-26B-A4B-it-Q4_K_M.gguf.part"
+    partial.write_bytes(b"x" * 1024)
+    partial.with_suffix(".part.url").write_text("https://example.test/x.gguf")
+    (folder / "download-manifest.json").write_text("{}")
+    assert {path.name for path, _ in downloaded_models()} == {llm.name, whisper.name, partial.name}
+
+    settings = Settings(llm_model=str(llm), llm_preset="gemma4-12b", whisper_model=str(whisper))
+    dialog = SettingsDialog(settings)
+    assert "3 файла" in dialog.models_detail.text()
+    monkeypatch.setattr(ModelsDialog, "confirm", staticmethod(lambda box, button: True))
+    monkeypatch.setattr(ModelsDialog, "exec", lambda self: self.remove(llm) or self.remove(partial) or 1)
+    dialog.manage_models()
+    assert not llm.exists() and not partial.exists() and whisper.exists()
+    assert not partial.with_suffix(".part.url").exists()
+    # The deleted model was the selected one: it is no longer selected, the other one stays.
+    assert dialog.fields["llm_model"].text() == "" and dialog.fields["llm_preset"].text() == ""
+    assert dialog.fields["whisper_model"].text() == str(whisper)
+    assert "1 файл" in dialog.models_detail.text()
+    # A model that is not in use is deleted without touching the settings.
+    manager = ModelsDialog({"whisper_model": ""})
+    manager.remove(whisper)
+    assert not whisper.exists() and manager.removed_in_use == []
+    manager.deleteLater()
+    dialog.deleteLater()

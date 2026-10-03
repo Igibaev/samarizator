@@ -574,6 +574,9 @@ class Window(QMainWindow):
     # -- model and settings -----------------------------------------------------------
 
     def configure(self):
+        # A model may be deleted in the settings: an idle chat must not keep it open.
+        if self.chat_worker is None:
+            self.chat_engine.stop()
         dialog = SettingsDialog(self.settings, self)
         if dialog.exec():
             self.settings = dialog.settings
