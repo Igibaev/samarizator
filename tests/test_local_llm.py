@@ -164,10 +164,12 @@ def test_context_and_budget_grow_with_block_size(tmp_path):
 
 
 def test_recommendation_follows_memory():
-    assert local_llm.recommended_preset(48) == "qwen3-30b-a3b"
-    assert local_llm.recommended_preset(16) == "gemma3-12b"
+    assert local_llm.recommended_preset(48) == "gemma4-26b-a4b"
+    assert local_llm.recommended_preset(16) == "gigachat3.1-lightning"
     assert local_llm.recommended_preset(8) == "qwen3-4b"
-    assert all(p.url.startswith("https://huggingface.co/") for p in local_llm.PRESETS.values())
+    assert all(
+        p.url.startswith(("https://huggingface.co/", local_llm.HF_REPO)) for p in local_llm.PRESETS.values()
+    )
     assert all(p.file.endswith(".gguf") for p in local_llm.PRESETS.values())
 
 
@@ -331,7 +333,12 @@ def test_timeline_parts_follow_source_blocks(meeting, fake_server):
     settings.llm_model = str(model)
     settings.input_chars = 4000
     store.save_chunk(
-        mid, 0, [dict(start=i * 30, end=i * 30 + 20, speaker="Речь", text="Фраза про бюджет " * 40) for i in range(12)]
+        mid,
+        0,
+        [
+            dict(start=i * 30, end=i * 30 + 20, speaker="Речь", text="Фраза про бюджет " * 40)
+            for i in range(12)
+        ],
     )
     result = summarize(store, mid, settings, work=store.path.parent / "w3")
     parts = result["detailed"]["parts"]
@@ -346,7 +353,14 @@ def test_ticked_tasks_are_ticked_in_the_obsidian_note(meeting):
     store, mid, settings = meeting
     store.save_chunk(mid, 0, [dict(start=0, end=2, speaker="Речь", text="Ирина посчитает к пятнице.")])
     sid = store.segments(mid)[0]["id"]
-    task = dict(kind="action", text="Посчитать скидки", evidence=[sid], owner="Ирина", due="к пятнице", status="agreed")
+    task = dict(
+        kind="action",
+        text="Посчитать скидки",
+        evidence=[sid],
+        owner="Ирина",
+        due="к пятнице",
+        status="agreed",
+    )
     view = dict(overview="Итог", items=[task], topics=[])
     store.update(mid, summary=json.dumps(dict(**view, brief=view, detailed=dict(**view, resolved=[task]))))
     store.save_checkpoint(mid, "tasks-done", 0, {task_key(task): True})

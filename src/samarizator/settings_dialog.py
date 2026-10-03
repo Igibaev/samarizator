@@ -795,11 +795,26 @@ class ModelDownloadDialog(QDialog):
         best = preferred if preferred in self.presets else recommended(self.presets, self.settings)
         self.group = QButtonGroup(self)
         self.options = {}
+        # The list scrolls when there are more models than fit on a laptop screen.
+        holder = QWidget()
+        holder.setObjectName("optionList")
+        cards = QVBoxLayout(holder)
+        cards.setContentsMargins(0, 0, 0, 0)
+        cards.setSpacing(10)
         for key, preset in self.presets.items():
             option = ModelOption(preset, self.settings, total, best, self.target(key).is_file())
             self.group.addButton(option.radio)
             self.options[key] = option
-            layout.addWidget(option)
+            cards.addWidget(option)
+        cards.addStretch(1)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(holder)
+        holder.adjustSize()
+        scroll.setMinimumHeight(min(holder.sizeHint().height() + 4, 470))
+        layout.addWidget(scroll, 1)
         start = (
             best
             if self.options[best].isEnabled()

@@ -39,36 +39,66 @@ class Preset:
 
 
 HF = "https://huggingface.co/"
+# Ordered by preference: the first preset that suits a Mac is recommended for it.
+# Repositories listed after "hf-repo:" are searched in turn for the Q4_K_M file.
 PRESETS = {
     preset.key: preset
     for preset in [
         Preset(
+            "gemma4-26b-a4b",
+            "Максимальное качество · Gemma 4 26B-A4B",
+            "gemma-4-26B-A4B-it-Q4_K_M.gguf",
+            "hf-repo:unsloth/gemma-4-26B-A4B-it-GGUF|ggml-org/gemma-4-26B-A4B-it-GGUF",
+            16.9,
+            32,
+            "Новое поколение Gemma, смесь экспертов: качество крупной модели при скорости небольшой.",
+        ),
+        Preset(
             "qwen3-30b-a3b",
-            "Максимальное качество · Qwen3 30B-A3B Instruct",
+            "Точная · Qwen3 30B-A3B Instruct",
             "Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf",
             HF
             + "unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF/resolve/main/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf",
             18.6,
             32,
-            "Лучшие сводки: точные формулировки, уверенный русский, длинные встречи.",
+            "Точные формулировки, уверенный русский, длинные встречи.",
+        ),
+        Preset(
+            "gigachat3.1-lightning",
+            "Быстрая для русского · GigaChat 3.1 Lightning",
+            "GigaChat3.1-10B-A1.8B-Q4_K_M.gguf",
+            "hf-repo:ai-sage/GigaChat3.1-10B-A1.8B-GGUF|bartowski/ai-sage_GigaChat3.1-10B-A1.8B-GGUF"
+            "|bartowski/ai-sage_GigaChat3-10B-A1.8B-GGUF",
+            6.4,
+            16,
+            "Сбер, обучена на русском. Смесь экспертов с 1,8B активных параметров — самая быстрая.",
+        ),
+        Preset(
+            "gemma4-12b",
+            "Сбалансированная · Gemma 4 12B",
+            "gemma-4-12b-it-Q4_K_M.gguf",
+            "hf-repo:unsloth/gemma-4-12b-it-GGUF|ggml-org/gemma-4-12b-it-GGUF",
+            7.1,
+            16,
+            "Аккуратные сводки и ответы по-русски, медленнее GigaChat Lightning.",
         ),
         Preset(
             "gemma3-12b",
-            "Сбалансированная · Gemma 3 12B",
+            "Предыдущее поколение · Gemma 3 12B",
             "gemma-3-12b-it-Q4_K_M.gguf",
             HF + "unsloth/gemma-3-12b-it-GGUF/resolve/main/gemma-3-12b-it-Q4_K_M.gguf",
             7.3,
             16,
-            "Хорошие сводки и ответы по-русски.",
+            "Хорошие сводки по-русски; Gemma 4 12B новее при том же размере.",
         ),
         Preset(
             "qwen3-4b",
-            "Быстрая · Qwen3 4B Instruct",
+            "Лёгкая · Qwen3 4B Instruct",
             "Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
             HF + "unsloth/Qwen3-4B-Instruct-2507-GGUF/resolve/main/Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
             2.5,
             8,
-            "Быстрая и лёгкая, но формулирует проще.",
+            "Для Mac с 8 ГБ: быстрая и лёгкая, но формулирует проще.",
         ),
     ]
 }
@@ -189,14 +219,15 @@ def download(url, target, progress=lambda done, total: None, cancelled=lambda: F
 
     context = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     opener = opener or urllib.request.build_opener(urllib.request.HTTPSHandler(context=context))
-    whisper_weights = url.startswith(HF_REPO)
-    if whisper_weights:
+    listed = url.startswith(HF_REPO)
+    whisper_weights = listed and target.suffix != ".gguf"
+    if listed:
         # The file is chosen from the repository listing once; a resumed download keeps it.
         chosen = part.with_suffix(part.suffix + ".url")
         if part.exists() and chosen.is_file():
             url = chosen.read_text().strip()
         else:
-            url = resolve_hf_repo(url, opener)
+            url = resolve_hf_repo(url, opener, pick_gguf if target.suffix == ".gguf" else pick_ggml)
             chosen.write_text(url)
     for attempt in range(6):
         done = part.stat().st_size if part.exists() else 0
@@ -250,13 +281,15 @@ def download(url, target, progress=lambda done, total: None, cancelled=lambda: F
             if f.read(4) != GGML_MAGIC:
                 part.unlink()
                 raise ValueError("Скачанный файл не похож на модель whisper.cpp. Повторите загрузку.")
+    if listed:
         part.with_suffix(part.suffix + ".url").unlink(missing_ok=True)
     part.replace(target)
     return target
 
 
-# "hf-repo:owner/name|owner/fallback": the whisper.cpp weights are picked from the
-# repository listing at download time (community repositories name files differently).
+# "hf-repo:owner/name|owner/fallback": the weights are picked from the repository listing
+# at download time (repositories name their files differently and rename them over time):
+# whisper.cpp ggml files for recognition, the preferred GGUF quantisation for summaries.
 HF_REPO = "hf-repo:"
 GGML_MAGIC = b"lmgg"  # whisper.cpp ggml files start with 0x67676d6c, little-endian
 
@@ -289,8 +322,33 @@ def pick_ggml(entries):
     return min(files)[1] if files else None
 
 
-def resolve_hf_repo(spec, opener):
-    """Download address of the whisper.cpp weights in the first repository that has them."""
+# Q4_K_M first: the quality/size point all presets are sized for; then close alternatives.
+GGUF_QUANTS = ("q4_k_m", "ud-q4_k_xl", "q4_k_xl", "q4_k_s", "q4_0", "q5_k_m", "q6_k", "q8_0")
+
+
+def pick_gguf(entries):
+    """The single-file GGUF of the preferred quantisation in a tree listing, or None."""
+    files = []
+    for entry in entries:
+        path = str(entry.get("path", ""))
+        name = Path(path).name.lower()
+        size = (entry.get("lfs") or {}).get("size") or entry.get("size") or 0
+        if (
+            entry.get("type", "file") != "file"
+            or not name.endswith(".gguf")
+            or "mmproj" in name  # vision projector, not the language model
+            or "-of-0" in name  # split files: llama-server is given one file
+            or size < 500 * 1024**2
+        ):
+            continue
+        rank = next((i for i, quant in enumerate(GGUF_QUANTS) if quant in name), None)
+        if rank is not None:
+            files.append((rank, path.count("/"), path))
+    return min(files)[2] if files else None
+
+
+def resolve_hf_repo(spec, opener, pick=pick_ggml):
+    """Download address of the weights in the first repository that has them."""
     import json
 
     for repo in spec.removeprefix(HF_REPO).split("|"):
@@ -302,11 +360,11 @@ def resolve_hf_repo(spec, opener):
                 entries = json.loads(response.read(8 * 1024**2))
         except (urllib.error.URLError, TimeoutError, OSError, ValueError):
             continue
-        if isinstance(entries, list) and (path := pick_ggml(e for e in entries if isinstance(e, dict))):
+        if isinstance(entries, list) and (path := pick([e for e in entries if isinstance(e, dict)])):
             return f"{HF}{repo}/resolve/main/{path}"
     raise ValueError(
-        "Не удалось найти файл модели whisper.cpp в репозитории Hugging Face. Проверьте интернет и "
-        "повторите загрузку."
+        "Не удалось найти файл модели в репозитории Hugging Face. Проверьте интернет и повторите "
+        "загрузку."
     )
 
 

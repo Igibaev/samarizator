@@ -183,8 +183,9 @@ def test_download_dialog_shows_cards_and_blocks_models_that_do_not_fit(tmp_path,
     assert [card.key for card in cards] == list(local_llm.PRESETS)
     by_key = {card.key: card for card in cards}
     assert not by_key["qwen3-30b-a3b"].isEnabled()
-    assert dialog.selected() == "gemma3-12b"
-    assert dialog.start_button.text() == "Скачать 7,3 ГБ"
+    assert not by_key["gemma4-26b-a4b"].isEnabled()
+    assert dialog.selected() == "gigachat3.1-lightning"  # the fast Russian model on a 16 GB Mac
+    assert dialog.start_button.text() == "Скачать 6,4 ГБ"
     by_key["qwen3-4b"].radio.setChecked(True)
     assert dialog.selected() == "qwen3-4b" and dialog.start_button.text() == "Скачать 2,5 ГБ"
     texts = " ".join(label.text() for label in by_key["qwen3-4b"].findChildren(QLabel))
@@ -331,3 +332,28 @@ def test_russian_whisper_is_taken_from_the_repository_listing(tmp_path):
         local_llm.download(preset.url, tmp_path / "other.bin", opener=hub)
     with pytest.raises(ValueError, match="Не удалось найти"):
         local_llm.download("hf-repo:a/b", tmp_path / "x.bin", opener=FakeHub({"a/b": coreml_only}, {}))
+
+
+def test_summary_models_are_picked_from_their_repositories(tmp_path):
+    from samarizator import local_llm
+
+    gb = 1024**3
+    listing = [
+        {"type": "file", "path": "mmproj-F16.gguf", "size": 1 * gb},
+        {"type": "file", "path": "gemma-4-12b-it-Q8_0.gguf", "size": 12 * gb},
+        {"type": "file", "path": "gemma-4-12b-it-UD-Q4_K_XL.gguf", "size": 7 * gb},
+        {"type": "file", "path": "gemma-4-12b-it-Q4_K_M.gguf", "lfs": {"size": 7 * gb}, "size": 135},
+        {"type": "file", "path": "BF16/gemma-4-12b-it-BF16-00001-of-00002.gguf", "size": 20 * gb},
+        {"type": "file", "path": "README.md", "size": 3000},
+    ]
+    assert local_llm.pick_gguf(listing) == "gemma-4-12b-it-Q4_K_M.gguf"
+    assert local_llm.pick_gguf(listing[:2]) == "gemma-4-12b-it-Q8_0.gguf"  # the closest available
+    assert local_llm.pick_gguf(listing[:1]) is None
+    preset = local_llm.PRESETS["gemma4-12b"]
+    weights = b"GGUF" + b"\0" * 4096
+    file_url = "https://huggingface.co/unsloth/gemma-4-12b-it-GGUF/resolve/main/gemma-4-12b-it-Q4_K_M.gguf"
+    hub = FakeHub({"unsloth/gemma-4-12b-it-GGUF": listing}, {file_url: weights})
+    target = local_llm.download(preset.url, tmp_path / preset.file, opener=hub)
+    assert target.name == preset.file and target.read_bytes() == weights
+    for key in ("gigachat3.1-lightning", "gemma4-12b", "gemma4-26b-a4b"):
+        assert local_llm.PRESETS[key].url.startswith(local_llm.HF_REPO)
