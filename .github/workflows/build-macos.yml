@@ -1,5 +1,7 @@
 # Builds the portable Samarizator.app / .dmg on a GitHub macOS runner.
-# Run manually (Actions → Build macOS app → Run workflow) or push a tag v*.
+# Run manually (Actions → Build macOS app → Run workflow; the file must be on the default
+# branch for that), push a tag v*, or push to a claude/** branch a commit whose message
+# contains [build-macos] (other pushes skip the job, so they cost no runner time).
 # Without signing secrets the app is ad-hoc signed: it works, but on first launch macOS
 # asks to confirm it in Privacy & Security. With a Developer ID certificate and an
 # app-specific password the build is signed and notarized and opens like any app.
@@ -14,12 +16,17 @@ on:
         default: ""
   push:
     tags: ["v*"]
+    branches: ["claude/**"]
 
 permissions:
   contents: write
 
 jobs:
   build:
+    if: >-
+      github.event_name != 'push'
+      || startsWith(github.ref, 'refs/tags/')
+      || contains(github.event.head_commit.message, '[build-macos]')
     runs-on: macos-14  # Apple Silicon
     timeout-minutes: 120
     env:
