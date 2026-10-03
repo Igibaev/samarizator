@@ -132,6 +132,14 @@ class Store:
                 )
             ]
 
+    def segment_counts(self, mid):
+        """(all replies, replies flagged for review) without loading the transcript."""
+        with self.connect() as db:
+            total, flagged = db.execute(
+                "SELECT COUNT(*), COALESCE(SUM(uncertain=1), 0) FROM segments WHERE meeting=?", (mid,)
+            ).fetchone()
+        return total, flagged
+
     def segment(self, mid, sid):
         with self.connect() as db:
             row = db.execute("SELECT * FROM segments WHERE meeting=? AND id=?", (mid, sid)).fetchone()

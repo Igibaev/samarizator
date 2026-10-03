@@ -299,3 +299,51 @@ def test_downloaded_whisper_model_gets_a_budget_transcription_accepts(tmp_path):
     # Same inequality worker.transcribe() enforces before starting Whisper.
     assert model.stat().st_size * 2.5 + 600 * 1024**2 <= budget * 1024**3 * 0.8
     assert 4 <= budget <= 64
+
+
+def test_progress_reads_block_numbers_and_estimates_time_left():
+    from samarizator import progress
+
+    info = progress.summary("Разбор записи: блок 8 из 22")
+    assert info["stage"] == "blocks" and info["detail"] == "8 из 22"
+    assert 0.05 < info["fraction"] < 0.8
+    review = progress.summary("Проверка блока 8 из 22 по расшифровке…")
+    assert review["fraction"] > info["fraction"]
+    assert progress.summary("Итоговый текст по выбранному формату…")["stage"] == "final"
+    assert progress.summary("Объединение: уровень 1, блок 1/2")["stage"] == "brief"
+    assert progress.transcription("Whisper: фрагмент 3/20")["detail"] == "фрагмент 3 из 20"
+    steps = progress.summary_steps("Разбор записи: блок 8 из 22", 512, "Протокол встречи")
+    assert [state for *_, state in steps] == ["done", "done", "current", "todo", "todo"]
+    assert progress.remaining(0.05, 600) == ""
+    assert progress.remaining(0.5, 600) == "осталось около 10 мин"
+    assert progress.percent("summarizing", "Разбор записи: блок 1 из 4").startswith("Сводка ")
+
+
+@pytest.mark.real_final
+def test_timeline_parts_follow_source_blocks(meeting, fake_server):
+    store, mid, settings = meeting
+    _, model = fake_server
+    settings.llm_model = str(model)
+    settings.input_chars = 4000
+    store.save_chunk(
+        mid, 0, [dict(start=i * 30, end=i * 30 + 20, speaker="Речь", text="Фраза про бюджет " * 40) for i in range(12)]
+    )
+    result = summarize(store, mid, settings, work=store.path.parent / "w3")
+    parts = result["detailed"]["parts"]
+    assert len(parts) > 1
+    assert parts[0]["first"] == 0 and parts[-1]["last"] == len(result["detailed"]["items"])
+    assert all(a["last"] == b["first"] for a, b in zip(parts, parts[1:]))
+
+
+def test_ticked_tasks_are_ticked_in_the_obsidian_note(meeting):
+    from samarizator.knowledge import task_key
+
+    store, mid, settings = meeting
+    store.save_chunk(mid, 0, [dict(start=0, end=2, speaker="Речь", text="Ирина посчитает к пятнице.")])
+    sid = store.segments(mid)[0]["id"]
+    task = dict(kind="action", text="Посчитать скидки", evidence=[sid], owner="Ирина", due="к пятнице", status="agreed")
+    view = dict(overview="Итог", items=[task], topics=[])
+    store.update(mid, summary=json.dumps(dict(**view, brief=view, detailed=dict(**view, resolved=[task]))))
+    store.save_checkpoint(mid, "tasks-done", 0, {task_key(task): True})
+    text = export(store, mid, settings).read_text(encoding="utf-8")
+    assert "- [x] Посчитать скидки" in text

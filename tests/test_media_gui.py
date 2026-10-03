@@ -115,12 +115,17 @@ def test_gui_constructs_and_shows_recording(tmp_path, monkeypatch):
     detailed = dict(overview="Детали обсуждения", items=[item], topics=["Бюджет"], resolved=[resolved_item])
     w.store.update(mid, summary=json.dumps(dict(**brief, brief=brief, detailed=detailed)))
     w.load_detail()
-    assert "Короткий итог" in w.summary.toPlainText()
-    assert "17 млн" not in w.summary.toPlainText()
-    assert "17 млн" in w.detailed_summary.toPlainText()
-    assert "▶" in w.detailed_summary.toPlainText()
-    assert "00:00:00" not in w.detailed_summary.toPlainText()
-    assert "Бюджет утверждён (итог)" in w.resolved_summary.toPlainText()
+    page = w.summary_page
+    assert "Короткий итог" in page.plain_text("brief")
+    assert "17 млн" not in page.plain_text("brief")
+    assert "17 млн" in page.plain_text("detailed")
+    assert page.evidence_buttons("detailed")
+    assert "Бюджет утверждён (итог)" in page.plain_text("decisions")
+    # Opening the record shows the result first; the views switch without reloading.
+    w.set_view("summary")
+    assert w.stack.currentWidget() is page
+    w.set_view("transcript")
+    assert w.stack.currentWidget() is w.transcript_page
     from PySide6.QtWidgets import QMessageBox
 
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)

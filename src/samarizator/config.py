@@ -91,8 +91,8 @@ class Settings:
             path = Path(self.llm_model).expanduser() if self.llm_model.strip() else None
             if not path or not path.is_file():
                 raise ValueError(
-                    "Локальная модель сводок не найдена. Откройте Настройки → «Сводка · локальная "
-                    "модель» и скачайте модель или выберите файл .gguf."
+                    "Локальная модель сводок не найдена. Откройте Настройки → Основное → Сводки "
+                    "и скачайте модель или выберите файл .gguf."
                 )
             with path.open("rb") as f:
                 if f.read(4) != b"GGUF":

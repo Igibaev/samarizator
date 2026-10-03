@@ -88,7 +88,7 @@ def summary_views(summary):
     return brief, detailed
 
 
-def package_summary(brief, ledger, maps, resolved):
+def package_summary(brief, ledger, maps, resolved, parts=None):
     # Detailed facts bypass lossy reduction entirely, including topics mentioned only once.
     detailed = dict(
         overview="\n\n".join(f"Часть {i + 1}. {m['overview']}" for i, m in enumerate(maps)),
@@ -97,6 +97,8 @@ def package_summary(brief, ledger, maps, resolved):
         # Final status after reconciling later revisions/cancellations; the ledger above
         # is never edited or shortened because of this -- it stays the full history.
         resolved=resolved,
+        # Ledger index ranges per source block, for the timeline view: [first, last).
+        parts=parts or [],
     )
     return dict(**brief, brief=brief, detailed=detailed, ledger=ledger, blocks=len(maps), version=2)
 
@@ -751,7 +753,7 @@ def _summarize(store, mid, settings, progress, client):
             return split(exc)
         # Keep extraction even if the more expensive review is interrupted or fails.
         store.save_checkpoint(mid, phase, part, dict(digest=digest, draft=draft))
-        progress(f"Проверка полноты и точности блока {index + 1} по расшифровке…")
+        progress(f"Проверка блока {index + 1} из {total} по расшифровке…")
         try:
             reviewed = review_source(client, source, draft, settings.input_chars)
         except (ValueError, RuntimeError, httpx.HTTPError):
@@ -765,33 +767,50 @@ def _summarize(store, mid, settings, progress, client):
                 )
             ]
         receipts = reviewed.pop("review_receipts", [])
+        # The review returns the standard schema; the block's short title comes from the draft.
+        if not reviewed.get("title") and isinstance(draft.get("title"), str):
+            reviewed["title"] = draft["title"]
         store.save_checkpoint(
             mid, phase, part, dict(digest=digest, parts=[reviewed], draft=draft, review_receipts=receipts)
         )
         return [reviewed]
 
-    for index, (block, before, after) in enumerate(
-        contextual_blocks(store.iter_segments(mid), settings.input_chars)
-    ):
-        maps.extend(map_block(block, index, before, after))
-        progress(f"Сводка: обработан блок {index + 1}")
+    # Planned up front so progress can say "block 8 of 22" instead of a bare counter.
+    planned = list(contextual_blocks(store.iter_segments(mid), settings.input_chars))
+    total = len(planned)
+    produced = []
+    for index, (block, before, after) in enumerate(planned):
+        progress(f"Разбор записи: блок {index + 1} из {total}")
+        produced.append(map_block(block, index, before, after))
+        maps.extend(produced[-1])
     if not maps:
         raise ValueError("Нет распознанной речи для сводки.")
     # Keep source-grounded map items separately so reduction cannot erase a topic.
-    ledger, seen = [], set()
-    for result in maps:
-        for item in result["items"]:
-            signature = (
-                item["kind"],
-                item["text"].casefold(),
-                tuple(sorted(item["evidence"])),
-                item.get("owner"),
-                item.get("due"),
-                item.get("status"),
+    ledger, seen, parts = [], set(), []
+    for results in produced:
+        first = len(ledger)
+        for result in results:
+            for item in result["items"]:
+                signature = (
+                    item["kind"],
+                    item["text"].casefold(),
+                    tuple(sorted(item["evidence"])),
+                    item.get("owner"),
+                    item.get("due"),
+                    item.get("status"),
+                )
+                if signature not in seen:
+                    ledger.append(item)
+                    seen.add(signature)
+        titles = [r["title"].strip() for r in results if isinstance(r.get("title"), str) and r["title"].strip()]
+        parts.append(
+            dict(
+                title=titles[0][:120] if titles else "",
+                overview=" ".join(r["overview"].strip() for r in results if r["overview"].strip()),
+                first=first,
+                last=len(ledger),
             )
-            if signature not in seen:
-                ledger.append(item)
-                seen.add(signature)
+        )
     resolve_digest = hashlib.sha256(
         (
             model_identity(settings)
@@ -830,7 +849,7 @@ def _summarize(store, mid, settings, progress, client):
     levels = []
 
     def package(brief):
-        result = package_summary(brief, ledger, maps, resolved)
+        result = package_summary(brief, ledger, maps, resolved, parts)
         result["detailed"]["resolution_warning"] = " ".join(resolve_warnings)
         warning = " ".join(dict.fromkeys(m["quality_warning"] for m in maps if m.get("quality_warning")))
         if warning:

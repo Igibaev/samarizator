@@ -14,6 +14,12 @@ LABELS = dict(
 )
 
 
+def task_key(item):
+    """Stable id of a task across re-renders: its text and sources, not its position."""
+    raw = item["text"].strip().casefold() + "|" + ",".join(map(str, sorted(item.get("evidence", []))))
+    return hashlib.sha1(raw.encode()).hexdigest()[:12]
+
+
 def stamp(seconds):
     seconds = max(0, int(seconds))
     return f"{seconds // 3600:02}:{seconds // 60 % 60:02}:{seconds % 60:02}"
@@ -248,7 +254,8 @@ def export(store, mid, settings):
         due = f" Срок: {plain(item['due'])}." if item.get("due") else ""
         state = STATUS_LABELS.get(item.get("status"), "")
         state = f" [{state}]" if state else ""
-        prefix = "- [ ]" if tasks and item["kind"] == "action" and item.get("status") == "agreed" else "-"
+        box = "- [x]" if task_key(item) in done else "- [ ]"
+        prefix = box if tasks and item["kind"] == "action" and item.get("status") == "agreed" else "-"
         return f"{prefix} {plain(item['text'])}{state}{owner}{due} {links}"
 
     final = summary.get("final") or {}
@@ -259,6 +266,8 @@ def export(store, mid, settings):
         if final.get("warning"):
             lines += [f"> {plain(final['warning'])}", ""]
         lines += [demote_headings(final["text"].strip()), ""]
+    # Tasks ticked off in the app stay ticked in the note.
+    done = store.checkpoint(mid, "tasks-done", 0) or {}
     sections = [("Кратко · тезисы", brief, True), ("Подробная сводка", detailed, False)]
     if resolved := detailed.get("resolved"):
         sections.append(
