@@ -108,7 +108,10 @@ def recommended_preset(total_gb=None):
 
 
 def final_input_chars(settings):
-    return settings.input_chars * FINAL_INPUT_FACTOR
+    # A Mac with 32 GB+ affords the KV cache for the whole register of a two-hour meeting
+    # (~50k characters) in one request, so the final text is written from every item.
+    factor = FINAL_INPUT_FACTOR * 2 if round(ram_gb()) >= 32 else FINAL_INPUT_FACTOR
+    return settings.input_chars * factor
 
 
 def final_output_tokens(settings):
