@@ -287,3 +287,15 @@ def test_bundled_tools_win_over_path(tmp_path, monkeypatch):
     assert bundle.tool("not-a-real-tool") == "not-a-real-tool"
     assert not bundle.has_tool("not-a-real-tool")
     assert os.path.isabs(bundle.tool("whisper-cli"))
+
+
+def test_downloaded_whisper_model_gets_a_budget_transcription_accepts(tmp_path):
+    from samarizator.setup_models import WHISPER_PRESETS, whisper_memory_gb
+
+    model = tmp_path / "ggml-large-v3.bin"
+    with model.open("wb") as f:
+        f.truncate(int(WHISPER_PRESETS["large-v3"].size_gb * 1024**3))
+    budget = whisper_memory_gb(model)
+    # Same inequality worker.transcribe() enforces before starting Whisper.
+    assert model.stat().st_size * 2.5 + 600 * 1024**2 <= budget * 1024**3 * 0.8
+    assert 4 <= budget <= 64

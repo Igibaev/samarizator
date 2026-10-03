@@ -3,16 +3,18 @@
 import argparse
 import hashlib
 import json
+import math
 import os
 import ssl
 import urllib.request
+from pathlib import Path
 
 import truststore
 
 from .config import Settings, data_dir
 from .local_llm import PRESETS as LLM_PRESETS
+from .local_llm import Preset, recommended_preset
 from .local_llm import download as download_llm
-from .local_llm import recommended_preset
 
 MODELS = {
     "ggml-small-q5_1.bin": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin",
@@ -21,6 +23,46 @@ QUALITY_MODELS = {
     "ggml-silero-v6.2.0.bin": "https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v6.2.0.bin",
 }
 LARGE_MODEL = "ggml-large-v3.bin"
+WHISPER = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/"
+# More accurate recognition, downloadable from the app's settings.
+WHISPER_PRESETS = {
+    preset.key: preset
+    for preset in [
+        Preset(
+            "large-v3",
+            "Максимальная точность · large-v3",
+            LARGE_MODEL,
+            WHISPER + LARGE_MODEL,
+            2.9,
+            32,
+            "Полная мультиязычная модель, лучший выбор для Mac от 32 ГБ. Медленнее остальных.",
+        ),
+        Preset(
+            "large-v3-turbo",
+            "Точно и быстро · large-v3-turbo",
+            "ggml-large-v3-turbo.bin",
+            WHISPER + "ggml-large-v3-turbo.bin",
+            1.5,
+            16,
+            "Почти как large-v3, но в несколько раз быстрее. Для Mac от 16 ГБ.",
+        ),
+        Preset(
+            "large-v3-turbo-q5_0",
+            "Компактная · large-v3-turbo q5_0",
+            "ggml-large-v3-turbo-q5_0.bin",
+            WHISPER + "ggml-large-v3-turbo-q5_0.bin",
+            0.55,
+            8,
+            "Квантованная turbo: заметно точнее small при умеренном размере.",
+        ),
+    ]
+}
+
+
+def whisper_memory_gb(path):
+    """Budget the transcription check in worker.transcribe() accepts for this model."""
+    size = Path(path).stat().st_size
+    return max(4, math.ceil((size * 2.5 + 600 * 1024**2) / 0.8 / 1024**3))
 
 
 def digest(path):

@@ -193,30 +193,38 @@ class DownloadJob(QThread):
             self.done.emit(str(exc) if isinstance(exc, (ValueError, OSError)) else "Загрузка не удалась.")
 
 
-class ModelDownloadDialog(QDialog):
-    """One-time download of the summary model, resumable, with a recommendation by RAM."""
+def recommended(presets):
+    """Largest preset this Mac's memory allows (presets are ordered largest first)."""
+    total = round(local_llm.ram_gb())
+    return next((key for key, preset in presets.items() if total >= preset.min_ram_gb), list(presets)[-1])
 
-    def __init__(self, parent=None):
+
+class ModelDownloadDialog(QDialog):
+    """One-time resumable download of a model, with a recommendation by RAM."""
+
+    def __init__(self, parent=None, presets=None, title="Модель сводок", intro=None):
         super().__init__(parent)
-        self.setWindowTitle("Модель сводок")
+        self.setWindowTitle(title)
         self.resize(620, 360)
+        self.presets = presets or local_llm.PRESETS
         self.path = None
         self.preset = ""
         self.job = None
         layout = QVBoxLayout(self)
         intro = QLabel(
-            "Сводки составляет локальная модель. Её нужно скачать один раз — дальше всё работает "
+            intro
+            or "Сводки составляет локальная модель. Её нужно скачать один раз — дальше всё работает "
             "без интернета. Модель сохраняется в ~/Library/Application Support/Samarizator/models."
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
         self.choice = QComboBox()
-        recommended = local_llm.recommended_preset()
-        for key, preset in local_llm.PRESETS.items():
-            mark = " · рекомендуется" if key == recommended else ""
-            have = " · скачана" if local_llm.preset_path(key).is_file() else ""
+        best = recommended(self.presets)
+        for key, preset in self.presets.items():
+            mark = " · рекомендуется" if key == best else ""
+            have = " · скачана" if self.target(key).is_file() else ""
             self.choice.addItem(f"{preset.label} — {preset.size_gb:g} ГБ{mark}{have}", key)
-        self.choice.setCurrentIndex(max(0, self.choice.findData(recommended)))
+        self.choice.setCurrentIndex(max(0, self.choice.findData(best)))
         self.choice.currentIndexChanged.connect(self.describe)
         layout.addWidget(self.choice)
         self.note = QLabel()
@@ -242,10 +250,13 @@ class ModelDownloadDialog(QDialog):
         layout.addLayout(row)
         self.describe()
 
+    def target(self, key):
+        return local_llm.models_dir() / self.presets[key].file
+
     def describe(self, *_):
-        preset = local_llm.PRESETS[self.choice.currentData()]
+        preset = self.presets[self.choice.currentData()]
         free = shutil.disk_usage(local_llm.models_dir()).free / 1024**3
-        target = local_llm.preset_path(preset.key)
+        target = self.target(preset.key)
         self.note.setText(
             f"{preset.note}\nНужно {preset.size_gb:g} ГБ на диске, свободно {free:.0f} ГБ. "
             f"Памяти в этом Mac: {local_llm.ram_gb():.0f} ГБ."
@@ -253,8 +264,8 @@ class ModelDownloadDialog(QDialog):
         self.start_button.setText("Выбрать" if target.is_file() else "Скачать")
 
     def start(self):
-        preset = local_llm.PRESETS[self.choice.currentData()]
-        target = local_llm.preset_path(preset.key)
+        preset = self.presets[self.choice.currentData()]
+        target = self.target(preset.key)
         if target.is_file():
             self.finish(preset.key, target)
             return
@@ -338,6 +349,9 @@ class SettingsDialog(QDialog):
             row.addWidget(button)
             form.addRow(label, row)
             self.fields[key] = line
+        whisper_download = QPushButton("Скачать более точную модель распознавания…")
+        whisper_download.clicked.connect(self.download_whisper)
+        form.addRow(whisper_download)
         memory = QDoubleSpinBox()
         memory.setRange(2, 64)
         memory.setSuffix(" ГиБ")
@@ -638,6 +652,24 @@ class SettingsDialog(QDialog):
         if dialog.exec() and dialog.path:
             self.fields["llm_model"].setText(str(dialog.path))
             self.fields["llm_preset"].setText(dialog.preset)
+
+    def download_whisper(self):
+        from .setup_models import WHISPER_PRESETS, whisper_memory_gb
+
+        dialog = ModelDownloadDialog(
+            self,
+            WHISPER_PRESETS,
+            "Модель распознавания",
+            "Встроенная модель small-q5_1 быстрая, но крупные модели Whisper заметно точнее на "
+            "живой речи. Скачивается один раз; новые записи распознаются выбранной моделью, а "
+            "старые — кнопкой «Распознать заново».",
+        )
+        if dialog.exec() and dialog.path:
+            self.fields["whisper_model"].setText(str(dialog.path))
+            # The transcription refuses a model that does not fit the memory budget.
+            need = whisper_memory_gb(dialog.path)
+            if self.fields["memory_gb"].value() < need:
+                self.fields["memory_gb"].setValue(need)
 
     def describe_llm(self):
         path = Path(self.fields["llm_model"].text().strip()).expanduser()
