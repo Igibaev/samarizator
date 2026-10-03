@@ -18,6 +18,7 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
   command -v uv >/dev/null 2>&1 || packages+=(uv)
   command -v ffmpeg >/dev/null 2>&1 || packages+=(ffmpeg)
   command -v whisper-cli >/dev/null 2>&1 || packages+=(whisper-cpp)
+  command -v llama-server >/dev/null 2>&1 || packages+=(llama.cpp)
   if [[ ${#packages[@]} -gt 0 ]]; then brew install "${packages[@]}"; fi
 fi
 uv sync --frozen --python 3.12
@@ -29,7 +30,7 @@ fi
 if [[ "${SAMARIZATOR_SKIP_DOWNLOAD:-0}" != "1" ]]; then
   .venv/bin/python -m samarizator.setup_models "$@"
 elif [[ $# -gt 0 ]]; then
-  echo 'Уберите SAMARIZATOR_SKIP_DOWNLOAD, чтобы применить --quality или --large-v3.'
+  echo 'Уберите SAMARIZATOR_SKIP_DOWNLOAD, чтобы применить --quality, --large-v3 или --llm.'
   exit 1
 fi
 exec .venv/bin/python -m samarizator.app

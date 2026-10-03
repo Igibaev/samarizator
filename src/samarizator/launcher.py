@@ -6,6 +6,7 @@ no separate interpreter to call with `-m`.
 """
 
 import multiprocessing
+import os
 import runpy
 import sys
 
@@ -14,6 +15,7 @@ ALLOWED = {
     "samarizator.screencapture",
     "samarizator.live",
     "samarizator.setup_models",
+    "samarizator.selfcheck",
 }
 
 
@@ -24,6 +26,10 @@ def main():
         if module not in ALLOWED:
             print(f"Неизвестный модуль: {module}", file=sys.stderr)
             return 2
+        # A windowed app may start without standard streams; tools still print to them.
+        for name in ("stdout", "stderr"):
+            if getattr(sys, name) is None:
+                setattr(sys, name, open(os.devnull, "w"))
         sys.argv = [module, *sys.argv[3:]]
         try:
             runpy.run_module(module, run_name="__main__", alter_sys=True)

@@ -10,6 +10,9 @@ import urllib.request
 import truststore
 
 from .config import Settings, data_dir
+from .local_llm import PRESETS as LLM_PRESETS
+from .local_llm import download as download_llm
+from .local_llm import recommended_preset
 
 MODELS = {
     "ggml-small-q5_1.bin": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin",
@@ -51,6 +54,11 @@ def main():
         "--quality", action="store_true", help="VAD и профиль M4 Pro / 48 ГБ; текущая модель сохранится"
     )
     parser.add_argument("--large-v3", action="store_true", help="Скачать и выбрать full large-v3 (~3.1 GB)")
+    parser.add_argument(
+        "--llm",
+        choices=["auto", *LLM_PRESETS],
+        help="Скачать и выбрать локальную модель сводок; auto — по объёму памяти этого Mac",
+    )
     args = parser.parse_args()
     folder = data_dir() / "models"
     folder.mkdir(exist_ok=True)
@@ -63,11 +71,23 @@ def main():
     for name, url in models.items():
         download(url, folder / name)
     manifest = {
-        p.name: dict(sha256=digest(p), bytes=p.stat().st_size) for p in folder.iterdir() if p.suffix == ".bin"
+        p.name: dict(sha256=digest(p), bytes=p.stat().st_size)
+        for p in folder.iterdir()
+        if p.suffix == ".bin"
     }
     (folder / "download-manifest.json").write_text(json.dumps(manifest, indent=2))
-    if args.quality or args.large_v3:
+    llm_path = None
+    if args.llm:
+        key = recommended_preset() if args.llm == "auto" else args.llm
+        preset = LLM_PRESETS[key]
+        llm_path = folder / preset.file
+        if not llm_path.is_file():
+            print(f"Скачивание модели сводок {preset.file} ({preset.size_gb:g} ГБ)…", flush=True)
+            download_llm(preset.url, llm_path)
+    if args.quality or args.large_v3 or llm_path:
         settings = Settings.load()
+        if llm_path:
+            settings.llm_model, settings.llm_preset = str(llm_path), key
         if args.quality:
             settings = settings.quality_profile()
             if strict:
@@ -77,7 +97,7 @@ def main():
             settings.memory_gb = max(16, settings.memory_gb)
         settings.save()
         print("Настройки обновлены. Существующие записи сохраняют параметры продолжения.")
-    print("Модели готовы. Во время распознавания интернет не используется.")
+    print("Модели готовы. Во время распознавания и сводок интернет не используется.")
 
 
 if __name__ == "__main__":

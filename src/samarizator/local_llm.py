@@ -99,7 +99,8 @@ def ram_gb():
 
 
 def recommended_preset(total_gb=None):
-    total_gb = ram_gb() if total_gb is None else total_gb
+    # psutil reports usable memory: a "16 GB" Mac shows ~15.6.
+    total_gb = round(ram_gb() if total_gb is None else total_gb)
     for preset in PRESETS.values():
         if total_gb >= preset.min_ram_gb:
             return preset.key

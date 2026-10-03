@@ -1,6 +1,7 @@
 import json
 import shutil
 import subprocess
+import types
 import wave
 
 import pytest
@@ -92,9 +93,13 @@ def test_gui_constructs_and_shows_recording(tmp_path, monkeypatch):
 
     popen_calls = []
     monkeypatch.setattr("samarizator.app.shutil.which", lambda name: "/usr/bin/ffplay")
-    monkeypatch.setattr(
-        "samarizator.app.subprocess.Popen", lambda args, **kw: popen_calls.append(args) or FakeProc()
+    # Only the app module sees the fake: the settings dialog below still lists audio
+    # devices through the real subprocess module on macOS.
+    fake_subprocess = types.SimpleNamespace(
+        **{name: getattr(subprocess, name) for name in ("DEVNULL", "run", "SubprocessError")},
+        Popen=lambda args, **kw: popen_calls.append(args) or FakeProc(),
     )
+    monkeypatch.setattr("samarizator.app.subprocess", fake_subprocess)
     w.play_segment()
     assert popen_calls and popen_calls[0][0] == "/usr/bin/ffplay"
     assert "-ss" in popen_calls[0] and "-t" in popen_calls[0]
