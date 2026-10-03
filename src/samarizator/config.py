@@ -14,6 +14,7 @@ def data_dir() -> Path:
 
 # Free-text limits: the user's instructions travel inside every summary request.
 INSTRUCTIONS_LIMIT = 4000
+SETTINGS_VERSION = 2
 FINAL_PROMPT_LIMIT = 8000
 
 
@@ -23,7 +24,8 @@ class Settings:
     threads: int = 4
     chunk_seconds: int = 120
     language: str = "ru"
-    gpu: bool = False
+    # Recognition on Metal: many times faster and cooler than the CPU on Apple Silicon.
+    gpu: bool = True
     whisper_model: str = ""
     vault: str = ""
     input_chars: int = 12000
@@ -48,6 +50,10 @@ class Settings:
     summary_instructions: str = ""
     final_format: str = "protocol"
     final_prompt: str = ""
+    # Pause between steps while macOS reports serious thermal pressure.
+    cool_down: bool = True
+    # Saved-settings format; older files are migrated in from_dict().
+    version: int = SETTINGS_VERSION
 
     def quality_profile(self):
         """Opt-in profile. Preserve the user's ASR model and summary model configuration."""
@@ -58,7 +64,7 @@ class Settings:
             memory_gb=16,
             threads=8,
             chunk_seconds=90,
-            gpu=False,
+            gpu=True,
             pause_boundaries=True,
             vad=True,
             beam_size=5,
@@ -111,7 +117,13 @@ class Settings:
     @classmethod
     def from_dict(cls, values):
         # Keys of older versions (cloud API base_url/model/endpoint) are simply dropped.
-        return cls(**{k: v for k, v in dict(values).items() if k in cls.__dataclass_fields__})
+        values = {k: v for k, v in dict(values).items() if k in cls.__dataclass_fields__}
+        if values.get("version", 1) < 2:
+            # Version 1 recognised on the CPU by default (the memory watchdog could not see
+            # Metal); the watchdog now counts GPU memory, so recognition moves to the GPU.
+            values["gpu"] = True
+        values["version"] = SETTINGS_VERSION
+        return cls(**values)
 
     def resolved(self):
         """Re-point model paths that moved together with the app.

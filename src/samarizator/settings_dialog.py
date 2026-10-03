@@ -460,7 +460,13 @@ class SettingsDialog(QDialog):
         resources.row(
             "Распознавание на GPU",
             self.fields["gpu"],
-            subtitle="Быстрее и меньше греет, но память Metal не видна контролю бюджета.",
+            subtitle="Metal: в разы быстрее и холоднее, чем на процессоре. Выключайте только при сбоях.",
+        )
+        self.fields["cool_down"] = Switch(s.cool_down)
+        resources.row(
+            "Беречь Mac от перегрева",
+            self.fields["cool_down"],
+            subtitle="Если macOS сообщает о сильном нагреве, обработка делает паузы, пока Mac не остынет.",
         )
         quality = Group(layout, "Качество распознавания")
         for key, title in [

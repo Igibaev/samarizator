@@ -52,7 +52,7 @@ def test_profile_keeps_user_models(tmp_path, monkeypatch):
     q = s.quality_profile()
     assert q.whisper_model == s.whisper_model and q.llm_model == s.llm_model
     assert q.final_format == "lecture"
-    assert q.memory_gb == 16 and q.vad and q.pause_boundaries and not q.gpu
+    assert q.memory_gb == 16 and q.vad and q.pause_boundaries and q.gpu
     assert s.memory_gb == 4  # profile does not mutate the settings behind an open dialog
 
 

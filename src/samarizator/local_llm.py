@@ -79,6 +79,8 @@ CHARS_PER_TOKEN = 2.0
 # Final text sees a larger slice of the ledger than one extraction request.
 FINAL_INPUT_FACTOR = 2
 FINAL_OUTPUT_TOKENS = 6144
+# CPU threads of a fully offloaded model (they only sample).
+GPU_THREADS = 4
 # Rough KV-cache cost per context token across the presets (bytes).
 KV_BYTES_PER_TOKEN = 160 * 1024
 SERVER_OVERHEAD_GB = 1.5
@@ -314,7 +316,7 @@ def free_port():
         return s.getsockname()[1]
 
 
-def server_args(settings, port, key, binary=None):
+def server_args(settings, port, key, binary=None, speculative=True):
     args = [
         binary or tool("llama-server"),
         "--model",
@@ -330,10 +332,19 @@ def server_args(settings, port, key, binary=None):
         # One slot owns the whole context; the system prompt stays cached between requests.
         "--parallel",
         "1",
+        # With every layer on the GPU the CPU threads only sample tokens: a few suffice,
+        # and without polling they sleep instead of spinning (the default busy-waits).
         "--threads",
-        str(settings.threads),
+        str(min(settings.threads, GPU_THREADS) if settings.llm_gpu else settings.threads),
+        "--poll",
+        "0" if settings.llm_gpu else "50",
         "--n-gpu-layers",
         "999" if settings.llm_gpu else "0",
+        # Lossless speedup: when the answer repeats text already in the context (quotes from
+        # the transcript, the draft under review, the register in the final text), whole runs
+        # of tokens are proposed and verified in one pass instead of one by one. Verification
+        # keeps the model's own distribution, so the summary is the same, only sooner.
+        *(["--spec-type", "ngram-mod"] if speculative else []),
         # Instruct models answer directly; hybrid "thinking" models skip the hidden essay.
         "--reasoning-budget",
         "0",
@@ -367,6 +378,10 @@ def explain_failure(log_text):
     return "Локальная модель сводок не запустилась. Проверьте файл модели и свободную память."
 
 
+class ServerExited(RuntimeError):
+    """llama-server quit while loading; the message says why."""
+
+
 class LlamaServer:
     """`with LlamaServer(settings, work) as server:` — server.url and server.key are ready."""
 
@@ -386,12 +401,22 @@ class LlamaServer:
         binary = self.binary or tool("llama-server")
         if not Path(binary).is_absolute():
             raise ValueError("llama-server не найден. Переустановите Samarizator или запустите ./start.sh.")
+        self.work.mkdir(parents=True, exist_ok=True)
+        try:
+            self.start(binary, speculative=True)
+        except ServerExited:
+            # Speculative decoding is only an acceleration: a server that cannot start
+            # with it is started once more without it before the job is given up.
+            self.stop()
+            self.start(binary, speculative=False)
+        return self
+
+    def start(self, binary, speculative):
         env = os.environ.copy()
         env.pop("SAMARIZATOR_API_KEY", None)
-        self.work.mkdir(parents=True, exist_ok=True)
         with self.log.open("wb") as out:
             self.proc = subprocess.Popen(
-                server_args(self.settings, self.port, self.key, binary),
+                server_args(self.settings, self.port, self.key, binary, speculative),
                 stdout=out,
                 stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL,
@@ -402,7 +427,6 @@ class LlamaServer:
         except BaseException:
             self.stop()
             raise
-        return self
 
     def wait_ready(self):
         self.progress("Загрузка локальной модели сводок в память…")
@@ -411,7 +435,7 @@ class LlamaServer:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         while time.monotonic() < deadline:
             if self.proc.poll() is not None:
-                raise RuntimeError(explain_failure(self.log.read_text(errors="replace")))
+                raise ServerExited(explain_failure(self.log.read_text(errors="replace")))
             try:
                 with opener.open(self.url + "/health", timeout=2) as response:
                     if response.status == 200:

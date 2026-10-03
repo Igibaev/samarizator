@@ -303,7 +303,8 @@ CONTEXT_MARGIN = 128
 # meeting rows as dense as ~1.6 characters per token in Qwen and Gemma tokenizers.
 ESTIMATE_CHARS_PER_TOKEN = 1.5
 
-# llama.cpp's grammars/json.gbnf: the sampler can only produce a JSON object. Passed as a
+# llama.cpp's grammars/json.gbnf: the sampler can only produce a JSON object. Whitespace is
+# limited to single spaces: indentation and line breaks cost tokens and say nothing. Passed as a
 # raw grammar (not response_format) because the server then skips its own chat-format
 # parser, which answers HTTP 500 instead of finish_reason=length on a cut-off JSON.
 JSON_GRAMMAR = r"""root   ::= object
@@ -312,7 +313,7 @@ object ::= "{" ws ( string ":" ws value ("," ws string ":" ws value)* )? "}" ws
 array  ::= "[" ws ( value ("," ws value)* )? "]" ws
 string ::= "\"" ( [^"\\\x7F\x00-\x1F] | "\\" (["\\bfnrt] | "u" [0-9a-fA-F]{4}) )* "\"" ws
 number ::= ("-"? ([0-9] | [1-9] [0-9]{0,15})) ("." [0-9]+)? ([eE] [-+]? [0-9] [1-9]{0,15})? ws
-ws ::= | " " | "\n" [ \t]{0,20}
+ws ::= | " "
 """
 
 
@@ -336,6 +337,8 @@ class LocalClient:
         # The server is started with exactly this window (local_llm.server_args).
         self.n_ctx = context_tokens(settings)
         self.tokenizer = None  # unknown until the first /tokenize call
+        # Called before each generation; a summary job pauses here while the Mac is hot.
+        self.pace = lambda: None
         self.counted = {}  # system prompts repeat in every request
         self.client = httpx.Client(
             trust_env=False,
@@ -385,6 +388,7 @@ class LocalClient:
         return min(wanted, free)
 
     def _choice(self, payload, raw=False):
+        self.pace()
         headers = self.headers()
         for attempt in range(3):
             try:
@@ -738,11 +742,15 @@ class local_model:
         self.temp = None if work else tempfile.TemporaryDirectory(prefix="samarizator-llm-")
         self.server = LlamaServer(settings, work or self.temp.name, progress)
         self.settings = settings
+        self.progress = progress
         self.client = None
 
     def __enter__(self):
+        from .thermal import cool_down
+
         self.server.__enter__()
         self.client = LocalClient(self.settings, self.server.url, self.server.key)
+        self.client.pace = lambda: cool_down(self.progress, self.settings.cool_down)
         return self.client
 
     def __exit__(self, *exc):

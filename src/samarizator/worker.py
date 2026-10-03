@@ -9,6 +9,7 @@ from .audio_quality import cut_points, diagnose, plan_chunks
 from .config import Settings, data_dir
 from .media import dedup_seam, extract, fingerprint, parse_whisper, probe, whisper
 from .store import Store
+from .thermal import cool_down
 
 
 def status(store, mid, message):
@@ -24,6 +25,7 @@ def transcribe_chunk(store, mid, settings, work, source, duration, index, lower,
     # Cleanup touches only what Whisper hears; the recording on disk stays untouched.
     extract(source, wav, work, start, length, cleanup=settings.audio_cleanup)
     diagnostics = [dict(channel=None, **diagnose(wav))]
+    cool_down(lambda message: status(store, mid, message), settings.cool_down)
     result = whisper(
         wav,
         settings.whisper_model,
@@ -205,6 +207,7 @@ def retry_uncertain(store, mid, settings, work, limit=20, pad=2.0):
             channel=row.get("source_channel"),
             cleanup=settings.audio_cleanup,
         )
+        cool_down(lambda message: status(store, mid, message), settings.cool_down)
         result = whisper(
             wav,
             settings.whisper_model,
