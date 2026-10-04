@@ -57,6 +57,20 @@ def run(strict=True):
     except (ImportError, OSError, ValueError) as exc:
         print(f"✗ словарь для обезличивания: {exc}")
         failures.append("pymorphy3")
+    import platform
+
+    from .local_llm import mlx_supported
+
+    if sys.platform == "darwin" and platform.machine() == "arm64":
+        # The experimental engine is optional: a problem here is reported, not fatal.
+        try:
+            import llguidance  # noqa: F401
+            import mlx.core  # noqa: F401
+            import mlx_lm  # noqa: F401
+
+            print("✓ MLX (экспериментальный движок)" if mlx_supported() else "! MLX: пакеты не найдены")
+        except Exception as exc:
+            print(f"! MLX недоступен: {type(exc).__name__}: {exc}")
     if failures:
         print("Не хватает: " + ", ".join(failures))
     return 1 if failures and strict else 0

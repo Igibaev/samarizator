@@ -450,6 +450,31 @@ class SettingsDialog(QDialog):
         row.addWidget(profile)
         row.addStretch(1)
         layout.addLayout(row)
+        engine = Group(layout, "Движок сводок")
+        engine_choice = QComboBox()
+        engine_choice.addItem("llama.cpp — стабильный", "llama")
+        engine_choice.addItem("MLX — быстрее на Apple Silicon (экспериментально)", "mlx")
+        engine_choice.setCurrentIndex(max(0, engine_choice.findData(s.llm_engine)))
+        self.fields["llm_engine"] = engine_choice
+        supported = local_llm.mlx_supported()
+        engine_choice.setEnabled(supported or s.llm_engine == "mlx")
+        engine.row(
+            "Движок",
+            engine_choice,
+            subtitle=(
+                "MLX — движок Apple, быстрее генерирует текст. Нужна отдельная копия модели; при любом "
+                "сбое сводка продолжится на llama.cpp."
+                if supported
+                else "MLX работает только на Mac с Apple Silicon."
+            ),
+        )
+        self.hidden("mlx_model", s.mlx_model).textChanged.connect(self.describe_mlx)
+        self.mlx_state = label("")
+        mlx_button = QPushButton("Скачать…")
+        mlx_button.setEnabled(supported)
+        mlx_button.clicked.connect(self.download_mlx)
+        self.mlx_detail = engine.row("Модель MLX", self.mlx_state, mlx_button, subtitle="")
+        self.describe_mlx()
         resources = Group(layout, "Ресурсы")
         memory = QDoubleSpinBox()
         memory.setRange(2, 64)
@@ -627,6 +652,31 @@ class SettingsDialog(QDialog):
             self.whisper_detail.setText(line or "Скачайте модель — это нужно один раз.")
             self.whisper_detail.setVisible(True)
 
+    def describe_mlx(self):
+        path = self.fields["mlx_model"].text().strip()
+        ready = bool(path) and local_llm.model_present(path)
+        self.mlx_state.setText("● Готова" if ready else "● Не скачана")
+        self.mlx_state.setStyleSheet(f"color: {'#1b6b33' if ready else '#c46b00'}; font-size: 12px;")
+        if ready:
+            preset = next((p for p in local_llm.MLX_PRESETS.values() if Path(p.file).name == Path(path).name), None)
+            name = preset_name(preset) if preset else Path(path).name
+            self.mlx_detail.setText(f"{name} · {gb(local_llm.path_size(path) / 1024**3)} ГБ на диске")
+        else:
+            self.mlx_detail.setText("Скачайте модель в формате MLX, чтобы включить этот движок.")
+        self.mlx_detail.setVisible(True)
+
+    def download_mlx(self):
+        dialog = ModelDownloadDialog(
+            self,
+            local_llm.MLX_PRESETS,
+            "Модель для MLX",
+            "Та же модель в формате Apple MLX — отдельная копия. Основная модель GGUF остаётся для вопросов "
+            "по сводке и как запасной вариант.",
+        )
+        if dialog.exec() and dialog.path:
+            self.fields["mlx_model"].setText(str(dialog.path))
+            self.fields["llm_engine"].setCurrentIndex(self.fields["llm_engine"].findData("mlx"))
+
     def describe_decider(self):
         ready = local_llm.decision_model_path().is_file()
         self.decider_button.setVisible(not ready)
@@ -659,7 +709,10 @@ class SettingsDialog(QDialog):
         self.models_detail.setVisible(True)
 
     def manage_models(self):
-        in_use = {key: self.fields[key].text().strip() for key in ("llm_model", "whisper_model", "vad_model")}
+        in_use = {
+            key: self.fields[key].text().strip()
+            for key in ("llm_model", "whisper_model", "vad_model", "mlx_model")
+        }
         dialog = ModelsDialog(in_use, self)
         dialog.exec()
         # A deleted model stops being the selected one; the app offers a download instead.
@@ -669,6 +722,8 @@ class SettingsDialog(QDialog):
                 self.fields["llm_preset"].setText("")
             if key == "vad_model":
                 self.fields["vad"].setChecked(False)
+            if key == "mlx_model":
+                self.fields["llm_engine"].setCurrentIndex(0)
         self.describe_storage()
         self.describe_decider()
 
@@ -734,13 +789,21 @@ def downloaded_models():
     files = [
         path for path in folder.iterdir() if path.is_file() and path.suffix in {".gguf", ".bin", ".part"}
     ]
-    return sorted(((path, path.stat().st_size) for path in files), key=lambda pair: -pair[1])
+    mlx = folder / "mlx"
+    if mlx.is_dir():
+        files += [path for path in mlx.iterdir() if path.is_dir()]  # MLX models are folders
+    return sorted(((path, local_llm.path_size(path)) for path in files), key=lambda pair: -pair[1])
 
 
 def describe_model_file(path):
     """(name, role) a person recognises: the preset name when the file is one of ours."""
     from .setup_models import WHISPER_PRESETS
 
+    if path.is_dir():
+        preset = next((p for p in local_llm.MLX_PRESETS.values() if Path(p.file).name == path.name), None)
+        name = preset_name(preset) if preset else path.name
+        done = local_llm.model_present(path)
+        return name, "Сводки · движок MLX" if done else "Недокачанная модель MLX: загрузка начнётся заново"
     if path.suffix == ".part":
         name = path.name.removesuffix(".part")
         return f"Недокачанная загрузка · {name}", "Можно удалить: загрузка начнётся заново"
@@ -762,7 +825,12 @@ def describe_model_file(path):
 class ModelsDialog(QDialog):
     """Downloaded models with their size; any of them can be deleted to free the disk."""
 
-    ROLES = {"llm_model": "модель сводок", "whisper_model": "модель распознавания", "vad_model": "модель VAD"}
+    ROLES = {
+        "llm_model": "модель сводок",
+        "whisper_model": "модель распознавания",
+        "vad_model": "модель VAD",
+        "mlx_model": "модель MLX",
+    }
 
     def __init__(self, in_use, parent=None):
         super().__init__(parent)
@@ -862,7 +930,7 @@ class ModelsDialog(QDialog):
     def remove(self, path):
         name, _ = describe_model_file(path)
         roles = self.using(path)
-        text = f"Удалить «{name}»? Освободится {gb(path.stat().st_size / 1024**3)} ГБ."
+        text = f"Удалить «{name}»? Освободится {gb(local_llm.path_size(path) / 1024**3)} ГБ."
         if roles:
             what = ", ".join(self.ROLES[key] for key in roles)
             text += (
@@ -878,8 +946,11 @@ class ModelsDialog(QDialog):
         if not self.confirm(box, confirm):
             return
         try:
-            path.unlink()
-            path.with_suffix(path.suffix + ".url").unlink(missing_ok=True)
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+                path.with_suffix(path.suffix + ".url").unlink(missing_ok=True)
         except OSError as exc:
             QMessageBox.warning(self, "Удалить модель", f"Не удалось удалить файл: {exc.strerror}")
             return
@@ -1057,7 +1128,7 @@ class ModelDownloadDialog(QDialog):
         cards.setContentsMargins(0, 0, 0, 0)
         cards.setSpacing(10)
         for key, preset in self.presets.items():
-            option = ModelOption(preset, self.settings, total, best, self.target(key).is_file())
+            option = ModelOption(preset, self.settings, total, best, local_llm.model_present(self.target(key)))
             self.group.addButton(option.radio)
             self.options[key] = option
             cards.addWidget(option)
@@ -1108,7 +1179,7 @@ class ModelDownloadDialog(QDialog):
         if key is None:
             return
         preset = self.presets[key]
-        ready = self.target(key).is_file()
+        ready = local_llm.model_present(self.target(key))
         self.start_button.setText("Выбрать" if ready else f"Скачать {gb(preset.size_gb)} ГБ")
         self.start_button.setEnabled(self.options[key].isEnabled() and self.job is None)
 
@@ -1125,7 +1196,7 @@ class ModelDownloadDialog(QDialog):
             return
         preset = self.presets[key]
         target = self.target(key)
-        if target.is_file():
+        if local_llm.model_present(target):
             self.finish(key, target)
             return
         if shutil.disk_usage(target.parent).free < preset.size_gb * 1024**3 * 1.05:

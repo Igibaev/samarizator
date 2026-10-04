@@ -58,6 +58,9 @@ class Settings:
     llm_parallel: int = 0
     # A small decision model sets aside empty fragments (greetings, sound checks).
     prune_fragments: bool = True
+    # "llama" — llama.cpp (stable); "mlx" — Apple MLX (experimental, falls back to llama.cpp).
+    llm_engine: str = "llama"
+    mlx_model: str = ""  # folder of an MLX model; the GGUF model stays for questions and fallback
     # Saved-settings format; older files are migrated in from_dict().
     version: int = SETTINGS_VERSION
 
@@ -78,6 +81,8 @@ class Settings:
         )
 
     def validate(self, llm=False):
+        if self.llm_engine not in {"llama", "mlx"}:
+            raise ValueError("Движок сводок: llama.cpp или MLX.")
         if not 1 <= self.beam_size <= 8 or len(self.glossary) > 800:
             raise ValueError("Beam size: 1–8; словарь терминов: не более 800 символов.")
         if self.live_source not in {"microphone", "system", "both"}:

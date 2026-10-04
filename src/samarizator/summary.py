@@ -800,20 +800,22 @@ class local_model:
     def __init__(self, settings, work, progress):
         import tempfile
 
-        from .local_llm import LlamaServer, check_fits
+        from .local_llm import check_fits
 
         settings.validate(llm=True)
         check_fits(settings)
         self.temp = None if work else tempfile.TemporaryDirectory(prefix="samarizator-llm-")
-        self.server = LlamaServer(settings, work or self.temp.name, progress)
+        self.work = work or self.temp.name
+        self.server = None
         self.settings = settings
         self.progress = progress
         self.client = None
 
     def __enter__(self):
+        from .local_llm import start_summary_server
         from .thermal import cool_down
 
-        self.server.__enter__()
+        self.server = start_summary_server(self.settings, self.work, self.progress)
         self.client = LocalClient(self.settings, self.server.url, self.server.key)
         self.client.parallel = self.server.slots
         self.client.pace = lambda: cool_down(self.progress, self.settings.cool_down)
@@ -822,7 +824,8 @@ class local_model:
     def __exit__(self, *exc):
         if self.client:
             self.client.close()
-        self.server.__exit__(*exc)
+        if self.server:
+            self.server.__exit__(*exc)
         if self.temp:
             self.temp.cleanup()
         return False

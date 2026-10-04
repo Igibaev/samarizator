@@ -121,6 +121,83 @@ def decision_model_path():
     return models_dir() / DECISION_PRESET.file
 
 
+# The same models converted for Apple MLX (4-bit). A model is a folder of files, taken
+# from the first repository listed that has it; sizes are approximate.
+MLX_PRESETS = {
+    preset.key: preset
+    for preset in [
+        Preset(
+            "gemma4-26b-a4b",
+            "Максимальное качество · Gemma 4 26B-A4B · MLX",
+            "mlx/gemma-4-26b-a4b-it-4bit",
+            "hf-snapshot:mlx-community/gemma-4-26b-a4b-it-4bit|mlx-community/gemma-4-26B-A4B-it-4bit",
+            15.6,
+            32,
+            "Смесь экспертов: быстрая для своего качества. Для Mac от 32 ГБ.",
+        ),
+        Preset(
+            "qwen3-30b-a3b",
+            "Точная · Qwen3 30B-A3B Instruct · MLX",
+            "mlx/Qwen3-30B-A3B-Instruct-2507-4bit",
+            "hf-snapshot:mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit",
+            17.2,
+            32,
+            "Точные формулировки, уверенный русский. Для Mac от 32 ГБ.",
+        ),
+        Preset(
+            "gemma4-12b",
+            "Сбалансированная · Gemma 4 12B · MLX",
+            "mlx/gemma-4-12b-it-4bit",
+            "hf-snapshot:mlx-community/gemma-4-12b-it-4bit|mlx-community/gemma-4-12B-it-4bit",
+            6.9,
+            16,
+            "Аккуратные сводки по-русски. Для Mac от 16 ГБ.",
+        ),
+        Preset(
+            "qwen3-4b",
+            "Лёгкая · Qwen3 4B Instruct · MLX",
+            "mlx/Qwen3-4B-Instruct-2507-4bit",
+            "hf-snapshot:mlx-community/Qwen3-4B-Instruct-2507-4bit",
+            2.3,
+            8,
+            "Для Mac с 8 ГБ: быстрая, но формулирует проще.",
+        ),
+    ]
+}
+MLX_MARK = ".complete"  # written when every file of an MLX model has arrived
+
+
+def model_present(path):
+    """A downloaded model: a GGUF/whisper file, or an MLX folder whose download finished."""
+    path = Path(path).expanduser()
+    return path.is_file() or (path / MLX_MARK).is_file()
+
+
+def path_size(path):
+    path = Path(path).expanduser()
+    if path.is_dir():
+        return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
+    return path.stat().st_size if path.exists() else 0
+
+
+def mlx_supported():
+    """Apple Silicon with the MLX packages in the app (tests may allow it elsewhere)."""
+    import importlib.util
+    import platform
+    import sys
+
+    machine_ok = sys.platform == "darwin" and platform.machine() == "arm64"
+    if not machine_ok and os.environ.get("SAMARIZATOR_MLX_ANYWHERE") != "1":
+        return False
+    return all(importlib.util.find_spec(name) for name in ("mlx_lm", "llguidance"))
+
+
+def mlx_usable(settings):
+    return settings.llm_engine == "mlx" and bool(settings.mlx_model) and model_present(
+        settings.mlx_model
+    ) and mlx_supported()
+
+
 # Russian text in JSON costs roughly 2.5–3 characters per token for these tokenizers;
 # 2.0 leaves room for escaping and denser text.
 CHARS_PER_TOKEN = 2.0
@@ -188,12 +265,9 @@ def kv_gb(settings, slots=1, compact_kv=False):
     return slots * context_tokens(settings) * per_token / 1024**3
 
 
-def memory_estimate_gb(settings, slots=1, compact_kv=False):
+def memory_estimate_gb(settings, slots=1, compact_kv=False, mlx=False):
     """Model weights + KV cache + server overhead. A planning number, not a measurement."""
-    try:
-        weights = Path(settings.llm_model).expanduser().stat().st_size / 1024**3
-    except OSError:
-        weights = 0.0
+    weights = path_size(settings.mlx_model if mlx else settings.llm_model) / 1024**3
     return weights + kv_gb(settings, slots, compact_kv) + SERVER_OVERHEAD_GB
 
 
@@ -222,6 +296,7 @@ def job_budget_gb(settings):
     need = max(
         memory_estimate_gb(settings, parallel_slots(settings), compact_kv=True),
         memory_estimate_gb(settings),  # the fallback start: one slot, full-precision cache
+        memory_estimate_gb(settings, mlx=True) if mlx_usable(settings) else 0,
     )
     return max(settings.memory_gb, math.ceil(need * 1.25 + 1))
 
@@ -258,12 +333,16 @@ class DownloadCancelled(Exception):
     pass
 
 
-def download(url, target, progress=lambda done, total: None, cancelled=lambda: False, opener=None):
+def download(
+    url, target, progress=lambda done, total: None, cancelled=lambda: False, opener=None, min_size=1024
+):
     """Resumable download into `target`; a `.part` file survives interruptions.
 
     Large weights (up to ~19 GB) must not restart from zero after a network hiccup, so
     an interrupted download continues with an HTTP Range request.
     """
+    if url.startswith(HF_SNAPSHOT):
+        return download_snapshot(url, target, progress, cancelled, opener)
     target = Path(target)
     target.parent.mkdir(parents=True, exist_ok=True)
     part = target.with_suffix(target.suffix + ".part")
@@ -321,7 +400,8 @@ def download(url, target, progress=lambda done, total: None, cancelled=lambda: F
                     "продолжится с места остановки."
                 ) from None
         time.sleep(min(30, 2**attempt))
-    if not part.exists() or part.stat().st_size < 1024:
+    # A model file is never tiny; the small configs of a folder model pass min_size=1.
+    if not part.exists() or part.stat().st_size < min_size:
         raise ValueError("Вместо модели получен слишком маленький файл.")
     if target.suffix == ".gguf":
         with part.open("rb") as f:
@@ -425,6 +505,72 @@ def resolve_hf_repo(spec, opener, pick=pick_ggml):
     )
 
 
+# "hf-snapshot:owner/name|owner/fallback": a model that is a folder of files (MLX).
+HF_SNAPSHOT = "hf-snapshot:"
+SNAPSHOT_SUFFIXES = {".json", ".safetensors", ".model", ".txt", ".jinja", ".tiktoken"}
+
+
+def snapshot_files(entries):
+    """Files of an MLX model in a tree listing: weights, configs, tokenizer; no code."""
+    files = [
+        entry
+        for entry in entries
+        if entry.get("type", "file") == "file"
+        and Path(str(entry.get("path", ""))).suffix in SNAPSHOT_SUFFIXES
+        and not str(entry.get("path", "")).startswith(".")
+    ]
+    names = {Path(str(entry["path"])).name for entry in files}
+    has_weights = any(name.endswith(".safetensors") for name in names)
+    return files if "config.json" in names and has_weights else []
+
+
+def download_snapshot(spec, target, progress=lambda done, total: None, cancelled=lambda: False, opener=None):
+    """Every file of a folder model into `target`, resumable file by file."""
+    import json
+
+    import truststore
+
+    target = Path(target)
+    context = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    opener = opener or urllib.request.build_opener(urllib.request.HTTPSHandler(context=context))
+    chosen = None
+    for repo in spec.removeprefix(HF_SNAPSHOT).split("|"):
+        request = urllib.request.Request(
+            f"{HF}api/models/{repo}/tree/main?recursive=true", headers={"User-Agent": "Samarizator"}
+        )
+        try:
+            with opener.open(request, timeout=60) as response:
+                entries = json.loads(response.read(8 * 1024**2))
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+            continue
+        files = snapshot_files([e for e in entries if isinstance(e, dict)]) if isinstance(entries, list) else []
+        if files:
+            chosen = repo, files
+            break
+    if not chosen:
+        raise ValueError("Не удалось найти модель MLX на Hugging Face. Проверьте интернет и повторите.")
+    repo, files = chosen
+    sizes = [(entry.get("lfs") or {}).get("size") or entry.get("size") or 0 for entry in files]
+    total, finished = sum(sizes), 0
+    target.mkdir(parents=True, exist_ok=True)
+    for entry, size in zip(files, sizes):
+        path = str(entry["path"])
+        destination = target / path
+        if not destination.is_file():
+            download(
+                f"{HF}{repo}/resolve/main/{path}",
+                destination,
+                progress=lambda done, _total, base=finished: progress(base + done, total),
+                cancelled=cancelled,
+                opener=opener,
+                min_size=1,
+            )
+        finished += size
+        progress(finished, total)
+    (target / MLX_MARK).write_text(repo)
+    return target
+
+
 def free_port():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
@@ -488,6 +634,15 @@ LOAD_ERRORS = [
         "llama.cpp не смог загрузить модель. Проверьте файл .gguf или скачайте его заново.",
     ),
 ]
+
+
+def explain_mlx_failure(log_text):
+    lowered = log_text.lower()
+    if "memory" in lowered:
+        return "Модели MLX не хватило памяти."
+    if "unsupported" in lowered or "model type" in lowered:
+        return "Эта версия MLX не знает архитектуру выбранной модели."
+    return "Модель MLX не запустилась."
 
 
 def explain_failure(log_text):
@@ -598,3 +753,57 @@ class LlamaServer:
     def __exit__(self, *exc):
         self.stop()
         return False
+
+
+class MlxServer(LlamaServer):
+    """The MLX engine as a child process with the same API, URL and key as llama-server."""
+
+    def __init__(self, settings, work, progress=lambda *_: None, load_timeout=900):
+        super().__init__(settings, work, progress, load_timeout=load_timeout, slots=1)
+        self.log = self.work / "mlx-server.log"
+
+    def __enter__(self):
+        from .bundle import python_command
+
+        self.work.mkdir(parents=True, exist_ok=True)
+        env = os.environ.copy()
+        env.pop("SAMARIZATOR_API_KEY", None)
+        command = python_command(
+            "samarizator.mlx_server",
+            "--model",
+            str(Path(self.settings.mlx_model).expanduser()),
+            "--port",
+            self.port,
+            "--api-key",
+            self.key,
+            "--ctx",
+            context_tokens(self.settings),
+        )
+        with self.log.open("wb") as out:
+            self.proc = subprocess.Popen(
+                command, stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, env=env
+            )
+        try:
+            self.wait_ready()
+        except ServerExited:
+            self.stop()
+            raise ServerExited(explain_mlx_failure(self.log.read_text(errors="replace"))) from None
+        except BaseException:
+            self.stop()
+            raise
+        self.slots = 1
+        return self
+
+
+def start_summary_server(settings, work, progress=lambda *_: None):
+    """The summary engine for a job: MLX when chosen and available, llama.cpp otherwise.
+
+    MLX is experimental; whatever goes wrong with it, the job continues on llama.cpp.
+    """
+    if mlx_usable(settings):
+        server = MlxServer(settings, work, progress)
+        try:
+            return server.__enter__()
+        except (RuntimeError, OSError) as exc:
+            progress(f"MLX не запустился ({str(exc)[:80]}) — сводка на llama.cpp")
+    return LlamaServer(settings, work, progress).__enter__()
