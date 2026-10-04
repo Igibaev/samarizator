@@ -13,7 +13,7 @@ import pytest
 from samarizator import local_llm
 from samarizator.config import Settings
 from samarizator.knowledge import export
-from samarizator.summary import final_document, final_material, regenerate_final, summarize
+from samarizator.summary import final_candidates, final_document, regenerate_final, summarize
 from samarizator.summary_prompts import FINAL_FORMATS
 
 FAKE_SERVER = r'''#!PYTHON
@@ -231,6 +231,9 @@ def test_final_material_takes_the_most_detailed_level_that_fits():
         reduce_levels=[[item(n) for n in range(1, 10)]],
     )
     times = {n: n * 60 for n in range(1, 40)}
+    def final_material(summary, times, budget):
+        return next(final_candidates(summary, times, budget))
+
     name, material = final_material(summary, times, 100000)
     assert name == "full" and "Часть 1. Начало" in material and "[00:39:00]" in material
     name, material = final_material(summary, times, 3000)

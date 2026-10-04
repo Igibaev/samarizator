@@ -1331,11 +1331,6 @@ def final_candidates(summary, times, budget):
     yield "brief", render_material(overview, brief["items"], resolved, times)
 
 
-def final_material(summary, times, budget):
-    """The most detailed material that fits `budget` characters."""
-    return next(final_candidates(summary, times, budget))
-
-
 FINAL_SOURCES = {
     "full": "",
     "brief": "Запись слишком длинная для одного запроса: итоговый текст составлен по краткой сводке. "

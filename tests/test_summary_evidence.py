@@ -114,10 +114,10 @@ def test_stale_or_missing_sources_do_not_launch_playback(evidence_window, monkey
     monkeypatch.setattr(QMessageBox, "information", lambda *args: warnings.append(args))
     other = w.store.create(source, w.settings)
     assert w.store.segment(other, row["id"]) is None
-    w.play_evidence(other, row["id"])
+    w.play_evidence_group(other, [row["id"]])
     assert not calls and not warnings
     source.unlink()
-    w.play_evidence(mid, row["id"])
+    w.play_evidence_group(mid, [row["id"]])
     assert not calls and len(warnings) == 1
     w.summary_page.clear("Сводки нет")
     assert not w.summary_page.evidence_buttons()

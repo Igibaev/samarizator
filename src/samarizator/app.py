@@ -518,7 +518,7 @@ class Window(QMainWindow):
         self.source_action = menu.addAction("Открыть исходную запись", self.open_source)
         self.reveal_action = menu.addAction("Показать заметку в Finder", self.reveal_note)
         self.reexport = menu.addAction("Экспортировать в Obsidian заново", lambda: self.start("export"))
-        self.vault_action = menu.addAction(
+        menu.addAction(
             "Открыть папку заметок",
             lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(self.settings.vault)),
         )
@@ -1586,15 +1586,6 @@ class Window(QMainWindow):
         if not self.mid or not 0 <= index < len(self.visible_rows):
             return
         self.play_row(self.visible_rows[index], pad=2.0)
-
-    def play_evidence(self, mid, sid):
-        if mid != self.mid:
-            return
-        row = self.store.segment(mid, sid)
-        if row is None:
-            QMessageBox.information(self, "Реплика недоступна", "Исходная реплика больше не найдена.")
-            return
-        self.play_row(row, pad=0.0)
 
     def play_row(self, row, pad=0.0):
         start = max(0, row["start"] - pad)

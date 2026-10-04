@@ -230,10 +230,6 @@ def models_dir():
     return folder
 
 
-def preset_path(key):
-    return models_dir() / PRESETS[key].file
-
-
 def ram_gb():
     return psutil.virtual_memory().total / 1024**3
 

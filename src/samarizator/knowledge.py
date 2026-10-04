@@ -315,26 +315,3 @@ def demote_headings(markdown):
             line = "##" + line
         out.append(line)
     return "\n".join(out)
-
-
-def summary_text(view, refs):
-    lines = [view["overview"], ""]
-    for kind, label in LABELS.items():
-        items = [item for item in view["items"] if item["kind"] == kind]
-        if not items:
-            continue
-        lines += [label.upper()]
-        for item in items:
-            state = STATUS_LABELS.get(item.get("status"), "")
-            lines.append(
-                "• "
-                + item["text"]
-                + (f" [{state}]" if state else "")
-                + (f" — {item['owner']}" if item.get("owner") else "")
-                + (f" · {item['due']}" if item.get("due") else "")
-                + "  ["
-                + ", ".join(refs.get(r, str(r)) for r in item["evidence"])
-                + "]"
-            )
-        lines += [""]
-    return "\n".join(lines)

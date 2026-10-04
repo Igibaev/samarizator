@@ -11,7 +11,6 @@ from samarizator.summary import (
     review_source,
     summarize,
 )
-from samarizator.summary_browser import summary_html
 from samarizator.summary_prompts import MAP_PROMPT, REVIEW_PROMPT
 
 
@@ -148,7 +147,7 @@ def test_review_failure_preserves_draft_warns_and_retries_without_reextracting(m
     result = summarize(store, mid, settings, client=client)
     assert result["detailed"]["items"] == draft["items"]
     warning = result["detailed"]["quality_warning"]
-    assert warning and warning in summary_html(result["brief"], {sid: "00:00:00"})
+    assert warning and result["brief"]["quality_warning"] == warning
     store.update(mid, summary=json.dumps(result))
     assert warning in export(store, mid, settings).read_text()
     assert client.audits == (1 if failure == "network" else 3)

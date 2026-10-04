@@ -69,12 +69,6 @@ def test_group_click_advances_queue_and_stop_cancels_all(evidence_window, monkey
     assert len(calls) == 3 and not w.playback_queue
 
     button.click()
-    w.play_evidence(mid, ids[0])
-    assert not w.playback_queue and processes[-2].exit_code == 0
-    assert calls[-1][calls[-1].index("-t") + 1] == "1.5"  # a single reply still plays exactly
-    w.stop_playback()
-
-    button.click()
     processes[-1].exit_code = 1
     count = len(calls)
     w.poll()
