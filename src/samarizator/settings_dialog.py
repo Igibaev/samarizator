@@ -40,6 +40,9 @@ from .summary_prompts import DEFAULT_FORMAT, FINAL_FORMATS
 from .theme import ACCENT, pixmap, set_flag
 from .widgets import label, primary, separator, tag
 
+# Choices of the time a summary may take, in minutes; 0 — no limit.
+SUMMARY_MINUTES = (5, 10, 15, 30, 60, 0)
+
 LANGUAGES = [
     ("ru", "Русский"),
     ("en", "Английский"),
@@ -314,6 +317,22 @@ class SettingsDialog(QDialog):
         edit.setFlat(True)
         edit.clicked.connect(lambda: self.nav.setCurrentRow(1))
         summary.row("Итоговый текст", edit, final_format)
+        minutes = QComboBox()
+        for value in SUMMARY_MINUTES:
+            minutes.addItem(f"{value} минут" if value else "без ограничения", value)
+        if minutes.findData(s.summary_minutes) < 0:
+            minutes.addItem(f"{s.summary_minutes} минут", s.summary_minutes)
+        minutes.setCurrentIndex(minutes.findData(s.summary_minutes))
+        self.fields["summary_minutes"] = minutes
+        summary.row(
+            "Время на сводку",
+            minutes,
+            subtitle=(
+                "Сводка измеряет скорость модели и укладывается в срок: если времени мало, сначала "
+                "пропускает проверку блоков по расшифровке, потом пишет конспект короче. Что было "
+                "сокращено, видно на странице сводки."
+            ),
+        )
         instructions = QPlainTextEdit(s.summary_instructions)
         instructions.setPlaceholderText(
             "Например: «Сводка для отдела продаж. Выделяй цены, сроки поставки и возражения клиентов. "

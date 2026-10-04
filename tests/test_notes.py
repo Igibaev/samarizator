@@ -425,3 +425,232 @@ def test_a_looping_answer_keeps_its_points_instead_of_splitting_the_block(notes_
     assert [i["text"] for i in result["detailed"]["items"]][:3] == ["Новый пункт", "Бюджет 17 млн", "Отчёт"]
     # A long answer that does not repeat itself is still split as before.
     assert notes.looped("ТЕМА: x\n- Тезис [1] a\n- Тезис [1] b\n- Тезис [1] c\n- Тез") is None
+
+
+# -- time budget -------------------------------------------------------------------------------
+
+
+class Clock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+
+class Timed(Notes):
+    """A model whose every answer takes a known time and reports it like llama-server."""
+
+    def __init__(self, clock, notes_seconds=60, check_seconds=30, speed=50.0, **kw):
+        super().__init__(**kw)
+        self.clock = clock
+        self.notes_seconds, self.check_seconds, self.speed = notes_seconds, check_seconds, speed
+
+    def complete_text(self, system, prompt, max_tokens, minimum=1024, continuation=False, grammar=None):
+        answer = super().complete_text(system, prompt, max_tokens, minimum, continuation, grammar)
+        seconds = self.check_seconds if CHECK_PROMPT in prompt else self.notes_seconds
+        self.clock.now += seconds
+        if getattr(self, "observe", None):
+            tokens = round(seconds * self.speed)
+            self.observe(dict(prompt_n=3000, prompt_ms=3000, predicted_n=tokens, predicted_ms=seconds * 1000))
+        return answer
+
+
+def test_budget_measures_the_model_from_the_servers_timings():
+    budget = notes.Budget(600, parallel=2)
+    assert budget.predict_speed() == notes.Budget.DEFAULT_PREDICT_SPEED
+    budget.observe(dict(prompt_n=4000, prompt_ms=4000, predicted_n=500, predicted_ms=10000))
+    budget.observe("not timings")
+    assert budget.prompt_speed() == 1000 and budget.predict_speed() == 50 and budget.measured()
+    assert budget.cost(1000, 100) == 1 + 2
+    report = budget.report()
+    assert report["limit"] == 600 and report["predict_speed"] == 50 and report["checks_skipped"] == 0
+    assert notes.Budget().left() is None and notes.Budget().pressure(10, 2048) == 0
+
+
+def test_budget_gives_up_checks_then_detail_as_time_runs_out(monkeypatch):
+    clock = Clock()
+    monkeypatch.setattr(notes, "clock", clock)
+    budget = notes.Budget(300, parallel=1)
+    budget.observe(dict(prompt_n=3000, prompt_ms=3000, predicted_n=3000, predicted_ms=60000))  # 50 tok/s
+    assert budget.pressure(6, 2048) == 0  # nothing measured per block yet
+    budget.notes_done(60, 1500)
+    budget.check_done(30)
+    budget.block_finished()
+    clock.now += 90
+    # Five blocks left at 90 s each do not fit into the 210 s left; at 60 s each they do not either.
+    assert budget.pressure(6, 2048) == 2
+    assert budget.eta(6, 2048).startswith(" · осталось ≈ ")
+    # With more time, only the checks go.
+    relaxed = notes.Budget(500, parallel=1)
+    relaxed.started = clock.now - 90
+    relaxed.observe(dict(prompt_n=3000, prompt_ms=3000, predicted_n=3000, predicted_ms=60000))
+    relaxed.notes_done(60, 1500)
+    relaxed.check_done(30)
+    relaxed.block_finished()
+    assert relaxed.pressure(6, 2048) == 1
+    # Two slots halve the waves.
+    wide = notes.Budget(500, parallel=2)
+    wide.started = clock.now - 90
+    wide.observe(dict(prompt_n=3000, prompt_ms=3000, predicted_n=3000, predicted_ms=60000))
+    wide.notes_done(60, 1500)
+    wide.check_done(30)
+    wide.block_finished()
+    assert wide.pressure(6, 2048) == 0
+    # The final text gets what is left — the whole room while there is time, never less
+    # than the floor once the time is spent.
+    tokens, continuations = budget.final_plan(4096, 6)
+    assert tokens == 4096 and continuations == 1
+    clock.now += 170  # 40 s left: room for about 1500 tokens after reading the register
+    tokens, _ = budget.final_plan(4096, 6)
+    assert notes.FINAL_FLOOR_TOKENS < tokens < 4096
+    clock.now += 100
+    assert budget.final_plan(4096, 6) == (notes.FINAL_FLOOR_TOKENS, 1)
+    assert notes.Budget(0).final_plan(4096, 6) == (4096, None)
+
+
+def test_a_summary_short_on_time_skips_checks_and_says_so(notes_meeting, monkeypatch):
+    store, mid, settings = notes_meeting
+    settings.summary_minutes = 4  # 240 s for 6 blocks of 60 + 30 s: only the notes fit
+    settings.input_chars = 4000
+    store.save_chunk(mid, 0, rows(12))
+    clock = Clock()
+    monkeypatch.setattr(notes, "clock", clock)
+    model = Timed(clock)
+    progress = []
+    result = summarize(store, mid, settings, client=model, progress=progress.append)
+    blocks = sum(
+        r["prompt"].endswith(NOTES_PROMPT) or notes.TERSE_NOTE in r["prompt"] for r in model.requests
+    )
+    checks = sum(CHECK_PROMPT in r["prompt"] for r in model.requests)
+    assert blocks >= 4 and 0 < checks < blocks
+    budget = result["budget"]
+    assert budget["checks_skipped"] == blocks - checks and budget["limit"] == 240
+    assert budget["predict_speed"] == 50 and budget["prompt_speed"] == 1000
+    assert budget["final_tokens"] == notes.FINAL_FLOOR_TOKENS  # the time is already spent
+    assert any("осталось ≈" in line for line in progress) and any(
+        "Скорость модели" in line for line in progress
+    )
+    assert model.expected is not None  # requests get timeouts from the measured speed
+    # Every block still has its notes; the detailed summary is complete.
+    assert len(result["detailed"]["items"]) == 2 * blocks
+
+
+def test_when_even_the_notes_do_not_fit_they_are_asked_terse_and_a_cut_answer_is_kept(
+    notes_meeting, monkeypatch
+):
+    store, mid, settings = notes_meeting
+    settings.summary_minutes = 2
+    settings.input_chars = 4000
+    store.save_chunk(mid, 0, rows(12))
+    clock = Clock()
+    monkeypatch.setattr(notes, "clock", clock)
+
+    class Cut(Timed):
+        def complete_text(self, system, prompt, max_tokens, minimum=1024, continuation=False, grammar=None):
+            text, truncated = super().complete_text(
+                system, prompt, max_tokens, minimum, continuation, grammar
+            )
+            if notes.TERSE_NOTE in prompt:
+                return text.replace("КОНЕЦ\n", "") + "- Решение [", True  # cut off by the limit
+            return text, truncated
+
+    model = Cut(clock, notes_seconds=90)
+    result = summarize(store, mid, settings, client=model)
+    terse = [r for r in model.requests if notes.TERSE_NOTE in r["prompt"]]
+    assert terse and all(r["limit"] <= notes.notes_tokens(settings, [], True) + 4000 // 6 for r in terse)
+    budget = result["budget"]
+    assert budget["terse_blocks"] == len(terse) and budget["cut_blocks"] == len(terse)
+    assert budget["checks_skipped"] >= len(terse)
+    # No block was split because of the cut: the complete lines were kept.
+    assert all("- Решение [" not in r["prompt"] for r in model.requests)
+    assert len(result["detailed"]["items"]) >= 2 * len(terse)
+
+
+def test_short_recordings_are_cut_into_enough_blocks_for_every_slot():
+    few = [dict(id=i, start=i, uncertain=0, text="Реплика о бюджете. " * 10) for i in range(40)]  # ~8k chars
+    assert len(notes.planned_blocks(few, 12000, slots=1)) == 2
+    assert len(notes.planned_blocks(few, 12000, slots=4)) == 4  # 2 500 characters at least
+    assert notes.block_chars(few, 12000, slots=4) == notes.MIN_BLOCK_CHARS
+    tiny = few[:4]
+    assert len(notes.planned_blocks(tiny, 12000, slots=4)) == 1  # never finer than MIN_BLOCK_CHARS
+    many = [dict(id=i, start=i, uncertain=0, text="Реплика о бюджете. " * 10) for i in range(600)]
+    assert notes.block_chars(many, 12000, slots=4) == 6000  # long recordings keep full blocks
+
+
+def test_final_text_room_follows_the_format():
+    from samarizator import local_llm
+    from samarizator.config import Settings
+    from samarizator.summary_prompts import FINAL_FORMATS
+
+    assert local_llm.final_output_tokens(Settings(final_format="executive")) == 2048
+    assert local_llm.final_output_tokens(Settings(final_format="protocol")) == 4096
+    same = Settings(final_format="protocol", final_prompt=FINAL_FORMATS["protocol"][1])
+    assert local_llm.final_output_tokens(same) == 4096
+    custom = Settings(final_format="protocol", final_prompt="Свой шаблон")
+    assert local_llm.final_output_tokens(custom) == local_llm.FINAL_OUTPUT_TOKENS
+
+
+def test_requests_that_take_far_longer_than_expected_are_given_up_not_retried():
+    from samarizator.config import Settings
+    from samarizator.summary import STUCK_FACTOR, STUCK_GRACE, LocalClient, SummaryTooLong
+
+    calls = []
+
+    def handler(request):
+        if request.url.path == "/tokenize":
+            return httpx.Response(200, json=dict(tokens=[1] * 100))
+        calls.append(request.extensions.get("timeout"))
+        raise httpx.ReadTimeout("slow")
+
+    client = LocalClient(Settings(), "http://127.0.0.1:9", transport=httpx.MockTransport(handler))
+    client.expected = lambda prompt_tokens, max_tokens: 10.0
+    with pytest.raises(SummaryTooLong):
+        client.complete_text("S", "P", 100, 50)
+    assert len(calls) == 1 and calls[0]["read"] == STUCK_GRACE + STUCK_FACTOR * 10
+    seen = []
+    plain = LocalClient(Settings(), "http://127.0.0.1:9", transport=httpx.MockTransport(handler))
+    plain.observe = seen.append
+
+    def timed(request):
+        if request.url.path == "/tokenize":
+            return httpx.Response(200, json=dict(tokens=[1] * 100))
+        return httpx.Response(
+            200,
+            json=dict(
+                choices=[dict(message=dict(content="Ок"), finish_reason="stop")],
+                timings=dict(prompt_n=5, prompt_ms=10, predicted_n=2, predicted_ms=40),
+            ),
+        )
+
+    plain.client = httpx.Client(transport=httpx.MockTransport(timed))
+    plain.complete_text("S", "P", 100, 50)
+    assert seen == [dict(prompt_n=5, prompt_ms=10, predicted_n=2, predicted_ms=40)]
+
+
+def test_progress_screen_knows_the_assembly_stage_and_the_summarys_own_estimate():
+    from samarizator import progress
+
+    assert progress.summary_stage("Сборка сводки: 80 пунктов за один заход…") == "brief"
+    assert progress.summary_stage("Сводка готова за 4 мин 10 с (разбор 3 мин 2 с)") == "final"
+    line = "Разбор записи: блок 3 из 8 · 2 одновременно · осталось ≈ 4 мин"
+    assert progress.summary(line)["detail"] == "3 из 8"
+    assert progress.remaining(0.3, 100, line) == "осталось около 4 мин"
+    assert progress.remaining(0.3, 100, line.replace("4 мин", "меньше минуты")) == "осталось меньше минуты"
+    assert progress.remaining(0.5, 100) == "осталось около 2 мин"
+
+
+def test_time_limit_setting_is_offered_and_validated(qapp, tmp_path, monkeypatch):
+    from samarizator.config import Settings
+    from samarizator.settings_dialog import SettingsDialog
+
+    assert Settings().summary_minutes == 10
+    with pytest.raises(ValueError, match="Время на сводку"):
+        Settings(summary_minutes=500).validate()
+    monkeypatch.setenv("SAMARIZATOR_HOME", str(tmp_path / "home"))
+    dialog = SettingsDialog(Settings(summary_minutes=7))
+    choice = dialog.fields["summary_minutes"]
+    assert dialog.value(choice) == 7  # an unusual stored value is kept
+    choice.setCurrentIndex(choice.findData(0))
+    assert dialog.value(choice) == 0
+    dialog.deleteLater()

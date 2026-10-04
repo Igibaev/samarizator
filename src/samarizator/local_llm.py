@@ -25,6 +25,7 @@ from .config import data_dir
 from .summary_prompts import (
     ASSEMBLE_PROMPT,
     CHECK_PROMPT,
+    FINAL_FORMATS,
     FINAL_SYSTEM,
     MAP_PROMPT,
     NOTES_SYSTEM,
@@ -253,8 +254,18 @@ def final_input_chars(settings):
     return settings.input_chars * factor
 
 
+# Answer room of the final text by built-in format: a one-page executive summary never
+# needs the room of a full protocol, and a model that cannot end its turn is cut off sooner.
+FINAL_FORMAT_TOKENS = dict(executive=2048, interview=3072, protocol=4096, lecture=4096)
+
+
 def final_output_tokens(settings):
-    return max(settings.max_output_tokens, FINAL_OUTPUT_TOKENS)
+    wanted = max(settings.max_output_tokens, FINAL_OUTPUT_TOKENS)
+    template = settings.final_prompt.strip()
+    standard = not template or template == FINAL_FORMATS.get(settings.final_format, ("", ""))[1].strip()
+    if standard:
+        wanted = min(wanted, FINAL_FORMAT_TOKENS.get(settings.final_format, wanted))
+    return wanted
 
 
 def context_tokens(settings):

@@ -30,9 +30,9 @@ def transcription(message):
 def summary_stage(message):
     """loading → blocks → brief → final, from the wording summary.py uses."""
     text = (message or "").lower()
-    if "итоговый текст" in text:
+    if "итоговый текст" in text or "сводка готова" in text:
         return "final"
-    if "объединение" in text or "согласование" in text:
+    if "объединение" in text or "согласование" in text or "сборка" in text:
         return "brief"
     if BLOCK.search(text) or "делю блок" in text or "сводка: блок" in text:
         return "blocks"
@@ -84,8 +84,18 @@ def retry(message):
     return dict(fraction=fraction, detail=detail)
 
 
-def remaining(fraction, elapsed):
-    """'осталось около 12 мин' once there is enough history to say anything honest."""
+ETA = re.compile(r"осталось ≈ (меньше минуты|\d+ мин)")
+
+
+def remaining(fraction, elapsed, message=""):
+    """'осталось около 12 мин' once there is enough history to say anything honest.
+
+    A line that carries the summary's own estimate (from the measured speed of the model)
+    wins over the extrapolation of the progress fraction.
+    """
+    match = ETA.search(message or "")
+    if match:
+        return "осталось " + ("меньше минуты" if match[1].startswith("меньше") else "около " + match[1])
     if fraction < 0.08 or elapsed < 20:
         return ""
     left = elapsed * (1 - fraction) / fraction

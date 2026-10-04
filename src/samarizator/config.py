@@ -64,6 +64,8 @@ class Settings:
     # "notes" — short notes per block, checked against the cached transcript, assembled in one
     # request; "classic" — JSON registers reduced level by level (slower, kept for comparison).
     summary_algorithm: str = "notes"
+    # Minutes a summary may take (the notes algorithm plans its steps to fit); 0 — no limit.
+    summary_minutes: int = 10
     # Saved-settings format; older files are migrated in from_dict().
     version: int = SETTINGS_VERSION
 
@@ -88,6 +90,8 @@ class Settings:
             raise ValueError("Движок сводок: llama.cpp или MLX.")
         if self.summary_algorithm not in {"notes", "classic"}:
             raise ValueError("Алгоритм сводки: быстрый (конспект) или классический.")
+        if not 0 <= self.summary_minutes <= 180:
+            raise ValueError("Время на сводку: до 180 минут, 0 — без ограничения.")
         if not 1 <= self.beam_size <= 8 or len(self.glossary) > 800:
             raise ValueError("Beam size: 1–8; словарь терминов: не более 800 символов.")
         if self.live_source not in {"microphone", "system", "both"}:

@@ -70,6 +70,11 @@ class EvidenceButton(QPushButton):
         return super().event(event)
 
 
+def plural_blocks(count):
+    """Genitive after «для» and «конспект»: 1 блока, 2 блоков, 21 блока."""
+    return f"{count} {'блока' if count % 10 == 1 and count % 100 != 11 else 'блоков'}"
+
+
 class SummaryPage(QScrollArea):
     playGroup = Signal(str, object)
     taskToggled = Signal(str, str, bool)
@@ -164,6 +169,22 @@ class SummaryPage(QScrollArea):
                 "Пустые фрагменты не вошли в сводку",
                 f"{prepared['pruned']} реплик, около {minutes} мин: приветствия, проверка связи, шум. "
                 "В расшифровке они остались.",
+            )
+            self.column.addWidget(note)
+        budget = summary.get("budget") or {}
+        cuts = []
+        if budget.get("checks_skipped"):
+            cuts.append(f"проверка по расшифровке пропущена для {plural_blocks(budget['checks_skipped'])}")
+        if budget.get("terse_blocks"):
+            cuts.append(f"конспект {plural_blocks(budget['terse_blocks'])} написан короче")
+        if cuts:
+            note = Banner("info")
+            limit = max(1, round(budget.get("limit", 0) / 60))
+            note.set_text(
+                f"Чтобы уложиться в {limit} мин",
+                "; ".join(cuts).capitalize()
+                + ". Расшифровка полная. Без спешки: Настройки → Сводка → Время на сводку → "
+                "«без ограничения», затем «Сделать сводку заново».",
             )
             self.column.addWidget(note)
         self.add_brief(brief)

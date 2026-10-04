@@ -19,6 +19,7 @@ import argparse
 import json
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import numpy as np
@@ -114,6 +115,8 @@ class Engine:
         max_tokens = int(body.get("max_tokens") or 512)
         if len(tokens) + max_tokens > self.context:
             return 400, {"error": {"message": "the request exceeds the available context size"}}
+        started = time.monotonic()
+        first = None
         with self.lock:
             fresh, reused = self.reuse(tokens)
             processors = []
@@ -131,6 +134,8 @@ class Engine:
                 logits_processors=processors,
                 prompt_cache=self.cache,
             ):
+                if first is None:
+                    first = time.monotonic()  # the prompt has been read
                 text.append(response.text)
                 generated.append(int(response.token))
                 if response.finish_reason:
@@ -146,9 +151,19 @@ class Engine:
             self.cached = (tokens + generated)[:offset] if isinstance(offset, int) else []
             if not isinstance(offset, int):
                 self.cache = None
+        now = time.monotonic()
+        first = first or now
         return 200, {
             "choices": [{"index": 0, "finish_reason": finish, "message": {"role": "assistant", "content": "".join(text)}}],
             "usage": {"prompt_tokens": len(tokens), "cached_tokens": reused, "completion_tokens": len(generated)},
+            # The same fields llama-server reports: the summary plans its time by them.
+            "timings": {
+                "cache_n": reused,
+                "prompt_n": len(fresh),
+                "prompt_ms": round((first - started) * 1000, 1),
+                "predicted_n": len(generated),
+                "predicted_ms": round((now - first) * 1000, 1),
+            },
         }
 
 

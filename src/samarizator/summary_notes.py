@@ -21,7 +21,9 @@ Evidence rules stay the same: every point refers to real transcript lines of its
 """
 
 import hashlib
+import math
 import re
+import threading
 import time
 
 import httpx
@@ -66,10 +68,21 @@ END = "КОНЕЦ"
 # Answer limits in tokens. Notes are shorter than the text they cover, corrections shorter than
 # the notes: a model that loops is cut off early, and the block is split and asked again.
 ASSEMBLE_TOKENS = 3072
+# A primary block is never cut finer than this, however many slots wait for work.
+MIN_BLOCK_CHARS = 2500
+# The final text always gets at least this much room, deadline or not.
+FINAL_FLOOR_TOKENS = 512
+# Asked of the model when the time left does not cover detailed notes of the remaining blocks.
+TERSE_NOTE = """
+
+Времени мало: не более 10 пунктов для этого фрагмента — решения, задачи, числа, сроки, имена
+и главные тезисы; второстепенное опусти."""
+clock = time.monotonic  # replaced in tests
 
 
-def notes_tokens(settings, block):
-    return min(settings.max_output_tokens, 512 + sum(len(row["text"]) for row in block) // 3)
+def notes_tokens(settings, block, terse=False):
+    tokens = 512 + sum(len(row["text"]) for row in block) // 3
+    return min(settings.max_output_tokens, tokens // 2 if terse else tokens)
 
 
 def check_tokens(settings, notes):
@@ -260,9 +273,25 @@ def context_rows(rows, limit, tail=False):
     return list(reversed(picked)) if tail else picked
 
 
-def planned_blocks(rows, max_chars):
+def block_chars(rows, max_chars, slots=1):
+    """Characters of a primary block: half the request, or finer so that every slot has work.
+
+    A short recording in one or two blocks would leave the other slots idle and write every
+    note in one long answer; cut into at least two blocks per slot, it is written at once.
+    """
+    size = max_chars // 2
+    total = sum(len(row_line(row)) + 1 for row in rows)
+    wanted = 2 * max(1, slots)
+    if total and total < size * wanted:
+        # A tenth of slack: rows do not divide evenly, and one row over must not add a block.
+        size = max(MIN_BLOCK_CHARS, min(size, math.ceil(total / wanted * 1.1)))
+    return size
+
+
+def planned_blocks(rows, max_chars, slots=1):
     """[(block, before, after)] — primary rows with bounded raw context on both sides."""
-    primary = list(note_blocks(rows, max_chars // 2))
+    rows = list(rows)
+    primary = list(note_blocks(rows, block_chars(rows, max_chars, slots)))
     limit = min(CONTEXT_CHARS, max_chars // 10)
     return [
         (
@@ -307,17 +336,24 @@ def looped(text, least=3):
     return "\n".join(dict.fromkeys(lines)) + "\n"
 
 
-def ask(client, system, prompt, grammar, parse, max_tokens, minimum=1024):
+def ask(client, system, prompt, grammar, parse, max_tokens, minimum=1024, lenient=False, on_cut=None):
     """A grammar-shaped answer, parsed; a rejected answer is asked again twice with the reason.
 
     The reason is appended at the end, so the transcript at the beginning stays cached.
+    `lenient`: an answer cut off by the limit keeps its complete lines instead of splitting
+    the block — when there is no time for a second attempt; `on_cut` is told about it.
     """
     for attempt in range(3):
         text, truncated = client.complete_text(system, prompt, max_tokens, minimum, grammar=grammar)
         if truncated:
-            text = looped(text)
-            if text is None:
+            whole = looped(text)
+            if whole is None and lenient:
+                whole = "\n".join(text.splitlines()[:-1]) + "\n"
+                if on_cut:
+                    on_cut()
+            if whole is None:
                 raise SummaryTooLong("Модель не уложилась в лимит ответа; блок будет разделён.")
+            text = whole
         try:
             return parse(text)
         except SummaryFormatError as exc:
@@ -484,17 +520,176 @@ def resolved_from(ledger, revisions):
     return resolved
 
 
+# -- time budget -------------------------------------------------------------------------------
+
+
+class Budget:
+    """How long the summary may take, and how fast this Mac and model turn out to be.
+
+    Speeds come from the server's own timings in every answer (tokens read and written and
+    the milliseconds each took), so after the first block the estimates are measured, not
+    assumed. `pressure` says what the remaining steps must give up to finish in time:
+    nothing, the check of the blocks, or part of the detail. Without a limit it only measures.
+    """
+
+    # Until measured: a base Apple Silicon Mac with a small MoE model, on the slow side.
+    DEFAULT_PROMPT_SPEED = 300.0  # tokens read per second
+    DEFAULT_PREDICT_SPEED = 15.0  # tokens written per second
+    # Register of notes: characters per token (Russian, numbers), kept low to be safe.
+    REGISTER_CHARS_PER_TOKEN = 2.0
+    # Model switches, checkpoints, the pause between stages.
+    OVERHEAD = 10.0
+
+    def __init__(self, seconds=0, parallel=1):
+        self.limit = seconds or None
+        self.parallel = max(1, parallel)
+        self.started = clock()
+        self.lock = threading.Lock()
+        self.prompt_tokens = self.prompt_seconds = 0.0
+        self.predicted_tokens = self.predicted_seconds = 0.0
+        self.notes_time = self.check_time = 0.0
+        self.notes_chars = 0
+        self.finished = 0  # blocks whose notes (and check, if any) are done
+        self.checked = 0
+        self.checks_skipped = self.terse_blocks = self.cut_blocks = 0
+        self.final_tokens = None
+
+    # -- measurements --------------------------------------------------------------------------
+
+    def observe(self, timings):
+        """llama-server's `timings` of one answer (the MLX engine reports the same fields)."""
+        if not isinstance(timings, dict):
+            return
+        with self.lock:
+            self.prompt_tokens += float(timings.get("prompt_n") or 0)
+            self.prompt_seconds += float(timings.get("prompt_ms") or 0) / 1000
+            self.predicted_tokens += float(timings.get("predicted_n") or 0)
+            self.predicted_seconds += float(timings.get("predicted_ms") or 0) / 1000
+
+    def measured(self):
+        return self.predicted_tokens >= 32 and self.predicted_seconds > 0
+
+    def prompt_speed(self):
+        if self.prompt_tokens >= 256 and self.prompt_seconds > 0:
+            return self.prompt_tokens / self.prompt_seconds
+        return self.DEFAULT_PROMPT_SPEED
+
+    def predict_speed(self):
+        return (
+            self.predicted_tokens / self.predicted_seconds if self.measured() else self.DEFAULT_PREDICT_SPEED
+        )
+
+    def cost(self, prompt_tokens, output_tokens):
+        """Expected seconds of one request."""
+        return prompt_tokens / self.prompt_speed() + output_tokens / self.predict_speed()
+
+    def notes_done(self, seconds, chars):
+        with self.lock:
+            self.notes_time += seconds or 0.0
+            self.notes_chars += chars
+
+    def check_done(self, seconds):
+        with self.lock:
+            self.check_time += seconds or 0.0
+            self.checked += 1
+
+    def block_finished(self):
+        with self.lock:
+            self.finished += 1
+
+    # -- the clock -----------------------------------------------------------------------------
+
+    def elapsed(self):
+        return clock() - self.started
+
+    def left(self):
+        return None if self.limit is None else self.limit - self.elapsed()
+
+    def register_tokens(self, total_blocks):
+        """Tokens of the register the assembly and the final text will read."""
+        done = max(1, self.finished)
+        chars = self.notes_chars * max(total_blocks, done) / done
+        return chars / self.REGISTER_CHARS_PER_TOKEN + 400
+
+    def tail(self, total_blocks, final_tokens):
+        """Seconds the assembly and the final text are expected to take after the blocks.
+
+        Both read the register; the assembly writes nine theses and the revisions, the final
+        text usually well under its room — the estimates are typical answers, not the caps.
+        """
+        register = self.register_tokens(total_blocks)
+        assembly = min(ASSEMBLE_TOKENS, 500 + register / 10)
+        return self.cost(register, assembly) + self.cost(register, final_tokens * 0.6) + self.OVERHEAD
+
+    def remaining(self, total_blocks, final_tokens, checks=True):
+        """Expected seconds to the end from now, with or without checks of the remaining blocks."""
+        left_blocks = max(0, total_blocks - self.finished)
+        if self.finished:
+            per_block = self.notes_time / self.finished
+            if checks:
+                per_block += self.check_time / self.checked if self.checked else per_block * 0.4
+            blocks = math.ceil(left_blocks / self.parallel) * per_block
+        else:
+            blocks = 0.0  # nothing to extrapolate from yet
+        return blocks + self.tail(total_blocks, final_tokens)
+
+    def pressure(self, total_blocks, final_tokens):
+        """0 — as planned; 1 — no checks for the remaining blocks; 2 — terse notes as well."""
+        if self.limit is None or not self.finished or self.finished >= total_blocks:
+            return 0
+        if self.elapsed() + self.remaining(total_blocks, final_tokens) <= self.limit:
+            return 0
+        if self.elapsed() + self.remaining(total_blocks, final_tokens, checks=False) <= self.limit:
+            return 1
+        return 2
+
+    def eta(self, total_blocks, final_tokens):
+        """'осталось ≈ 4 мин' once a block has been measured, else ''."""
+        if not self.finished or self.finished >= total_blocks:
+            return ""
+        checks = self.pressure(total_blocks, final_tokens) < 1
+        seconds = self.remaining(total_blocks, final_tokens, checks)
+        return " · осталось ≈ " + ("меньше минуты" if seconds < 60 else f"{math.ceil(seconds / 60)} мин")
+
+    def final_plan(self, wanted, total_blocks):
+        """(answer tokens, continuations) for the final text in the time that is left."""
+        if self.limit is None:
+            return wanted, None
+        register = self.register_tokens(total_blocks)
+        seconds = (self.left() or 0) - self.cost(register, 0) - self.OVERHEAD
+        fit = int(seconds * self.predict_speed())
+        self.final_tokens = max(FINAL_FLOOR_TOKENS, min(wanted, fit))
+        return self.final_tokens, 1
+
+    def report(self):
+        measured = self.measured()
+        return dict(
+            limit=int(self.limit or 0),
+            elapsed=round(self.elapsed(), 1),
+            checks_skipped=self.checks_skipped,
+            terse_blocks=self.terse_blocks,
+            cut_blocks=self.cut_blocks,
+            final_tokens=self.final_tokens,
+            prompt_speed=round(self.prompt_speed()) if measured else None,
+            predict_speed=round(self.predict_speed(), 1) if measured else None,
+        )
+
+
 # -- the pipeline ------------------------------------------------------------------------------
 
 
 def summarize_notes(store, mid, settings, progress, client, dropped=(set(), 0.0)):
-    from .local_llm import final_input_chars
+    from .local_llm import final_input_chars, final_output_tokens
 
     system = notes_system(settings)
     preparation = dict(pruned=0, pruned_seconds=0.0, cleaned_percent=0)
     rows = prepared_rows(store, mid, settings, dropped, progress, preparation)
-    planned = planned_blocks(rows, settings.input_chars)
+    budget = Budget(settings.summary_minutes * 60, getattr(client, "parallel", 1))
+    client.observe = budget.observe
+    client.expected = budget.cost
+    planned = planned_blocks(rows, settings.input_chars, budget.parallel)
     total = len(planned)
+    wanted_final = final_output_tokens(settings)
     identity = NOTES_VERSION + model_identity(settings) + str(settings.max_output_tokens) + system
 
     def block_notes(index, block, before, after, node=1, depth=0):
@@ -539,25 +734,42 @@ def summarize_notes(store, mid, settings, progress, client, dropped=(set(), 0.0)
 
         if cached.get("split"):
             return split("Продолжаю обработку частей блока.")
+        # Short on time: terse notes, and an answer cut off by its limit is kept as it is.
+        terse = budget.pressure(total, wanted_final) >= 2
+        started = clock()
         try:
             if "draft" in cached:
                 draft = validated(cached["draft"])
             else:
+                if terse:
+                    budget.terse_blocks += 1
                 draft = ask(
                     client,
                     system,
-                    transcript + NOTES_PROMPT,
+                    transcript + NOTES_PROMPT + (TERSE_NOTE if terse else ""),
                     NOTES_GRAMMAR,
                     lambda text: validated(parse_notes(text)),
-                    notes_tokens(settings, block),
+                    notes_tokens(settings, block, terse),
+                    lenient=terse,
+                    on_cut=lambda: setattr(budget, "cut_blocks", budget.cut_blocks + 1),
                 )
+                budget.notes_done(clock() - started, len(notes_text(draft)))
         except (SummaryTooLong, SummaryFormatError) as exc:
             return split(exc)
+        if "draft" in cached:
+            budget.notes_done(None, len(notes_text(draft)))
         store.save_checkpoint(mid, phase, part, dict(digest=digest, draft=draft))
         if not draft["items"]:
             store.save_checkpoint(mid, phase, part, dict(digest=digest, draft=draft, parts=[draft]))
             return [draft]
+        if budget.pressure(total, wanted_final) >= 1:
+            budget.checks_skipped += 1
+            store.save_checkpoint(
+                mid, phase, part, dict(digest=digest, draft=draft, parts=[draft], check=dict(skipped=True))
+            )
+            return [draft]
         progress(f"Проверка блока {index + 1} из {total} по расшифровке…")
+        started = clock()
         try:
             checked, receipt = ask(
                 client,
@@ -568,6 +780,7 @@ def summarize_notes(store, mid, settings, progress, client, dropped=(set(), 0.0)
                 check_tokens(settings, draft),
                 minimum=512,
             )
+            budget.check_done(clock() - started)
         except (ValueError, RuntimeError, httpx.HTTPError):
             return [
                 dict(
@@ -583,9 +796,19 @@ def summarize_notes(store, mid, settings, progress, client, dropped=(set(), 0.0)
         )
         return [checked]
 
+    def block(index, *rest):
+        results = block_notes(index, *rest)
+        budget.block_finished()
+        return results
+
     started = time.monotonic()
-    produced = run_blocks(planned, block_notes, client, progress)
+    produced = run_blocks(planned, block, client, progress, lambda: budget.eta(total, wanted_final))
     timings = dict(blocks=round(time.monotonic() - started, 1))
+    if budget.measured():
+        progress(
+            f"Скорость модели: читает ≈ {round(budget.prompt_speed())} ток/с, "
+            f"пишет ≈ {budget.predict_speed():.0f} ток/с"
+        )
     maps, ledger, parts = ledger_and_parts(produced)
     started = time.monotonic()
     built = dict(
@@ -604,7 +827,10 @@ def summarize_notes(store, mid, settings, progress, client, dropped=(set(), 0.0)
     else:
         brief = assemble(store, mid, settings, client, progress, system, built, final_input_chars(settings))
     timings["assembly"] = round(time.monotonic() - started, 1)
-    return finish_summary(store, mid, settings, client, progress, brief, built, timings)
+    final = budget.final_plan(wanted_final, total)
+    result = finish_summary(store, mid, settings, client, progress, brief, built, timings, final)
+    result["budget"] = budget.report()
+    return result
 
 
 def assemble(store, mid, settings, client, progress, system, built, budget):

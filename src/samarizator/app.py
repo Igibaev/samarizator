@@ -1433,7 +1433,7 @@ class Window(QMainWindow):
             steps = work.summary_steps(message, total, fmt, final_only=final_only)
             title = "Пересоздаётся итоговый текст" if final_only else "Создаётся сводка"
             fraction = info["fraction"]
-        left = work.remaining(fraction, elapsed)
+        left = work.remaining(fraction, elapsed, message)
         where = "всё считается на этом Mac"
         self.processing.set(
             title,

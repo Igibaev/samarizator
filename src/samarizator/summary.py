@@ -373,6 +373,9 @@ CONTEXT_MARGIN = 128
 # Fallback when the server cannot tokenize: digits and JSON punctuation make Russian
 # meeting rows as dense as ~1.6 characters per token in Qwen and Gemma tokenizers.
 ESTIMATE_CHARS_PER_TOKEN = 1.5
+# A request is given up as stuck after this many times its expected duration, plus a grace.
+STUCK_FACTOR = 3
+STUCK_GRACE = 30
 
 # llama.cpp's grammars/json.gbnf: the sampler can only produce a JSON object. Whitespace is
 # limited to single spaces: indentation and line breaks cost tokens and say nothing. Passed as a
@@ -410,7 +413,14 @@ class LocalClient:
         self.tokenizer = None  # unknown until the first /tokenize call
         # Called before each generation; a summary job pauses here while the Mac is hot.
         self.pace = lambda: None
+        # Receives the server's timings of every answer (tokens read and written, and how
+        # long each took): the summary plans its remaining steps by the measured speed.
+        self.observe = None
+        # Expected seconds of a request, (prompt tokens, answer tokens) → seconds, once the
+        # speed is known; a request that takes three times longer is given up as stuck.
+        self.expected = None
         self.counted = {}  # system prompts repeat in every request
+        self.counts = {}
         self.client = httpx.Client(
             trust_env=False,
             follow_redirects=False,
@@ -429,7 +439,21 @@ class LocalClient:
         return headers
 
     def count_tokens(self, text):
-        """Tokens by the model's own tokenizer; a deliberately high estimate if it is unavailable."""
+        """Tokens by the model's own tokenizer; a deliberately high estimate if it is unavailable.
+
+        The last few texts are remembered: a request is measured for its room and for its
+        expected duration, and the system prompt repeats in every request.
+        """
+        key = hash(text)
+        if key in self.counts:
+            return self.counts[key]
+        count = self._count_tokens(text)
+        if len(self.counts) > 64:
+            self.counts.clear()
+        self.counts[key] = count
+        return count
+
+    def _count_tokens(self, text):
         if self.tokenizer is not False:
             try:
                 response = self.client.post(
@@ -444,26 +468,39 @@ class LocalClient:
             self.tokenizer = False
         return math.ceil(len(text) / ESTIMATE_CHARS_PER_TOKEN)
 
+    def prompt_tokens(self, system, prompt):
+        """Tokens a request takes before the answer."""
+        if system not in self.counted:
+            self.counted[system] = self.count_tokens(system)
+        return self.counted[system] + self.count_tokens(prompt) + TEMPLATE_TOKENS
+
     def room(self, system, prompt, wanted, minimum):
         """Answer tokens that fit next to this prompt in the model's context window.
 
         A request that leaves less than `minimum` is refused up front with SummaryTooLong,
         so the caller splits its input instead of getting an answer cut off mid-way.
         """
-        if system not in self.counted:
-            self.counted[system] = self.count_tokens(system)
-        used = self.counted[system] + self.count_tokens(prompt) + TEMPLATE_TOKENS
-        free = self.n_ctx - used - CONTEXT_MARGIN
+        free = self.n_ctx - self.prompt_tokens(system, prompt) - CONTEXT_MARGIN
         if free < min(wanted, minimum):
             raise SummaryTooLong("Запрос не поместился в контекст модели.")
         return min(wanted, free)
 
-    def _choice(self, payload, raw=False):
+    def timeout(self, prompt_tokens, max_tokens):
+        """Seconds to wait for one answer: generous against a stuck server, never a whole hour."""
+        if self.expected is None:
+            return httpx.Timeout(3600, connect=10)
+        return httpx.Timeout(STUCK_GRACE + STUCK_FACTOR * self.expected(prompt_tokens, max_tokens), connect=10)
+
+    def _choice(self, payload, raw=False, prompt_tokens=0):
         self.pace()
         headers = self.headers()
+        timeout = self.timeout(prompt_tokens, payload.get("max_tokens") or 0)
         for attempt in range(3):
             try:
-                response = self.client.post(self.url, headers=headers, json=payload)
+                response = self.client.post(self.url, headers=headers, json=payload, timeout=timeout)
+            except httpx.TimeoutException:
+                # Closing the connection frees the slot: llama-server cancels an abandoned task.
+                raise SummaryTooLong("Модель не ответила за отведённое время; блок будет разделён.") from None
             except httpx.HTTPError:
                 if attempt == 2:
                     raise RuntimeError("Локальная модель сводок перестала отвечать.") from None
@@ -477,21 +514,27 @@ class LocalClient:
             if len(response.content) > 4_000_000:
                 raise ValueError("Ответ модели слишком большой.")
             try:
-                choice = response.json()["choices"][0]
+                data = response.json()
+                choice = data["choices"][0]
                 content = choice["message"]["content"]
             except (KeyError, IndexError, TypeError, ValueError):
                 raise RuntimeError("Локальная модель вернула ответ в неожиданном формате.") from None
             if not isinstance(content, str):
                 raise SummaryFormatError("Модель вернула нетекстовый ответ.")
+            if self.observe is not None and isinstance(data.get("timings"), dict):
+                self.observe(data["timings"])
             content = SPECIAL_TOKENS.sub("", THINKING.sub("", content))
             return choice.get("finish_reason"), content if raw else content.strip()
         raise RuntimeError("Локальная модель сводок недоступна.")
 
     def _payload(self, system, prompt, max_tokens, json_mode, minimum=1024, grammar=None):
+        """(request body, prompt tokens)."""
+        room = self.room(system, prompt, max_tokens, minimum)
+        used = self.prompt_tokens(system, prompt)
         payload = dict(
             temperature=0.2,
             top_p=0.9,
-            max_tokens=self.room(system, prompt, max_tokens, minimum),
+            max_tokens=room,
             messages=[dict(role="system", content=system), dict(role="user", content=prompt)],
             chat_template_kwargs=dict(enable_thinking=False),
         )
@@ -499,11 +542,11 @@ class LocalClient:
             payload["grammar"] = grammar or JSON_GRAMMAR
         else:
             payload["stop"] = END_MARKERS
-        return payload
+        return payload, used
 
     def complete(self, prompt, allowed):
         finish, content = self._choice(
-            self._payload(self.system, prompt, self.settings.max_output_tokens, json_mode=True)
+            *self._payload(self.system, prompt, self.settings.max_output_tokens, json_mode=True)
         )
         if finish == "length":
             raise SummaryTooLong("Модель не уложилась в лимит ответа; блок будет разделён.")
@@ -513,7 +556,7 @@ class LocalClient:
         """Any JSON object under the grammar, for callers with their own schema (questions)."""
         from .qa import parse_json
 
-        finish, content = self._choice(self._payload(system, prompt, max_tokens, json_mode=True))
+        finish, content = self._choice(*self._payload(system, prompt, max_tokens, json_mode=True))
         if finish == "length":
             raise SummaryTooLong("Модель не уложилась в лимит ответа.")
         return parse_json(content)
@@ -523,8 +566,8 @@ class LocalClient:
 
         A continuation keeps its leading space or line break: it is glued to a cut-off text.
         """
-        payload = self._payload(system, prompt, max_tokens, False, minimum, grammar)
-        finish, content = self._choice(payload, raw=True)
+        payload, used = self._payload(system, prompt, max_tokens, False, minimum, grammar)
+        finish, content = self._choice(payload, raw=True, prompt_tokens=used)
         content = content.rstrip() if continuation else content.strip()
         if content.startswith("```"):
             lines = content.splitlines()
@@ -860,7 +903,11 @@ def _summarize(store, mid, settings, progress, client, dropped=(set(), 0.0)):
     result["algorithm"] = settings.summary_algorithm
     timings = result.setdefault("timings", {})
     timings["total"] = round(time.monotonic() - started, 1)
-    progress("Сводка готова за " + duration_text(timings["total"]) + timing_details(timings))
+    line = "Сводка готова за " + duration_text(timings["total"]) + timing_details(timings)
+    budget = result.get("budget") or {}
+    if budget.get("limit") and timings["total"] > budget["limit"] and budget.get("predict_speed"):
+        line += f". Дольше лимита в {budget['limit'] // 60} мин: модель пишет {budget['predict_speed']:.0f} ток/с"
+    progress(line)
     return result
 
 
@@ -898,17 +945,18 @@ def prepared_rows(store, mid, settings, dropped, progress, preparation):
     return rows
 
 
-def run_blocks(planned, work, client, progress):
+def run_blocks(planned, work, client, progress, suffix=lambda: ""):
     """work(index, *block) for every planned block; several at once when the server has slots.
 
-    Results keep the order of the recording whatever order the blocks finish in.
+    Results keep the order of the recording whatever order the blocks finish in. `suffix()`
+    is added to the progress line after each block — the time still expected, for instance.
     """
     total = len(planned)
     workers = max(1, min(getattr(client, "parallel", 1), total))
     if workers == 1:
         produced = []
         for index, block in enumerate(planned):
-            progress(f"Разбор записи: блок {index + 1} из {total}")
+            progress(f"Разбор записи: блок {index + 1} из {total}{suffix()}")
             produced.append(work(index, *block))
         return produced
     progress(f"Разбор записи: блок 1 из {total} · {workers} одновременно")
@@ -919,7 +967,7 @@ def run_blocks(planned, work, client, progress):
         result = work(index, *block)
         with lock:
             done.append(index)
-            progress(f"Разбор записи: блок {len(done)} из {total} · {workers} одновременно")
+            progress(f"Разбор записи: блок {len(done)} из {total} · {workers} одновременно{suffix()}")
         return result
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -1075,10 +1123,11 @@ def fallback_brief(ledger, maps, reason):
     )
 
 
-def finish_summary(store, mid, settings, client, progress, brief, built, timings=None):
+def finish_summary(store, mid, settings, client, progress, brief, built, timings=None, final=None):
     """The stored result: both summaries, warnings, and the final text written from them.
 
-    `built` holds ledger, maps, resolved, parts, preparation, resolve_warnings and levels.
+    `built` holds ledger, maps, resolved, parts, preparation, resolve_warnings and levels;
+    `final` — (answer tokens, continuations) when the remaining time bounds the final text.
     """
     result = package_summary(brief, built["ledger"], built["maps"], built["resolved"], built["parts"])
     result["preparation"] = built["preparation"]
@@ -1092,7 +1141,8 @@ def finish_summary(store, mid, settings, client, progress, brief, built, timings
     result["reduce_levels"] = built["levels"]
     times = {row["id"]: row["start"] for row in store.iter_segments(mid)}
     started = time.monotonic()
-    result["final"] = final_document(client, settings, result, times, progress)
+    limit, continuations = final or (None, None)
+    result["final"] = final_document(client, settings, result, times, progress, limit, continuations)
     result["timings"] = dict(timings or {}, final=round(time.monotonic() - started, 1))
     return result
 
@@ -1320,12 +1370,13 @@ def join_continuation(text, more):
     return text + more
 
 
-def final_document(client, settings, summary, times, progress=lambda *_: None):
+def final_document(client, settings, summary, times, progress=lambda *_: None, limit=None, continuations=None):
     """Markdown in the user's format. Optional: a failure here never discards the summaries.
 
     Every request is measured against the model's context window: the material shrinks
     until the answer has room, and a text cut off by the answer limit is continued from
-    where it stopped, so a long protocol is not silently truncated.
+    where it stopped, so a long protocol is not silently truncated. `limit` is a smaller
+    answer room when the summary has little time left; `continuations` likewise.
     """
     from .local_llm import final_input_chars, final_output_tokens
 
@@ -1337,7 +1388,8 @@ def final_document(client, settings, summary, times, progress=lambda *_: None):
     if extra := settings.summary_instructions.strip():
         system += USER_INSTRUCTIONS + extra
     progress("Итоговый текст по выбранному формату…")
-    wanted = final_output_tokens(settings)
+    wanted = min(final_output_tokens(settings), limit) if limit else final_output_tokens(settings)
+    continuations = FINAL_CONTINUATIONS if continuations is None else continuations
     # Clients that cannot measure (test doubles) accept the most detailed material.
     room = getattr(client, "room", lambda *_: wanted)
     source = prompt = None
@@ -1357,7 +1409,7 @@ def final_document(client, settings, summary, times, progress=lambda *_: None):
                 "в настройках или выберите модель с большей памятью."
             )
         text, truncated = client.complete_text(system, prompt, wanted, FINAL_MIN_TOKENS)
-        while truncated and rounds < FINAL_CONTINUATIONS:
+        while truncated and rounds < continuations:
             rounds += 1
             progress(f"Итоговый текст длинный — дописываю продолжение ({rounds})…")
             follow = prompt + CONTINUE_PROMPT.format(tail=text[-CONTINUE_TAIL_CHARS:])
