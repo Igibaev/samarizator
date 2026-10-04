@@ -1,9 +1,9 @@
 # Builds the portable Samarizator.app / .dmg on a GitHub macOS runner.
-# Run manually (Actions → Build macOS app → Run workflow; the file must be on the default
-# branch for that), push a tag v*, or push to a claude/** branch a commit whose message
-# contains [build-macos] (other pushes skip the job, so they cost no runner time).
-# [release-macos] in the message builds the same way and also publishes a GitHub release:
-# the tag v<version from pyproject.toml> is created on that commit by the release step.
+# Run manually (Actions → Build macOS app → Run workflow), push a tag v*, or push to main or
+# a claude/** branch a commit whose message contains [build-macos] (other pushes skip the
+# job, so they cost no runner time). [release-macos] in the message builds the same way and
+# also publishes a GitHub release: the tag v<version from pyproject.toml> is created on that
+# commit by the release step. The download page (site/, pages.yml) always offers the latest.
 # Without signing secrets the app is ad-hoc signed: it works, but on first launch macOS
 # asks to confirm it in Privacy & Security. With a Developer ID certificate and an
 # app-specific password the build is signed and notarized and opens like any app.
@@ -18,7 +18,7 @@ on:
         default: ""
   push:
     tags: ["v*"]
-    branches: ["claude/**"]
+    branches: ["main", "claude/**"]
 
 permissions:
   contents: write
