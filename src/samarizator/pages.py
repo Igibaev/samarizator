@@ -413,6 +413,8 @@ class FinalPage(QWidget):
         for key, title in self.titles.items():
             action = menu.addAction(title + ("…" if key == "custom" else ""))
             action.triggered.connect(lambda checked=False, k=key: self.formatChosen.emit(k))
+        # Not in the menu: a text the user brought back from an external AI.
+        self.titles["external"] = "Ответ внешней нейросети"
         self.format.setMenu(menu)
         head.addWidget(self.format)
         head.addStretch(1)
@@ -421,6 +423,10 @@ class FinalPage(QWidget):
         self.warning.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.warning.setStyleSheet("color: #8a4b00; padding: 8px 40px 0 40px;")
         layout.addWidget(self.warning)
+        self.origin = label("", "hint", wrap=True)
+        self.origin.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.origin.setStyleSheet("padding: 8px 40px 0 40px;")
+        layout.addWidget(self.origin)
         # A summary that came out incomplete can be rebuilt from scratch right here.
         self.redo_button = QPushButton("Сделать сводку заново")
         self.redo_button.setFlat(True)
@@ -433,6 +439,14 @@ class FinalPage(QWidget):
     def set(self, final, format_key):
         final = final or {}
         self.state.setText("✓ Сводка готова" if final.get("text") else "Итогового текста нет")
+        external = final.get("source") == "external"
+        self.origin.setVisible(external)
+        if external:
+            self.state.setText("✓ Сохранён ответ внешней нейросети")
+            self.origin.setText(
+                "Этот текст написала внешняя нейросеть по обезличенной копии записи; имена и номера "
+                "возвращены из таблицы замен на этом Mac. Сверьте важное с расшифровкой."
+            )
         self.format.setText(self.titles.get(format_key, self.titles["custom"]) + "  ▾")
         self.warning.setText(" ".join((final.get("warning") or "").split()))
         self.warning.setVisible(bool(final.get("warning")))

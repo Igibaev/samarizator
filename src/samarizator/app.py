@@ -65,6 +65,7 @@ from .settings_dialog import (
     recommended,
 )
 from .store import Store
+from .summary import model_summary
 from .summary_page import SummaryPage
 from .summary_prompts import DEFAULT_FORMAT, FINAL_FORMATS
 from .theme import ACCENT, GREEN, GREY, ORANGE, RED, SECONDARY, apply_theme, icon
@@ -377,6 +378,7 @@ class Window(QMainWindow):
         self.summary_page.playGroup.connect(self.play_evidence_group)
         self.summary_page.taskToggled.connect(self.toggle_task)
         self.privacy_page = PrivacyPage(self.store)
+        self.privacy_page.answerSaved.connect(self.external_answer_saved)
         for page in [
             self.welcome,
             self.empty,
@@ -858,6 +860,15 @@ class Window(QMainWindow):
             if dialog.exec():
                 self.settings = dialog.settings
             return
+        if not model_summary(self.current_summary()):
+            QMessageBox.information(
+                self,
+                "Нужна сводка модели",
+                "Итоговый текст в другом формате пишет модель на этом Mac по своей сводке. Сейчас у "
+                "записи только ответ внешней нейросети — нажмите «Создать сводку».",
+            )
+            self.final_page.set(self.current_final(), "external")
+            return
         if key == current:
             return
         title = FINAL_FORMATS[key][0]
@@ -879,11 +890,32 @@ class Window(QMainWindow):
             return
         self.start("final")
 
-    def current_final(self):
+    def external_answer_saved(self, mid):
+        """The answer of an external AI is now the record's final text: show it, update the note."""
+        meeting = self.store.meeting(mid)
+        note = "Ответ внешней нейросети сохранён как итоговый текст записи."
+        if meeting["summary"] and not self.job:
+            from .knowledge import export
+
+            try:
+                export(self.store, mid, Settings.from_dict(json.loads(meeting["settings"])).resolved())
+                note += " Заметка Obsidian обновлена."
+            except (OSError, ValueError) as exc:
+                note += f" Заметку обновить не удалось: {exc}"
+        if mid == self.mid:
+            self.view = "final"
+            self.load_detail()
+        self.refresh_list()
+        self.progress.setText(note)
+
+    def current_summary(self):
         meeting = self.store.meeting(self.mid) if self.mid else None
         if not meeting or not meeting["summary"]:
             return {}
-        return json.loads(meeting["summary"]).get("final") or {}
+        return json.loads(meeting["summary"])
+
+    def current_final(self):
+        return self.current_summary().get("final") or {}
 
     def toggle_task(self, mid, key, done):
         state = dict(self.store.checkpoint(mid, "tasks-done", 0) or {})
@@ -1266,7 +1298,10 @@ class Window(QMainWindow):
                 times = {r["id"]: r["start"] for r in self.store.iter_segments(self.mid)}
                 self.times = times
                 self.chat_panel.show_meeting(
-                    self.mid, times, self.store.checkpoint(self.mid, "chat", 0) or []
+                    self.mid,
+                    times,
+                    self.store.checkpoint(self.mid, "chat", 0) or [],
+                    has_summary=model_summary(result),
                 )
                 self.summary_page.show_summary(
                     self.mid, result, times, self.store.checkpoint(self.mid, "tasks-done", 0) or {}
@@ -1925,6 +1960,8 @@ class Window(QMainWindow):
         self.live_button.setIcon(icon("stop", RED) if recording else icon("mic"))
         complete = ready and bool(self.store.checkpoint(self.mid, "asr_complete", 0))
         summarized = ready and bool(meeting["summary"])
+        # A record that has only the answer of an external AI can still get the model's summary.
+        modelled = summarized and model_summary(json.loads(meeting["summary"]))
         here = ready and (
             (self.job is not None and self.active_id == self.mid)
             or (recording and self.recording_id == self.mid)
@@ -1951,7 +1988,7 @@ class Window(QMainWindow):
         explain(self.retry_action, ready and not busy and complete, "")
         explain(self.rerun_button, ready and not busy, working if busy else pick)
         explain(
-            self.regenerate_button, summarized and not busy, working if busy else "Сначала создайте сводку."
+            self.regenerate_button, modelled and not busy, working if busy else "Сначала создайте сводку."
         )
         explain(
             self.redo_action,
@@ -1975,8 +2012,8 @@ class Window(QMainWindow):
         for button in (self.transcribe, self.summarize):
             primary(button, button is step and button.isEnabled())
         self.transcribe.setVisible(ready and not complete and not here)
-        self.summarize.setVisible(ready and complete and not summarized and not here)
-        resumable = bool(complete) and not summarized and self.store.summary_progress(self.mid)
+        self.summarize.setVisible(ready and complete and not modelled and not here)
+        resumable = bool(complete) and not modelled and self.store.summary_progress(self.mid)
         self.summarize.setText("Продолжить сводку" if resumable else "Создать сводку")
         self.obsidian.setVisible(ready and summarized and not here)
         self.cancel.setVisible(here and not recording)

@@ -149,6 +149,17 @@ class SummaryPage(QScrollArea):
         self.column.takeAt(self.column.count() - 1)  # the stretch clear() added
         self.mid, self.times = mid, times
         brief, detailed = summary_views(summary)
+        if summary.get("source") == "external":
+            note = Banner("info")
+            note.set_text(
+                "Сводку написала внешняя нейросеть",
+                "Её текст — во вкладке «Итоговый текст». Решения и задачи со ссылками на реплики "
+                "составляет модель на этом Mac: нажмите «Создать сводку» — ответ внешней нейросети "
+                "будет заменён сводкой модели.",
+            )
+            self.column.addWidget(note)
+            self.column.addStretch(1)
+            return
         resolved = list(detailed.get("resolved") or [])
         done = done or {}
         warnings = [
