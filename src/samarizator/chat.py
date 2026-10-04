@@ -1,8 +1,13 @@
-"""«Вопросы по сводке»: a side panel that answers from the summary and nothing else.
+"""«Вопросы по записи»: a side panel that answers from the summary or from the transcript.
+
+By the summary the model sees only the numbered points of the summary; by the transcript it
+sees the recognised speech itself (qa.ask_transcript). Either way an answer is shown only
+with valid references, and nothing leaves the Mac.
 
 The summary model is loaded on the first question and kept while the conversation goes
 on (a reload takes seconds to a minute); it is released after a quiet period, before a
 summary job starts and when the window closes, so two copies never share the memory.
+A question about a transcript may restart it with a larger window, as memory allows.
 """
 
 import re
@@ -25,14 +30,30 @@ from . import qa
 from .config import data_dir
 from .summary_page import EvidenceButton, sources_tooltip
 from .theme import ACCENT, SECONDARY, icon
-from .widgets import label, primary
+from .widgets import SegmentedControl, label, primary
 
 IDLE_MINUTES = 10
-SUGGESTIONS = [
-    "Какие решения приняли?",
-    "Кто что должен сделать и к какому сроку?",
-    "Что осталось нерешённым?",
-]
+SUMMARY, TRANSCRIPT = "summary", "transcript"
+SUGGESTIONS = {
+    SUMMARY: [
+        "Какие решения приняли?",
+        "Кто что должен сделать и к какому сроку?",
+        "Что осталось нерешённым?",
+    ],
+    TRANSCRIPT: [
+        "Какие суммы и числа назывались?",
+        "Что говорили о сроках?",
+        "Какие вопросы задавали и что на них ответили?",
+    ],
+}
+NOTES = {
+    SUMMARY: "Отвечает только по сводке этой записи: без интернета и знаний извне.",
+    TRANSCRIPT: (
+        "Отвечает по расшифровке — по тому, что прозвучало, со ссылками на реплики. "
+        "Говорящие не подписаны. Первый вопрос дольше: модель читает запись целиком."
+    ),
+}
+THINKING = {SUMMARY: "Ищу ответ в сводке…", TRANSCRIPT: "Ищу ответ в расшифровке…"}
 
 
 class ChatEngine(QObject):
@@ -42,32 +63,43 @@ class ChatEngine(QObject):
         super().__init__(parent)
         self.server = None
         self.model = None
+        self.context = 0
+        # The recording whose transcript the server has just read: it is still in its cache.
+        self.read = None
         self.lock = threading.Lock()
         self.idle = QTimer(self)
         self.idle.setSingleShot(True)
         self.idle.timeout.connect(self.stop)
 
-    def client(self, settings, progress):
-        """Called from the worker thread under the lock."""
-        from .local_llm import LlamaServer, check_fits
+    def client(self, settings, progress, context=None):
+        """Called from the worker thread under the lock.
+
+        `context` — the window a transcript question needs; the server is restarted with it
+        only when the running one is smaller.
+        """
+        from .local_llm import LlamaServer, check_fits, context_tokens
         from .summary import LocalClient
 
-        if self.server is None or self.model != settings.llm_model:
+        context = max(context or 0, context_tokens(settings))
+        if self.server is None or self.model != settings.llm_model or self.context < context:
             self.stop_locked()
             settings.validate(llm=True)
             check_fits(settings)
             work = data_dir() / "work" / "chat"
             work.mkdir(parents=True, exist_ok=True)
             # Questions come one at a time: one slot, no memory for parallel requests.
-            server = LlamaServer(settings, work, progress, slots=1)
+            server = LlamaServer(settings, work, progress, slots=1, ctx_size=context)
             server.__enter__()
-            self.server, self.model = server, settings.llm_model
-        return LocalClient(settings, self.server.url, self.server.key)
+            self.server, self.model, self.context = server, settings.llm_model, context
+        client = LocalClient(settings, self.server.url, self.server.key)
+        client.n_ctx = self.context
+        return client
 
     def touch(self):
         self.idle.start(IDLE_MINUTES * 60 * 1000)
 
     def stop_locked(self):
+        self.read = None
         if self.server is not None:
             self.server.__exit__(None, None, None)
             self.server = None
@@ -86,21 +118,42 @@ class ChatWorker(QThread):
     failed = Signal(str)
     status = Signal(str)
 
-    def __init__(self, engine, settings, summary, times, question, history, title):
+    def __init__(self, engine, settings, summary, times, question, history, title, mode=SUMMARY, rows=()):
         super().__init__()
         self.engine, self.settings = engine, settings
         self.summary, self.times = summary, times
         self.question, self.history, self.title = question, history, title
+        self.mode, self.rows = mode, list(rows)
 
     def run(self):
         try:
             with self.engine.lock:
-                client = self.engine.client(self.settings, self.status.emit)
+                if self.mode == TRANSCRIPT:
+                    from .local_llm import chat_context_tokens
+
+                    lines = qa.transcript_lines(self.rows, self.settings.clean_input)
+                    chars = sum(len(line[1]) + 1 for line in lines)
+                    wanted = chars / qa.TRANSCRIPT_CHARS_PER_TOKEN + 4000
+                    context = chat_context_tokens(self.settings, wanted)
+                    client = self.engine.client(self.settings, self.status.emit, context)
+                else:
+                    client = self.engine.client(self.settings, self.status.emit)
                 try:
-                    budget = self.settings.input_chars * 2
-                    result = qa.ask(
-                        client, self.summary, self.times, self.question, self.history, self.title, budget
-                    )
+                    if self.mode == TRANSCRIPT:
+                        result = qa.ask_transcript(
+                            client,
+                            self.rows,
+                            self.question,
+                            self.history,
+                            self.title,
+                            tidy=self.settings.clean_input,
+                        )
+                    else:
+                        budget = self.settings.input_chars * 2
+                        result = qa.ask(
+                            client, self.summary, self.times, self.question, self.history, self.title, budget
+                        )
+                        result["source"] = SUMMARY
                 finally:
                     client.close()
             self.answered.emit(result)
@@ -145,7 +198,7 @@ def bubble(text, mine):
 class ChatPanel(QFrame):
     """Messages on top, suggestions when empty, the question field at the bottom."""
 
-    ask = Signal(str)
+    ask = Signal(str, str)  # question, SUMMARY or TRANSCRIPT
     cleared = Signal()
     playGroup = Signal(str, object)
 
@@ -157,6 +210,7 @@ class ChatPanel(QFrame):
         self.mid = None
         self.times = {}
         self.busy = False
+        self.has_summary = True
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
@@ -165,19 +219,24 @@ class ChatPanel(QFrame):
         head_box.setContentsMargins(18, 14, 12, 10)
         head_box.setSpacing(2)
         top = QHBoxLayout()
-        top.addWidget(label("Вопросы по сводке", "title"))
+        top.addWidget(label("Вопросы по записи", "title"))
         top.addStretch(1)
         self.clear_button = QPushButton("Очистить")
         self.clear_button.setFlat(True)
         self.clear_button.clicked.connect(self.cleared)
         top.addWidget(self.clear_button)
         head_box.addLayout(top)
-        note = label(
-            "Отвечает только по сводке этой записи: без расшифровки, интернета и знаний извне.",
-            "small",
-            wrap=True,
-        )
-        head_box.addWidget(note)
+        self.source = SegmentedControl()
+        self.source.add(SUMMARY, "По сводке")
+        self.source.add(TRANSCRIPT, "По расшифровке")
+        self.source.changed.connect(self.source_changed)
+        source_row = QHBoxLayout()
+        source_row.setContentsMargins(0, 6, 0, 4)
+        source_row.addWidget(self.source)
+        source_row.addStretch(1)
+        head_box.addLayout(source_row)
+        self.note = label(NOTES[SUMMARY], "small", wrap=True)
+        head_box.addWidget(self.note)
         layout.addWidget(head)
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
@@ -225,8 +284,32 @@ class ChatPanel(QFrame):
                 widget.deleteLater()
         self.thinking = None
 
-    def show_meeting(self, mid, times, history):
-        self.mid, self.times = mid, times
+    @property
+    def mode(self):
+        return self.source.current
+
+    def source_changed(self, key):
+        self.note.setText(NOTES[key])
+        # Fresh suggestions for the other source, if the conversation has not started.
+        for index in range(self.messages.count() - 1):
+            widget = self.messages.itemAt(index).widget()
+            if widget and widget.findChild(QPushButton, "suggestion"):
+                widget.setParent(None)
+                widget.deleteLater()
+                self.add_suggestions()
+                break
+        self.field.setFocus()
+
+    def show_meeting(self, mid, times, history, has_summary=True):
+        """`has_summary` — without a summary only the transcript can be asked."""
+        self.mid, self.times, self.has_summary = mid, times, has_summary
+        self.source.buttons[SUMMARY].setEnabled(has_summary)
+        self.source.buttons[SUMMARY].setToolTip(
+            "По сводке" if has_summary else "Сводки ещё нет — спросите по расшифровке"
+        )
+        if not has_summary and self.mode != TRANSCRIPT:
+            self.source.select(TRANSCRIPT)
+        self.note.setText(NOTES[self.mode])
         self.clear_messages()
         if not history:
             self.add_suggestions()
@@ -242,7 +325,7 @@ class ChatPanel(QFrame):
         column.setContentsMargins(0, 8, 0, 0)
         column.setSpacing(6)
         column.addWidget(label("Например", "caption"))
-        for text in SUGGESTIONS:
+        for text in SUGGESTIONS[self.mode]:
             button = QPushButton(text)
             button.setObjectName("suggestion")
             button.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -264,6 +347,12 @@ class ChatPanel(QFrame):
         frame, box = bubble(turn["a"], mine=False)
         if not turn.get("found"):
             frame.setObjectName("bubbleMuted")
+        if turn.get("source") == TRANSCRIPT:
+            where = "по расшифровке"
+            if turn.get("partial"):
+                where += " · запись длинная, модель читала найденные по словам фрагменты"
+            caption = label(where, "caption", wrap=True)
+            box.insertWidget(0, caption)
         sources = [s for s in turn.get("sources", []) if s.get("evidence")]
         if sources:
             row = QHBoxLayout()
@@ -282,8 +371,8 @@ class ChatPanel(QFrame):
         self.messages.insertWidget(self.messages.count() - 1, holder)
         self.scroll_down()
 
-    def add_thinking(self, text="Ищу ответ в сводке…"):
-        frame, _ = bubble(text, mine=False)
+    def add_thinking(self, text=None):
+        frame, _ = bubble(text or THINKING[self.mode], mine=False)
         frame.setObjectName("bubbleMuted")
         self.thinking = frame
         self.messages.insertWidget(self.messages.count() - 1, frame)
@@ -319,7 +408,7 @@ class ChatPanel(QFrame):
                 widget.deleteLater()
                 break
         self.add_question(text)
-        self.ask.emit(text)
+        self.ask.emit(text, self.mode)
 
     def set_busy(self, busy, note=""):
         self.busy = busy

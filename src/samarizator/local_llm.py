@@ -297,6 +297,25 @@ def memory_estimate_gb(settings, slots=1, compact_kv=False, mlx=False):
     return weights + kv_gb(settings, slots, compact_kv) + SERVER_OVERHEAD_GB
 
 
+# The largest window questions about a transcript get: a two-hour meeting with times.
+CHAT_MAX_CONTEXT = 65536
+
+
+def chat_context_tokens(settings, wanted, total_gb=None):
+    """Window of the question server: `wanted` tokens if this Mac's memory allows, else less.
+
+    Never below the window of the summary itself; the KV cache is planned 8-bit, as the
+    server starts it, with the weights and the server's own overhead within 85% of memory.
+    """
+    base = context_tokens(settings)
+    total_gb = ram_gb() if total_gb is None else total_gb
+    weights = path_size(settings.llm_model) / 1024**3
+    free = (total_gb * 0.85 - weights - SERVER_OVERHEAD_GB) * 1024**3
+    fits = int(free / (KV_BYTES_PER_TOKEN * COMPACT_KV_FACTOR))
+    tokens = max(base, min(int(wanted), CHAT_MAX_CONTEXT, fits))
+    return int(math.ceil(tokens / 1024) * 1024)
+
+
 def parallel_slots(settings, total_gb=None):
     """How many blocks the summary model writes at once.
 

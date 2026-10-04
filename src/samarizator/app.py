@@ -911,11 +911,11 @@ class Window(QMainWindow):
         if shown:
             self.chat_panel.field.setFocus()
 
-    def ask_question(self, question):
+    def ask_question(self, question, mode="summary"):
         if not self.mid:
             return
         meeting = self.store.meeting(self.mid)
-        if not meeting["summary"]:
+        if mode == "summary" and not meeting["summary"]:
             return
         if self.job is not None and self.job.phase in {"summary", "final"}:
             self.chat_panel.drop_thinking()
@@ -925,18 +925,31 @@ class Window(QMainWindow):
             return
         if not self.has_llm() and not self.download_model():
             return
-        history = self.store.checkpoint(self.mid, "chat", 0) or []
+        # Each source keeps its own thread of questions: their reference numbers differ.
+        history = [
+            turn
+            for turn in self.store.checkpoint(self.mid, "chat", 0) or []
+            if turn.get("source", "summary") == mode
+        ]
         loading = "Загружаю модель — первый вопрос дольше…" if not self.chat_engine.loaded else ""
+        if mode == "transcript" and self.chat_engine.read != self.mid:
+            loading = "Модель читает расшифровку целиком — первый вопрос дольше, следующие быстрее…"
+        rows = list(self.store.iter_segments(self.mid)) if mode == "transcript" else []
+        if mode == "transcript" and not rows:
+            self.chat_panel.add_answer(dict(a="Расшифровки ещё нет.", found=False))
+            return
         self.chat_panel.add_thinking()
         self.chat_panel.set_busy(True, loading)
         worker = ChatWorker(
             self.chat_engine,
             Settings(**asdict(self.settings)),
-            json.loads(meeting["summary"]),
+            json.loads(meeting["summary"]) if meeting["summary"] else {},
             dict(self.times),
             question,
             history,
             meeting["title"],
+            mode,
+            rows,
         )
         worker.answered.connect(lambda result, mid=self.mid: self.chat_answered(mid, result))
         worker.failed.connect(self.chat_failed)
@@ -947,6 +960,8 @@ class Window(QMainWindow):
     def chat_answered(self, mid, result):
         self.chat_worker = None
         self.chat_engine.touch()
+        # One slot: a question by the summary replaces the transcript in the server's cache.
+        self.chat_engine.read = mid if result.get("source") == "transcript" else None
         history = list(self.store.checkpoint(mid, "chat", 0) or [])
         history.append(result)
         self.store.save_checkpoint(mid, "chat", 0, history[-50:])
@@ -1267,6 +1282,11 @@ class Window(QMainWindow):
         else:
             self.summary_page.clear()
             self.final_text.clear()
+            # Without a summary the transcript can still be asked about.
+            self.times = {r["id"]: r["start"] for r in self.store.iter_segments(self.mid)}
+            self.chat_panel.show_meeting(
+                self.mid, self.times, self.store.checkpoint(self.mid, "chat", 0) or [], has_summary=False
+            )
         report = []
         plan = self.store.checkpoint(self.mid, "asr-plan", 0) or []
         for i, (start, end) in enumerate(plan):
@@ -1973,8 +1993,10 @@ class Window(QMainWindow):
         self.views.setVisible(ready)
         self.more_button.setVisible(ready)
         self.copy_final_button.setVisible(ready and summarized and self.view == "final")
-        self.ask_button.setVisible(ready and summarized and not here)
-        self.chat_panel.setVisible(ready and summarized and not here and self.ask_button.isChecked())
+        # Questions by the transcript need no summary: the button is there once speech is recognised.
+        askable = ready and (summarized or bool(complete)) and not here
+        self.ask_button.setVisible(askable)
+        self.chat_panel.setVisible(askable and self.ask_button.isChecked())
         self.summary_page.toc_widget.setVisible(not self.chat_panel.isVisibleTo(self))
         index = self.table.currentRow()
         has_row = ready and 0 <= index < len(self.visible_rows)
