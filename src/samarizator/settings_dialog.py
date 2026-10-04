@@ -451,6 +451,19 @@ class SettingsDialog(QDialog):
         row.addStretch(1)
         layout.addLayout(row)
         engine = Group(layout, "Движок сводок")
+        algorithm = QComboBox()
+        algorithm.addItem("Быстрый — конспект", "notes")
+        algorithm.addItem("Классический — для сравнения", "classic")
+        algorithm.setCurrentIndex(max(0, algorithm.findData(s.summary_algorithm)))
+        self.fields["summary_algorithm"] = algorithm
+        engine.row(
+            "Алгоритм сводки",
+            algorithm,
+            subtitle=(
+                "Быстрый: модель пишет короткий конспект, проверяет его по уже прочитанной расшифровке "
+                "и собирает сводку за один заход — примерно вдвое быстрее. Классический: прежний способ."
+            ),
+        )
         engine_choice = QComboBox()
         engine_choice.addItem("llama.cpp — стабильный", "llama")
         engine_choice.addItem("MLX — быстрее на Apple Silicon (экспериментально)", "mlx")

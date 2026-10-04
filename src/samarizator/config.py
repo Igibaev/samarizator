@@ -61,6 +61,9 @@ class Settings:
     # "llama" — llama.cpp (stable); "mlx" — Apple MLX (experimental, falls back to llama.cpp).
     llm_engine: str = "llama"
     mlx_model: str = ""  # folder of an MLX model; the GGUF model stays for questions and fallback
+    # "notes" — short notes per block, checked against the cached transcript, assembled in one
+    # request; "classic" — JSON registers reduced level by level (slower, kept for comparison).
+    summary_algorithm: str = "notes"
     # Saved-settings format; older files are migrated in from_dict().
     version: int = SETTINGS_VERSION
 
@@ -83,6 +86,8 @@ class Settings:
     def validate(self, llm=False):
         if self.llm_engine not in {"llama", "mlx"}:
             raise ValueError("Движок сводок: llama.cpp или MLX.")
+        if self.summary_algorithm not in {"notes", "classic"}:
+            raise ValueError("Алгоритм сводки: быстрый (конспект) или классический.")
         if not 1 <= self.beam_size <= 8 or len(self.glossary) > 800:
             raise ValueError("Beam size: 1–8; словарь терминов: не более 800 символов.")
         if self.live_source not in {"microphone", "system", "both"}:

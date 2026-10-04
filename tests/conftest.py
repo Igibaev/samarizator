@@ -9,7 +9,8 @@ def meeting(tmp_path, monkeypatch):
     monkeypatch.setenv("SAMARIZATOR_HOME", str(tmp_path / "home"))
     source = tmp_path / "recording.wav"
     source.write_bytes(b"fixture")
-    settings = Settings(vault=str(tmp_path / "vault"))
+    # Pipeline tests written for the JSON registers; the notes algorithm has its own tests.
+    settings = Settings(vault=str(tmp_path / "vault"), summary_algorithm="classic")
     store = Store()
     mid = store.create(source, settings)
     return store, mid, settings

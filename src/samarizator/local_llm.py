@@ -22,7 +22,15 @@ import psutil
 
 from .bundle import tool
 from .config import data_dir
-from .summary_prompts import FINAL_SYSTEM, MAP_PROMPT, REVIEW_PROMPT, SYSTEM
+from .summary_prompts import (
+    ASSEMBLE_PROMPT,
+    CHECK_PROMPT,
+    FINAL_SYSTEM,
+    MAP_PROMPT,
+    NOTES_SYSTEM,
+    REVIEW_PROMPT,
+    SYSTEM,
+)
 
 
 @dataclass(frozen=True)
@@ -256,7 +264,14 @@ def context_tokens(settings):
     extraction = extraction / CHARS_PER_TOKEN + settings.max_output_tokens
     final = len(FINAL_SYSTEM) + user + len(settings.final_prompt) + 2000 + final_input_chars(settings)
     final = final / CHARS_PER_TOKEN + final_output_tokens(settings)
-    return min(131072, int(math.ceil(max(extraction, final) / 1024) * 1024))
+    # Notes algorithm: the check reads the block, its context and the notes (at most one answer
+    # long); the assembly reads the register of the whole meeting, as long as the final material.
+    check = len(NOTES_SYSTEM) + user + len(CHECK_PROMPT) + settings.input_chars
+    check = check / CHARS_PER_TOKEN + 2 * settings.max_output_tokens
+    assembly = len(NOTES_SYSTEM) + user + len(ASSEMBLE_PROMPT) + final_input_chars(settings)
+    assembly = assembly / CHARS_PER_TOKEN + settings.max_output_tokens
+    needed = max(extraction, final, check, assembly)
+    return min(131072, int(math.ceil(needed / 1024) * 1024))
 
 
 def kv_gb(settings, slots=1, compact_kv=False):

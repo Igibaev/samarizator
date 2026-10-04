@@ -194,3 +194,62 @@ def test_mlx_folders_are_listed_and_deleted_with_the_other_models(tmp_path, monk
     manager.remove(folder)
     assert not folder.exists() and manager.removed_in_use == ["mlx_model"]
     manager.deleteLater()
+
+
+def grammar_matcher(tiny_model):
+    import llguidance
+    import llguidance.hf
+    from transformers import PreTrainedTokenizerFast
+
+    tokenizer = PreTrainedTokenizerFast.from_pretrained(str(tiny_model))
+    lltokenizer = llguidance.hf.from_tokenizer(tokenizer, eos_token=[tokenizer.eos_token_id])
+
+    def accepts(grammar, text):
+        matcher = llguidance.LLMatcher(lltokenizer, llguidance.grammar_from("gbnf", grammar))
+        assert not matcher.is_error(), matcher.get_error()
+        return matcher.consume_tokens(tokenizer.encode(text, add_special_tokens=False)) and matcher.is_accepting()
+
+    return accepts
+
+
+def test_line_grammars_accept_exactly_what_the_parsers_read(tiny_model):
+    from samarizator import summary_notes as notes
+
+    accepts = grammar_matcher(tiny_model)
+    answer = (
+        "ТЕМА: Бюджет квартала\nТЕМЫ: бюджет; сроки\nОБЗОР: Обсудили бюджет.\n"
+        "- Решение [12, 14] Бюджет — 17 млн | отв: Анна | срок: к пятнице | статус: согласовано\n"
+        "- Тезис [15] Поставщик меняется\n"
+    )
+    assert accepts(notes.NOTES_GRAMMAR, answer)
+    assert len(notes.parse_notes(answer)["items"]) == 2
+    assert accepts(notes.NOTES_GRAMMAR, "ТЕМА: Связь\nТЕМЫ: связь\nОБЗОР: Проверка звука.\nПУНКТОВ НЕТ\n")
+    for broken in [
+        answer.replace("[12, 14]", "[12?]"),  # only digits in the brackets
+        answer.replace("Решение", "Мысль"),  # unknown kind
+        answer.replace("статус: согласовано", "статус: почти"),
+        answer.replace("ТЕМЫ: бюджет; сроки\n", ""),
+        '{"overview": "JSON"}',
+    ]:
+        assert not accepts(notes.NOTES_GRAMMAR, broken)
+    check = "Исправить 1, 3: Задача [12] Отчёт | отв: Олег\nУдалить 2: дубль пункта 1\nДобавить: Риск [14] Курс\n"
+    assert accepts(notes.CHECK_GRAMMAR, check) and accepts(notes.CHECK_GRAMMAR, "ВСЁ ВЕРНО\n")
+    assert not accepts(notes.CHECK_GRAMMAR, "Всё нормально\n")
+    assembly = (
+        "ОБЗОР: Встреча о бюджете.\nТЕМЫ: бюджет\nТЕЗИСЫ\n- Решение [12] Бюджет — 20 млн | статус: согласовано\n"
+        "ПЕРЕСМОТРЫ\n- 1, 4 → Решение [12, 30] Бюджет — 20 млн вместо 17 | статус: согласовано\n"
+    )
+    assert accepts(notes.ASSEMBLE_GRAMMAR, assembly)
+    assert accepts(notes.ASSEMBLE_GRAMMAR, assembly.split("ПЕРЕСМОТРЫ")[0] + "ПЕРЕСМОТРЫ\nНЕТ\n")
+    ten = "ОБЗОР: О.\nТЕМЫ: т\nТЕЗИСЫ\n" + "- Тезис [1] x\n" * 10 + "ПЕРЕСМОТРЫ\nНЕТ\n"
+    assert not accepts(notes.ASSEMBLE_GRAMMAR, ten)  # at most nine theses
+    assert accepts(notes.ASSEMBLE_GRAMMAR, ten.replace("- Тезис [1] x\n", "", 1))
+
+
+def test_mlx_engine_writes_notes_in_the_line_format(engine_url):
+    from samarizator import summary_notes as notes
+
+    client = LocalClient(Settings(), engine_url, "key")
+    text, truncated = client.complete_text("S", "Конспект", 60, 8, grammar=notes.NOTES_GRAMMAR)
+    # Whatever a random model wants to say, the grammar starts the answer with the title line.
+    assert text.startswith("ТЕМА: ")
