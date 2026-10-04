@@ -241,10 +241,63 @@ def parse_model_summary(content, allowed):
             obj, _ = json.JSONDecoder().raw_decode(content[start:])
         except json.JSONDecodeError:
             raise SummaryFormatError("Модель вернула некорректный JSON.") from None
+    if is_review_diff(obj):
+        return obj  # only the changes of a review: expanded and validated by review_source()
     try:
         return validate_summary(normalize_model_summary(obj), allowed)
     except (ValueError, TypeError) as exc:
         raise SummaryFormatError(str(exc)) from None
+
+
+def is_review_diff(obj):
+    return isinstance(obj, dict) and "items" not in obj and any(k in obj for k in ("keep", "edit", "add"))
+
+
+def expand_review(diff, draft):
+    """A review that lists only its changes, as the full reviewed summary.
+
+    Kept points are copied from the draft unchanged, so the model does not spend time
+    writing them again; edited points take the place of the first point they replace;
+    added points come last. Accounting for every draft point is checked afterwards.
+    """
+
+    def ids(value):
+        return value if isinstance(value, list) else []
+
+    def int_list(value):
+        if not isinstance(value, list) or any(type(i) is not int for i in value):
+            raise SummaryFormatError("keep и draft_ids должны быть списками индексов черновика.")
+        return value
+
+    draft_items = draft["items"]
+    keep = set(int_list(ids(diff.get("keep"))))
+    edits = [dict(e) for e in ids(diff.get("edit")) if isinstance(e, dict)]
+    by_first = {}
+    for edit in edits:
+        replaced = int_list(edit.get("draft_ids", []))
+        if not replaced:
+            raise SummaryFormatError("Исправленный пункт должен указывать draft_ids заменяемых пунктов.")
+        by_first.setdefault(min(replaced), []).append(edit)
+    items = []
+    for index, item in enumerate(draft_items):
+        if index in keep:
+            items.append(dict(item, draft_ids=[index]))
+        items.extend(by_first.get(index, []))
+    # Out-of-range indices are kept so that the accounting check reports them.
+    for first in sorted(i for i in by_first if not 0 <= i < len(draft_items)):
+        items.extend(by_first[first])
+    for added in ids(diff.get("add")):
+        if isinstance(added, dict):
+            items.append(dict(added, draft_ids=[]))
+    overview = diff.get("overview")
+    topics = diff.get("topics")
+    full = dict(
+        overview=overview if isinstance(overview, str) and overview.strip() else draft["overview"],
+        topics=topics if isinstance(topics, list) else draft["topics"],
+        items=items,
+        removed=diff.get("removed", []),
+    )
+    return normalize_model_summary(full)
 
 
 def validate_summary(obj, allowed):
@@ -661,7 +714,9 @@ def review_source(client, source, draft, max_chars):
         if len(data) > max_chars:
             raise SummaryFormatError("Материал проверки превышает размер входного блока.")
 
-        def validate_review(result):
+        def validate_review(result, draft=payload["draft"]):
+            if is_review_diff(result):
+                result = expand_review(result, draft)
             _source_result(result, allowed, primary)
             expected = set(range(len(payload["draft"]["items"])))
             accounted = []
