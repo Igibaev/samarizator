@@ -112,6 +112,22 @@
   mark { background: var(--accent-soft); color: var(--accent); font-weight: 600; border-radius: 6px; padding: 0 4px; }
   .note { color: var(--muted); font-size: 15px; margin: 14px 0 0; }
   .nowrap { white-space: nowrap; }
+  .grid.two { grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+  .card.big { padding: 22px; }
+  .card.big p { margin-bottom: 14px; }
+  .card .small, .small { font-size: 14px; color: var(--muted); margin: 12px 0 0; }
+  .actions { display: flex; flex-wrap: wrap; gap: 10px; }
+  .button {
+    display: inline-flex; align-items: center; justify-content: center;
+    background: var(--accent); color: var(--on-accent); border: 0; cursor: pointer;
+    font: inherit; font-size: 15px; font-weight: 600; text-decoration: none;
+    padding: 10px 16px; border-radius: 10px;
+  }
+  .button:hover { background: var(--accent-strong); }
+  .button.secondary { background: var(--accent-soft); color: var(--accent); }
+  .button.secondary:hover { background: var(--accent-soft); filter: brightness(.97); }
+  .phone-row { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+  .phone { font-size: 24px; font-weight: 700; letter-spacing: .01em; font-variant-numeric: tabular-nums; white-space: nowrap; }
   footer { padding: 32px 0 48px; color: var(--muted); font-size: 14px; border-top: 1px solid var(--line); }
   footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px; }
   @media (max-width: 560px) {
@@ -132,6 +148,7 @@
       <a href="#install">Установка</a>
       <a href="#features">Возможности</a>
       <a href="#privacy">Обезличивание</a>
+      <a href="#feedback">Поддержать</a>
       <a href="https://github.com/Igibaev/samarizator">GitHub</a>
     </nav>
   </div>
@@ -254,6 +271,35 @@
   </section>
 </main>
 
+<section id="feedback">
+  <div class="wrap">
+    <h2>Обратная связь и поддержка</h2>
+    <div class="grid two">
+      <div class="card big">
+        <h3>Нашли ошибку или есть идея?</h3>
+        <p>Напишите — так приложение становится лучше. Удобнее всего из самого Samarizator: меню
+          «Справка» → «Сообщить об ошибке», тогда версия, macOS и модели подставятся сами.</p>
+        <div class="actions">
+          <a class="button" href="https://github.com/Igibaev/samarizator/issues/new?template=bug.yml">Сообщить об ошибке</a>
+          <a class="button secondary" href="https://github.com/Igibaev/samarizator/issues/new?template=feature.yml">Предложить улучшение</a>
+        </div>
+        <p class="small">Нужен бесплатный аккаунт GitHub. Сообщения видны всем — не прикладывайте записи
+          и расшифровки с персональными данными. <a href="https://github.com/Igibaev/samarizator/issues">Все обращения</a></p>
+      </div>
+      <div class="card big">
+        <h3>Поддержать проект</h3>
+        <p>Samarizator бесплатный. Если он экономит вам время — поддержите разработку переводом через Kaspi
+          по номеру телефона:</p>
+        <div class="phone-row">
+          <span class="phone" id="kaspi-phone">+7 777 756 78 04</span>
+          <button type="button" class="button secondary" id="copy-phone">Скопировать номер</button>
+        </div>
+        <p class="small">Kaspi-перевод по номеру телефона. Любая сумма — спасибо!</p>
+      </div>
+    </div>
+  </div>
+</section>
+
 <footer>
   <div class="wrap">
     <span>Samarizator — открытый исходный код</span>
@@ -262,6 +308,19 @@
 </footer>
 
 <script>
+  // «Скопировать номер»: the Kaspi number as digits, ready to paste into a transfer.
+  (function () {
+    var button = document.getElementById("copy-phone");
+    var phone = document.getElementById("kaspi-phone");
+    if (!button || !phone || !navigator.clipboard) return;
+    button.addEventListener("click", function () {
+      navigator.clipboard.writeText(phone.textContent.replace(/[^+\d]/g, "")).then(function () {
+        button.textContent = "Скопировано";
+        setTimeout(function () { button.textContent = "Скопировать номер"; }, 2000);
+      });
+    });
+  })();
+
   // The button points at the latest release page; with the GitHub API it becomes a direct
   // link to the .dmg with its version, size and date. Without the API the page still works.
   (function () {
