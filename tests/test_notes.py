@@ -29,7 +29,7 @@ class Notes:
         self.notes = notes
 
     def complete_text(self, system, prompt, max_tokens, minimum=1024, continuation=False, grammar=None):
-        self.requests.append(dict(system=system, prompt=prompt, grammar=grammar))
+        self.requests.append(dict(system=system, prompt=prompt, grammar=grammar, limit=max_tokens))
         if prompt.endswith(NOTES_PROMPT) or "\n\nЗАДАНИЕ\nСоставь подробный конспект" in prompt:
             ids = primary_ids(prompt)
             if self.notes:
@@ -39,7 +39,7 @@ class Notes:
             lines.append(
                 f"- Задача [{ids[-1]}] Подготовить отчёт по блоку {ids[0]} | отв: Анна | срок: к пятнице"
             )
-            return "\n".join(lines) + "\n", False
+            return "\n".join(lines) + "\nКОНЕЦ\n", False
         if CHECK_PROMPT in prompt:
             answer = self.check(prompt) if callable(self.check) else self.check
             return answer + "\n", False
@@ -354,3 +354,74 @@ def test_settings_offer_both_algorithms(qapp, tmp_path, monkeypatch):
     choice.setCurrentIndex(choice.findData("classic"))
     assert dialog.value(choice) == "classic"
     dialog.deleteLater()
+
+
+def test_answers_stop_at_end_of_turn_markers_and_lose_special_tokens():
+    """GigaChat 3 ends a turn with <|message_sep|>, which llama.cpp does not count as the end."""
+    from samarizator import local_llm
+    from samarizator.config import Settings
+    from samarizator.summary import END_MARKERS, LocalClient
+
+    seen = []
+
+    def handler(request):
+        if request.url.path == "/tokenize":
+            return httpx.Response(200, json=dict(tokens=[1] * 10))
+        seen.append(json.loads(request.content))
+        content = "# Протокол\nТекст.<|message_sep|></s>"
+        return httpx.Response(
+            200, json=dict(choices=[dict(message=dict(content=content), finish_reason="stop")])
+        )
+
+    client = LocalClient(Settings(), "http://127.0.0.1:9", transport=httpx.MockTransport(handler))
+    text, truncated = client.complete_text("S", "P", 100, 50)
+    assert text == "# Протокол\nТекст." and not truncated
+    assert seen[0]["stop"] == END_MARKERS and "<|message_sep|>" in END_MARKERS
+    client.complete_text("S", "P", 100, 50, grammar=notes.CHECK_GRAMMAR)
+    assert "stop" not in seen[1]  # a grammar answer ends by its grammar
+    args = local_llm.server_args(Settings(llm_model="/m.gguf"), 8080, "k", binary="llama-server")
+    assert "--special" in args
+
+
+def test_every_answer_has_a_limit_proportional_to_its_material(notes_meeting):
+    store, mid, settings = notes_meeting
+    settings.max_output_tokens = 16000
+    store.save_chunk(mid, 0, rows(6))
+
+    model = Notes()
+    summarize(store, mid, settings, client=model)
+    limits = {
+        (
+            "notes"
+            if r["prompt"].endswith(NOTES_PROMPT)
+            else "check"
+            if CHECK_PROMPT in r["prompt"]
+            else "assemble"
+        ): r["limit"]
+        for r in model.requests
+    }
+    assert limits["notes"] < 3000 and limits["check"] < 1500 and limits["assemble"] == notes.ASSEMBLE_TOKENS
+
+
+def test_a_looping_answer_keeps_its_points_instead_of_splitting_the_block(notes_meeting):
+    store, mid, settings = notes_meeting
+    store.save_chunk(mid, 0, rows(3, 300))
+
+    class Looping(Notes):
+        def complete_text(self, system, prompt, max_tokens, minimum=1024, continuation=False, grammar=None):
+            if prompt.endswith(NOTES_PROMPT):
+                self.requests.append(dict(system=system, prompt=prompt, grammar=grammar, limit=max_tokens))
+                ids = primary_ids(prompt)
+                head = (
+                    f"ТЕМА: Бюджет\nТЕМЫ: бюджет\nОБЗОР: Обсудили бюджет.\n- Тезис [{ids[0]}] Новый пункт\n"
+                )
+                loop = f"- Решение [{ids[0]}] Бюджет 17 млн\n- Задача [{ids[-1]}] Отчёт\n" * 6
+                return head + loop + "- Решение [", True  # cut off by the limit mid-line
+            return super().complete_text(system, prompt, max_tokens, minimum, continuation, grammar)
+
+    progress = []
+    result = summarize(store, mid, settings, client=Looping(), progress=progress.append)
+    assert not any("Делю блок" in line for line in progress)
+    assert [i["text"] for i in result["detailed"]["items"]][:3] == ["Новый пункт", "Бюджет 17 млн", "Отчёт"]
+    # A long answer that does not repeat itself is still split as before.
+    assert notes.looped("ТЕМА: x\n- Тезис [1] a\n- Тезис [1] b\n- Тезис [1] c\n- Тез") is None

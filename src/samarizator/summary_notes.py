@@ -46,7 +46,7 @@ from .summary import (
 from .summary_prompts import ASSEMBLE_PROMPT, CHECK_PROMPT, NOTES_PROMPT, NOTES_SYSTEM, USER_INSTRUCTIONS
 
 # Part of every checkpoint digest: a change of format or prompts means new answers.
-NOTES_VERSION = "notes-1"
+NOTES_VERSION = "notes-2"
 KIND_WORDS = dict(point="Тезис", decision="Решение", action="Задача", risk="Риск", question="Вопрос")
 STATUS_WORDS = dict(
     proposed="предложено", agreed="согласовано", cancelled="отменено", disputed="оспаривается"
@@ -59,6 +59,23 @@ CONTEXT_CHARS = 1200
 MAX_REMOVED_SHARE = 0.5
 BRIEF_LIMIT = 9
 
+# Every answer ends with this line (or with «ПУНКТОВ НЕТ», «ВСЁ ВЕРНО», «НЕТ»): after it the
+# grammar is complete and allows only the end of generation. Without an explicit end a model
+# whose end-of-turn token llama.cpp does not recognise (GigaChat 3) keeps adding points.
+END = "КОНЕЦ"
+# Answer limits in tokens. Notes are shorter than the text they cover, corrections shorter than
+# the notes: a model that loops is cut off early, and the block is split and asked again.
+ASSEMBLE_TOKENS = 3072
+
+
+def notes_tokens(settings, block):
+    return min(settings.max_output_tokens, 512 + sum(len(row["text"]) for row in block) // 3)
+
+
+def check_tokens(settings, notes):
+    return min(settings.max_output_tokens, 384 + len(notes_text(notes)) // 2)
+
+
 # One point; shared by all three grammars. Text cannot contain «|» or a line break, so the
 # optional fields are found without guessing. Numbers are digits only: no «12?» or «12–14».
 _ITEM_RULES = r"""
@@ -67,20 +84,20 @@ kind   ::= "Тезис" | "Решение" | "Задача" | "Риск" | "Во
 ids    ::= num (", " num)*
 num    ::= [0-9]+
 nums   ::= num (", " num)*
-text   ::= [^\n|]+
+text   ::= [^\n|<]+
 fields ::= (" | отв: " value)? (" | срок: " value)? (" | статус: " status)?
-value  ::= [^\n|]+
+value  ::= [^\n|<]+
 status ::= "предложено" | "согласовано" | "отменено" | "оспаривается"
-line   ::= [^\n]+
+line   ::= [^\n|<]+
 """
 NOTES_GRAMMAR = (
     r"""root ::= "ТЕМА: " line "\n" "ТЕМЫ: " line "\n" "ОБЗОР: " line "\n" body
-body ::= ("- " item)+ | "ПУНКТОВ НЕТ\n"
+body ::= ("- " item)+ "КОНЕЦ\n" | "ПУНКТОВ НЕТ\n"
 """
     + _ITEM_RULES
 )
 CHECK_GRAMMAR = (
-    r"""root ::= "ВСЁ ВЕРНО\n" | fix+
+    r"""root ::= "ВСЁ ВЕРНО\n" | fix+ "КОНЕЦ\n"
 fix  ::= "Исправить " nums ": " item | "Удалить " nums ": " line "\n" | "Добавить: " item
 """
     + _ITEM_RULES
@@ -101,7 +118,7 @@ thesis ::= "- " item
 theses ::= """
     + _optional_chain("thesis", BRIEF_LIMIT)
     + r"""
-revisions ::= "НЕТ\n" | revision+
+revisions ::= "НЕТ\n" | revision+ "КОНЕЦ\n"
 revision  ::= "- " nums " → " item
 """
     + _ITEM_RULES
@@ -184,7 +201,7 @@ def parse_notes(content):
     result = dict(title="", topics=[], overview="", items=[])
     for raw in content.splitlines():
         line = raw.strip()
-        if not line or line.upper().startswith("ПУНКТОВ НЕТ"):
+        if not line or line.upper() == END or line.upper().startswith("ПУНКТОВ НЕТ"):
             continue
         head, colon, value = line.partition(":")
         head = head.strip().upper()
@@ -277,6 +294,19 @@ def notes_text(notes):
 # -- requests ----------------------------------------------------------------------------------
 
 
+def looped(text, least=3):
+    """A cut-off answer that went round in circles: its complete lines, each once; else None.
+
+    A model that never reaches the end line repeats points until the answer limit. Points it
+    wrote before looping are fine; splitting the block would only repeat the loop twice.
+    """
+    lines = [line.strip() for line in text.splitlines()[:-1] if line.strip()]  # last may be cut
+    points = [line for line in lines if line.startswith(("- ", "Исправить", "Удалить", "Добавить"))]
+    if len(points) - len(set(points)) < least:
+        return None
+    return "\n".join(dict.fromkeys(lines)) + "\n"
+
+
 def ask(client, system, prompt, grammar, parse, max_tokens, minimum=1024):
     """A grammar-shaped answer, parsed; a rejected answer is asked again twice with the reason.
 
@@ -285,7 +315,9 @@ def ask(client, system, prompt, grammar, parse, max_tokens, minimum=1024):
     for attempt in range(3):
         text, truncated = client.complete_text(system, prompt, max_tokens, minimum, grammar=grammar)
         if truncated:
-            raise SummaryTooLong("Модель не уложилась в лимит ответа; блок будет разделён.")
+            text = looped(text)
+            if text is None:
+                raise SummaryTooLong("Модель не уложилась в лимит ответа; блок будет разделён.")
         try:
             return parse(text)
         except SummaryFormatError as exc:
@@ -308,7 +340,7 @@ def apply_check(content, draft, allowed, primary):
     edits, touched, removed, added = {}, set(), [], []
     for raw in content.splitlines():
         line = raw.strip()
-        if not line or line.upper().startswith("ВСЁ ВЕРНО") or line.upper().startswith("ВСЕ ВЕРНО"):
+        if not line or line.upper() == END or line.upper().startswith(("ВСЁ ВЕРНО", "ВСЕ ВЕРНО")):
             continue
         match = re.match(r"(?i)(исправить|удалить)\s+([\d,\s]+?)\s*:\s*(.*)", line)
         if match:
@@ -406,7 +438,7 @@ def parse_assembly(content, ledger):
             brief["topics"] = clean_topics(value)
         elif line.upper().rstrip(":") in {"ТЕЗИСЫ", "ПЕРЕСМОТРЫ"}:
             section = line.upper().rstrip(":")
-        elif section == "ПЕРЕСМОТРЫ" and line.upper() == "НЕТ":
+        elif line.upper() == END or (section == "ПЕРЕСМОТРЫ" and line.upper() == "НЕТ"):
             continue
         elif section == "ТЕЗИСЫ":
             brief["items"].append(parse_item(line))
@@ -517,7 +549,7 @@ def summarize_notes(store, mid, settings, progress, client, dropped=(set(), 0.0)
                     transcript + NOTES_PROMPT,
                     NOTES_GRAMMAR,
                     lambda text: validated(parse_notes(text)),
-                    settings.max_output_tokens,
+                    notes_tokens(settings, block),
                 )
         except (SummaryTooLong, SummaryFormatError) as exc:
             return split(exc)
@@ -533,7 +565,7 @@ def summarize_notes(store, mid, settings, progress, client, dropped=(set(), 0.0)
                 transcript + CHECK_PROMPT + notes_text(draft),
                 CHECK_GRAMMAR,
                 lambda text: apply_check(text, draft, allowed, primary),
-                settings.max_output_tokens,
+                check_tokens(settings, draft),
                 minimum=512,
             )
         except (ValueError, RuntimeError, httpx.HTTPError):
@@ -596,7 +628,7 @@ def assemble(store, mid, settings, client, progress, system, built, budget):
                 register + ASSEMBLE_PROMPT,
                 ASSEMBLE_GRAMMAR,
                 lambda text: parse_assembly(text, ledger),
-                settings.max_output_tokens,
+                min(settings.max_output_tokens, ASSEMBLE_TOKENS),
             )
         except (SummaryTooLong, SummaryFormatError) as exc:
             reason = str(exc)

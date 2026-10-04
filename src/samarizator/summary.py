@@ -352,6 +352,20 @@ def model_identity(settings):
 
 
 THINKING = re.compile(r"<think>.*?</think>", re.S)
+# End-of-turn markers as text (llama-server runs with --special). A free-text answer stops at
+# the first of them: GigaChat 3 ends a turn with <|message_sep|>, which llama.cpp does not
+# treat as end of generation. Grammar answers end by their grammar instead.
+END_MARKERS = [
+    "<|message_sep|>",
+    "<|im_end|>",
+    "<|eot_id|>",
+    "<|endoftext|>",
+    "<end_of_turn>",
+    "<turn|>",
+    "<eos>",
+    "</s>",
+]
+SPECIAL_TOKENS = re.compile(r"<\|[A-Za-z0-9_]+\|>|</s>|<end_of_turn>|<start_of_turn>|<turn\|>|<eos>")
 # Chat template wrappers (roles, special tokens) around system and user text.
 TEMPLATE_TOKENS = 64
 # Kept free in every request so a slightly longer template never overflows the window.
@@ -469,7 +483,7 @@ class LocalClient:
                 raise RuntimeError("Локальная модель вернула ответ в неожиданном формате.") from None
             if not isinstance(content, str):
                 raise SummaryFormatError("Модель вернула нетекстовый ответ.")
-            content = THINKING.sub("", content)
+            content = SPECIAL_TOKENS.sub("", THINKING.sub("", content))
             return choice.get("finish_reason"), content if raw else content.strip()
         raise RuntimeError("Локальная модель сводок недоступна.")
 
@@ -483,6 +497,8 @@ class LocalClient:
         )
         if json_mode or grammar:
             payload["grammar"] = grammar or JSON_GRAMMAR
+        else:
+            payload["stop"] = END_MARKERS
         return payload
 
     def complete(self, prompt, allowed):

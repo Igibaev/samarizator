@@ -121,6 +121,7 @@ class Engine:
                 processors.append(self.constrain(self.matcher(body["grammar"]), len(fresh)))
             sampler = make_sampler(temp=float(body.get("temperature", 0.2)), top_p=float(body.get("top_p", 0.9)))
             text, generated, finish = [], [], "length"
+            stops = [s for s in body.get("stop") or [] if isinstance(s, str) and s]
             for response in stream_generate(
                 self.model,
                 self.tokenizer,
@@ -134,6 +135,12 @@ class Engine:
                 generated.append(int(response.token))
                 if response.finish_reason:
                     finish = response.finish_reason
+                # Stop strings as in llama-server: the answer ends before the first of them.
+                joined = "".join(text) if stops else ""
+                found = [joined.find(s) for s in stops if s in joined]
+                if found:
+                    text, finish = [joined[: min(found)]], "stop"
+                    break
             # What the cache now holds: the prompt and every generated token it has read.
             offset = getattr(self.cache[0], "offset", None) if self.cache else None
             self.cached = (tokens + generated)[:offset] if isinstance(offset, int) else []

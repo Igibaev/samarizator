@@ -219,9 +219,14 @@ def test_line_grammars_accept_exactly_what_the_parsers_read(tiny_model):
     answer = (
         "ТЕМА: Бюджет квартала\nТЕМЫ: бюджет; сроки\nОБЗОР: Обсудили бюджет.\n"
         "- Решение [12, 14] Бюджет — 17 млн | отв: Анна | срок: к пятнице | статус: согласовано\n"
-        "- Тезис [15] Поставщик меняется\n"
+        "- Тезис [15] Поставщик меняется\nКОНЕЦ\n"
     )
     assert accepts(notes.NOTES_GRAMMAR, answer)
+    # Without the end line the answer is not finished; after it nothing more can be written,
+    # so a model that cannot emit its own end-of-turn token still stops.
+    assert not accepts(notes.NOTES_GRAMMAR, answer.replace("КОНЕЦ\n", ""))
+    assert not accepts(notes.NOTES_GRAMMAR, answer + "- Тезис [16] Ещё\n")
+    assert not accepts(notes.NOTES_GRAMMAR, answer.replace("Обсудили бюджет.", "Обсудили<|message_sep|>"))
     assert len(notes.parse_notes(answer)["items"]) == 2
     assert accepts(notes.NOTES_GRAMMAR, "ТЕМА: Связь\nТЕМЫ: связь\nОБЗОР: Проверка звука.\nПУНКТОВ НЕТ\n")
     for broken in [
@@ -232,12 +237,13 @@ def test_line_grammars_accept_exactly_what_the_parsers_read(tiny_model):
         '{"overview": "JSON"}',
     ]:
         assert not accepts(notes.NOTES_GRAMMAR, broken)
-    check = "Исправить 1, 3: Задача [12] Отчёт | отв: Олег\nУдалить 2: дубль пункта 1\nДобавить: Риск [14] Курс\n"
+    check = "Исправить 1, 3: Задача [12] Отчёт | отв: Олег\nУдалить 2: дубль пункта 1\nДобавить: Риск [14] Курс\nКОНЕЦ\n"
     assert accepts(notes.CHECK_GRAMMAR, check) and accepts(notes.CHECK_GRAMMAR, "ВСЁ ВЕРНО\n")
+    assert not accepts(notes.CHECK_GRAMMAR, check.replace("КОНЕЦ\n", ""))
     assert not accepts(notes.CHECK_GRAMMAR, "Всё нормально\n")
     assembly = (
         "ОБЗОР: Встреча о бюджете.\nТЕМЫ: бюджет\nТЕЗИСЫ\n- Решение [12] Бюджет — 20 млн | статус: согласовано\n"
-        "ПЕРЕСМОТРЫ\n- 1, 4 → Решение [12, 30] Бюджет — 20 млн вместо 17 | статус: согласовано\n"
+        "ПЕРЕСМОТРЫ\n- 1, 4 → Решение [12, 30] Бюджет — 20 млн вместо 17 | статус: согласовано\nКОНЕЦ\n"
     )
     assert accepts(notes.ASSEMBLE_GRAMMAR, assembly)
     assert accepts(notes.ASSEMBLE_GRAMMAR, assembly.split("ПЕРЕСМОТРЫ")[0] + "ПЕРЕСМОТРЫ\nНЕТ\n")
@@ -253,3 +259,17 @@ def test_mlx_engine_writes_notes_in_the_line_format(engine_url):
     text, truncated = client.complete_text("S", "Конспект", 60, 8, grammar=notes.NOTES_GRAMMAR)
     # Whatever a random model wants to say, the grammar starts the answer with the title line.
     assert text.startswith("ТЕМА: ")
+
+
+def test_mlx_engine_honours_stop_strings(engine_url):
+    from samarizator import summary_notes as notes
+
+    client = LocalClient(Settings(), engine_url, "key")
+    body = dict(
+        messages=[dict(role="user", content="Конспект")],
+        max_tokens=40,
+        grammar=notes.NOTES_GRAMMAR,
+        stop=["ЕМА"],
+    )
+    answer = client.client.post(client.url, headers=client.headers(), json=body).json()["choices"][0]
+    assert answer["finish_reason"] == "stop" and answer["message"]["content"] == "Т"

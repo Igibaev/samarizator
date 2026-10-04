@@ -633,6 +633,10 @@ def server_args(
         # The answer is taken as plain content (JSON is enforced by the request grammar):
         # the chat-format parser fails a cut-off JSON with HTTP 500 instead of "length".
         "--skip-chat-parsing",
+        # Special tokens appear in the answer as text. Some models (GigaChat 3) end a turn
+        # with a token llama.cpp does not count as end of generation; seen as text, it is
+        # caught by the request's stop list instead of writing on to the answer limit.
+        "--special",
     ]
     return args
 
