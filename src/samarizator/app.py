@@ -68,7 +68,7 @@ from .store import Store
 from .summary_page import SummaryPage
 from .summary_prompts import DEFAULT_FORMAT, FINAL_FORMATS
 from .theme import ACCENT, GREEN, GREY, ORANGE, RED, SECONDARY, apply_theme, icon
-from .widgets import Banner, RecordingDelegate, SegmentedControl, label, primary
+from .widgets import Banner, ElidedLabel, RecordingDelegate, SegmentedControl, label, primary
 
 __all__ = ["ModelDownloadDialog", "SettingsDialog", "Window", "apply_theme", "main"]
 
@@ -432,7 +432,7 @@ class Window(QMainWindow):
         line.setSpacing(6)
         titles = QVBoxLayout()
         titles.setSpacing(0)
-        self.heading = label("Samarizator", "title")
+        self.heading = ElidedLabel("Samarizator", "title")
         self.meta = label("", "small")
         titles.addWidget(self.heading)
         titles.addWidget(self.meta)
@@ -440,13 +440,13 @@ class Window(QMainWindow):
         left.setLayout(titles)
         line.addWidget(left, 1)
         self.views = SegmentedControl()
-        for key, title in [
-            ("final", "Итоговый текст"),
-            ("summary", "Сводка"),
-            ("transcript", "Расшифровка"),
-            ("privacy", "Обезличивание"),
+        for key, title, short in [
+            ("final", "Итоговый текст", "Итог"),
+            ("summary", "Сводка", "Сводка"),
+            ("transcript", "Расшифровка", "Текст"),
+            ("privacy", "Обезличивание", "Приватно"),
         ]:
-            self.views.add(key, title)
+            self.views.add(key, title, short)
         self.views.changed.connect(self.set_view)
         self.views.setFixedHeight(30)
         line.addWidget(self.views, 0, Qt.AlignmentFlag.AlignVCenter)
@@ -482,7 +482,31 @@ class Window(QMainWindow):
         holder = QWidget()
         holder.setLayout(right)
         line.addWidget(holder, 1)
+        self.toolbar, self.toolbar_right = bar, holder
         return bar
+
+    def fit_toolbar(self):
+        """Full labels when they fit; otherwise short tab labels, then icon-only secondary buttons.
+
+        Nothing is ever cut in the middle: the title gives way first («…»), then the labels
+        get shorter, with the full names in their tooltips.
+        """
+        if not hasattr(self, "toolbar_right"):
+            return
+        available = self.toolbar.width() - 40
+        title = 140
+        for level in range(3):
+            self.views.set_compact(level >= 1)
+            self.ask_button.setText("" if level >= 2 else "Спросить")
+            self.obsidian.setText("Obsidian" if level >= 2 else "Открыть в Obsidian")
+            self.toolbar_right.layout().invalidate()
+            need = title + self.views.sizeHint().width() + self.toolbar_right.layout().sizeHint().width()
+            if need <= available:
+                break
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.fit_toolbar()
 
     def build_menu(self):
         menu = QMenu(self)
@@ -1982,6 +2006,7 @@ class Window(QMainWindow):
             self.model_row.setText(name.removesuffix(" Instruct"))
             self.model_row.setIcon(dot_icon(GREEN))
             self.model_row.setToolTip("Модель сводок работает на этом Mac. Сменить — в настройках.")
+        self.fit_toolbar()
 
     def open_source(self):
         if self.mid:

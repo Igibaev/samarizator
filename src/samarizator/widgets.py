@@ -60,6 +60,29 @@ def primary(button, value=True, large=False):
     return button
 
 
+class ElidedLabel(QLabel):
+    """One line that ends with «…» when the space is short, instead of pushing others aside."""
+
+    def __init__(self, text="", name=None):
+        super().__init__(text)
+        if name:
+            self.setObjectName(name)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.setMinimumWidth(60)
+
+    def setText(self, text):
+        super().setText(text)
+        self.setToolTip(text)
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setPen(self.palette().color(self.foregroundRole()))
+        painter.setFont(self.font())
+        text = self.fontMetrics().elidedText(self.text(), Qt.TextElideMode.ElideRight, self.width())
+        painter.drawText(self.rect(), int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), text)
+
+
 class SegmentedControl(QFrame):
     """macOS-style segmented control. Buttons stay ordinary checkable QPushButtons."""
 
@@ -74,8 +97,12 @@ class SegmentedControl(QFrame):
         self.buttons = {}
         self.current = None
 
-    def add(self, key, text):
+    def add(self, key, text, short=None):
         button = QPushButton(text)
+        # A segment is never narrower than its label; a narrow window uses the short labels.
+        button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        button.setToolTip(text)
+        button.setProperty("labels", (text, short or text))
         button.setCheckable(True)
         button.setCursor(Qt.CursorShape.PointingHandCursor)
         button.clicked.connect(lambda checked=False, k=key: self.select(k, emit=True))
@@ -84,6 +111,12 @@ class SegmentedControl(QFrame):
         if self.current is None:
             self.select(key)
         return button
+
+    def set_compact(self, compact):
+        for button in self.buttons.values():
+            full, short = button.property("labels")
+            button.setText(short if compact else full)
+        self.layout_.invalidate()
 
     def select(self, key, emit=False):
         self.current = key
