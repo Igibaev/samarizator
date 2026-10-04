@@ -5,18 +5,29 @@ build-backend = "hatchling.build"
 [project]
 name = "samarizator"
 version = "0.1.0"
-description = "Local-first meeting notes for macOS: Whisper, cloud LLM, Obsidian"
+description = "Local meeting notes for macOS: Whisper, local LLM summaries, Obsidian"
 requires-python = ">=3.11,<3.14"
 dependencies = [
     "PySide6-Essentials>=6.8,<6.11",
     "httpx>=0.28,<0.29",
     "psutil>=7,<8",
-    "keyring>=25,<26",
+    "pymorphy3>=2,<3",
+    "pymorphy3-dicts-ru>=2.4,<3",
     "truststore>=0.10,<1",
+    # Experimental MLX engine (Apple Silicon only); llguidance keeps answers to the JSON grammar.
+    "mlx-lm>=0.30,<1 ; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "llguidance>=1.9,<2 ; sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8,<10", "ruff>=0.11,<1"]
+dev = [
+    "pytest>=8,<10",
+    "ruff>=0.11,<1",
+    # The MLX engine is tested on Linux on the CPU build of MLX with a tiny random model.
+    "mlx[cpu]>=0.30,<1 ; sys_platform == 'linux'",
+    "mlx-lm>=0.30,<1 ; sys_platform == 'linux'",
+    "llguidance>=1.9,<2 ; sys_platform == 'linux'",
+]
 
 [project.scripts]
 samarizator = "samarizator.app:main"
@@ -24,6 +35,7 @@ samarizator = "samarizator.app:main"
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+markers = ["real_final: run the real final-text stage instead of the stub"]
 
 [tool.ruff]
 line-length = 110

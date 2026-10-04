@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Samarizator — скачать для Mac</title>
+<meta name="description" content="Расшифровка записей и сводки встреч на вашем Mac. Без интернета и облака.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%230f7a63'/%3E%3Cstop offset='1' stop-color='%230b4f5c'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect x='9' y='9' width='82' height='82' rx='18' fill='url(%23g)'/%3E%3Cpath d='M25.4 31.7V45.3M33.6 26.3V50.7M41.8 34V43.1M50 27V50.1M58.2 29.5V47.5M66.4 30V47M74.6 26.8V50.3M25.4 64.8H74.6M25.4 75.4H62.3' stroke='%23e9fbf4' stroke-width='4.5' stroke-linecap='round'/%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg: #f6f7f5;
+    --surface: #ffffff;
+    --text: #16201d;
+    --muted: #5d6a66;
+    --line: #e2e7e4;
+    --accent: #0f7a63;
+    --accent-strong: #0b5f4d;
+    --accent-soft: #e5f3ee;
+    --on-accent: #ffffff;
+    --shadow: 0 1px 2px rgba(16, 32, 28, .06), 0 8px 24px rgba(16, 32, 28, .06);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #101513;
+      --surface: #182019;
+      --text: #e8efec;
+      --muted: #9aa8a3;
+      --line: #26302c;
+      --accent: #3cc49f;
+      --accent-strong: #5fd6b3;
+      --accent-soft: #17302a;
+      --on-accent: #08251d;
+      --shadow: none;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.55 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+  a { color: var(--accent); }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 0 16px; }
+
+  header.top { padding: 20px 0; }
+  header.top .wrap { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 650; font-size: 17px; color: var(--text); text-decoration: none; }
+  .brand svg { width: 32px; height: 32px; }
+  .top nav a { color: var(--muted); text-decoration: none; font-size: 15px; margin-left: 18px; }
+  .top nav a:hover { color: var(--text); }
+
+  .hero { padding: 40px 0 56px; text-align: center; }
+  .hero .icon { width: 112px; height: 112px; margin: 0 auto 20px; display: block; filter: drop-shadow(0 10px 24px rgba(11, 79, 92, .25)); }
+  .hero h1 { font-size: clamp(30px, 5vw, 46px); line-height: 1.12; margin: 0 0 14px; letter-spacing: -.02em; }
+  .hero p.lead { font-size: clamp(17px, 2.4vw, 20px); color: var(--muted); max-width: 640px; margin: 0 auto 30px; }
+  .download {
+    display: inline-flex; align-items: center; gap: 10px;
+    background: var(--accent); color: var(--on-accent);
+    font-size: 18px; font-weight: 600; text-decoration: none;
+    padding: 15px 28px; border-radius: 14px;
+    box-shadow: var(--shadow);
+    transition: background .15s ease, transform .15s ease;
+  }
+  .download:hover { background: var(--accent-strong); }
+  .download:active { transform: translateY(1px); }
+  .download svg { width: 22px; height: 22px; }
+  .meta { color: var(--muted); font-size: 14px; margin-top: 14px; min-height: 22px; }
+  .meta a { color: var(--muted); }
+  .links { margin-top: 6px; font-size: 14px; }
+  .links a { margin: 0 8px; }
+
+  section { padding: 44px 0; border-top: 1px solid var(--line); }
+  section h2 { font-size: 26px; margin: 0 0 22px; letter-spacing: -.01em; }
+
+  ol.steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 14px; counter-reset: step; }
+  ol.steps li {
+    counter-increment: step; position: relative;
+    background: var(--surface); border: 1px solid var(--line); border-radius: 14px;
+    padding: 16px 18px 16px 62px; box-shadow: var(--shadow);
+  }
+  ol.steps li::before {
+    content: counter(step); position: absolute; left: 18px; top: 15px;
+    width: 30px; height: 30px; border-radius: 50%;
+    background: var(--accent-soft); color: var(--accent);
+    font-weight: 700; display: grid; place-items: center;
+  }
+  ol.steps b { display: block; margin-bottom: 2px; }
+  ol.steps span { color: var(--muted); }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 18px; box-shadow: var(--shadow); }
+  .card h3 { margin: 0 0 6px; font-size: 17px; }
+  .card p { margin: 0; color: var(--muted); font-size: 15px; }
+
+  table { width: 100%; border-collapse: collapse; background: var(--surface); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; font-size: 15px; }
+  th, td { text-align: left; padding: 12px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 14px; }
+  tr:last-child td { border-bottom: 0; }
+  .table-scroll { overflow-x: auto; }
+
+  details { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 14px 18px; margin-bottom: 10px; }
+  summary { cursor: pointer; font-weight: 600; }
+  details p { color: var(--muted); margin: 10px 0 0; }
+
+  footer { padding: 32px 0 48px; color: var(--muted); font-size: 14px; border-top: 1px solid var(--line); }
+  footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px; }
+  @media (max-width: 560px) {
+    .top nav a:not(:last-child) { display: none; }
+    .download { width: 100%; justify-content: center; }
+  }
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="#">
+      <svg viewBox="0 0 100 100" aria-hidden="true"><use href="#logo"/></svg>
+      Samarizator
+    </a>
+    <nav>
+      <a href="#install">Установка</a>
+      <a href="#features">Возможности</a>
+      <a href="https://github.com/Igibaev/samarizator">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <linearGradient id="logo-gradient" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0f7a63"/>
+      <stop offset="1" stop-color="#0b4f5c"/>
+    </linearGradient>
+    <symbol id="logo" viewBox="0 0 100 100">
+      <rect x="9" y="9" width="82" height="82" rx="18" fill="url(#logo-gradient)"/>
+      <path d="M25.4 31.7V45.3M33.6 26.3V50.7M41.8 34V43.1M50 27V50.1M58.2 29.5V47.5M66.4 30V47M74.6 26.8V50.3M25.4 64.8H74.6M25.4 75.4H62.3"
+            stroke="#e9fbf4" stroke-width="4.5" stroke-linecap="round" fill="none"/>
+    </symbol>
+  </defs>
+</svg>
+
+<main>
+  <div class="hero">
+    <div class="wrap">
+      <svg class="icon" viewBox="0 0 100 100" role="img" aria-label="Значок Samarizator"><use href="#logo"/></svg>
+      <h1>Сводки встреч прямо на вашем Mac</h1>
+      <p class="lead">Samarizator расшифровывает записи и пишет по ним протокол, решения и задачи
+        со ссылками на нужные места записи. Всё считается на Mac — ни звук, ни текст никуда не уходят.</p>
+      <a id="download" class="download" href="https://github.com/Igibaev/samarizator/releases/latest">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11"/><path d="m7 10 5 5 5-5"/><path d="M5 20h14"/></svg>
+        <span id="download-label">Скачать для Mac</span>
+      </a>
+      <div class="meta" id="meta">Для Mac с Apple Silicon (M1 и новее) · macOS 13 и новее</div>
+      <div class="links">
+        <a id="notes" href="https://github.com/Igibaev/samarizator/releases/latest">Что нового</a>
+        <a href="https://github.com/Igibaev/samarizator/releases">Все версии</a>
+      </div>
+    </div>
+  </div>
+
+  <section id="install">
+    <div class="wrap">
+      <h2>Установка за минуту</h2>
+      <ol class="steps">
+        <li><b>Скачайте и откройте файл .dmg</b><span>Перетащите Samarizator в папку «Программы».</span></li>
+        <li><b>Подтвердите первый запуск</b><span>Приложение без платной подписи Apple, поэтому macOS спросит один раз.
+          macOS 15 и новее: Системные настройки → Конфиденциальность и безопасность → «Всё равно открыть».
+          macOS 13–14: щёлкните по приложению правой кнопкой → «Открыть».</span></li>
+        <li><b>Скачайте модели</b><span>На первом экране приложение предложит модели распознавания речи и сводок
+          под объём памяти вашего Mac и покажет, сколько места и памяти они займут. Дальше интернет не нужен.</span></li>
+        <li><b>Перетащите запись в окно</b><span>Аудио или видео — MP3, M4A, WAV, MP4, MOV и другие.
+          Или запишите встречу прямо в приложении: микрофон и системный звук.</span></li>
+      </ol>
+    </div>
+  </section>
+
+  <section id="features">
+    <div class="wrap">
+      <h2>Что умеет</h2>
+      <div class="grid">
+        <div class="card"><h3>Точная расшифровка</h3><p>Whisper с моделью Podlodka, дообученной на русской речи. Сомнительные места помечены — их можно прослушать и поправить.</p></div>
+        <div class="card"><h3>Сводка с источниками</h3><p>Решения, задачи с ответственными и сроками, риски и вопросы. У каждого пункта — кнопка, которая проигрывает нужный фрагмент записи.</p></div>
+        <div class="card"><h3>Укладывается во время</h3><p>По умолчанию сводка готова за 10 минут: приложение меряет скорость модели и планирует работу под этот срок.</p></div>
+        <div class="card"><h3>Итоговый документ</h3><p>Протокол встречи, резюме для руководителя, конспект лекции, интервью — или свой шаблон обычными словами.</p></div>
+        <div class="card"><h3>Вопросы к записи</h3><p>Спросите по сводке или по расшифровке: «какие суммы назывались?». Ответ — только со ссылками на реплики.</p></div>
+        <div class="card"><h3>Обезличивание</h3><p>Копия записи без имён, телефонов и номеров — чтобы безопасно отправить её во внешнюю нейросеть.</p></div>
+        <div class="card"><h3>Live-запись</h3><p>Микрофон и звук звонка одновременно. Распознавание идёт по ходу встречи — после неё остаётся только хвост.</p></div>
+        <div class="card"><h3>Заметки в Obsidian</h3><p>Встречи, темы и расшифровки в Markdown с графом связей между встречами.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <h2>Какой Mac нужен</h2>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>Память Mac</th><th>Модель сводок, которую предложит приложение</th><th>Место на диске</th></tr></thead>
+          <tbody>
+            <tr><td>от 32 ГБ</td><td>Gemma 4 26B-A4B — самые подробные сводки</td><td>≈ 17 ГБ + 1,6 ГБ распознавание</td></tr>
+            <tr><td>16–24 ГБ</td><td>GigaChat 3.1 Lightning — быстрая, обучена на русском</td><td>≈ 6,4 ГБ + 1,6 ГБ</td></tr>
+            <tr><td>8 ГБ</td><td>Qwen3 4B — лёгкая</td><td>≈ 2,5 ГБ + 1,6 ГБ</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p style="color:var(--muted);font-size:15px;margin:12px 0 0">Нужен Mac на Apple Silicon (M1 и новее) с macOS 13 или новее. Mac на Intel не поддерживаются.</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <h2>Вопросы</h2>
+      <details><summary>Куда уходят мои записи?</summary><p>Никуда. Распознавание и сводки выполняются на вашем Mac. Интернет нужен только один раз — скачать модели. Записи и расшифровки хранятся в «~/Library/Application Support/Samarizator», заметки — в «~/Documents/Samarizator».</p></details>
+      <details><summary>macOS пишет «не удаётся проверить разработчика»</summary><p>Так бывает со сборками без платной подписи Apple. Откройте Системные настройки → Конфиденциальность и безопасность и нажмите «Всё равно открыть» (macOS 15+) или откройте приложение через правый клик → «Открыть» (macOS 13–14). Это нужно один раз.</p></details>
+      <details><summary>Сколько ждать сводку?</summary><p>По умолчанию не дольше 10 минут — это настраивается. Если модель не успевает, приложение сокращает проверку и пишет, что именно сократило; расшифровка всегда остаётся полной.</p></details>
+      <details><summary>Как обновиться?</summary><p>Скачайте новую версию с этой страницы и замените приложение в «Программах». Записи, настройки и скачанные модели сохранятся.</p></details>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>Samarizator — открытый исходный код</span>
+    <a href="https://github.com/Igibaev/samarizator">github.com/Igibaev/samarizator</a>
+  </div>
+</footer>
+
+<script>
+  // The button points at the latest release page; with the GitHub API it becomes a direct
+  // link to the .dmg with its version, size and date. Without the API the page still works.
+  (function () {
+    var repo = "Igibaev/samarizator";
+    fetch("https://api.github.com/repos/" + repo + "/releases/latest", { headers: { Accept: "application/vnd.github+json" } })
+      .then(function (response) { return response.ok ? response.json() : Promise.reject(response.status); })
+      .then(function (release) {
+        var assets = (release.assets || []).filter(function (a) { return /\.dmg$/i.test(a.name); });
+        var dmg = assets.filter(function (a) { return /arm64/i.test(a.name); })[0] || assets[0];
+        if (!dmg) return;
+        document.getElementById("download").href = dmg.browser_download_url;
+        var version = String(release.tag_name || "").replace(/^v/, "");
+        document.getElementById("download-label").textContent = "Скачать для Mac" + (version ? " · " + version : "");
+        var size = Math.round(dmg.size / 1048576) + " МБ";
+        var date = release.published_at
+          ? new Date(release.published_at).toLocaleDateString("ru-RU", { day: "numeric", month: "long", year: "numeric" })
+          : "";
+        document.getElementById("meta").textContent =
+          ["Версия " + version, size, date, "Apple Silicon, macOS 13+"].filter(Boolean).join(" · ");
+        if (release.html_url) document.getElementById("notes").href = release.html_url;
+      })
+      .catch(function () { /* the link to the releases page stays */ });
+  })();
+</script>
+</body>
+</html>

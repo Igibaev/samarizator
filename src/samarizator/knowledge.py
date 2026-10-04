@@ -14,6 +14,12 @@ LABELS = dict(
 )
 
 
+def task_key(item):
+    """Stable id of a task across re-renders: its text and sources, not its position."""
+    raw = item["text"].strip().casefold() + "|" + ",".join(map(str, sorted(item.get("evidence", []))))
+    return hashlib.sha1(raw.encode()).hexdigest()[:12]
+
+
 def stamp(seconds):
     seconds = max(0, int(seconds))
     return f"{seconds // 3600:02}:{seconds // 60 % 60:02}:{seconds % 60:02}"
@@ -248,9 +254,20 @@ def export(store, mid, settings):
         due = f" Срок: {plain(item['due'])}." if item.get("due") else ""
         state = STATUS_LABELS.get(item.get("status"), "")
         state = f" [{state}]" if state else ""
-        prefix = "- [ ]" if tasks and item["kind"] == "action" and item.get("status") == "agreed" else "-"
+        box = "- [x]" if task_key(item) in done else "- [ ]"
+        prefix = box if tasks and item["kind"] == "action" and item.get("status") == "agreed" else "-"
         return f"{prefix} {plain(item['text'])}{state}{owner}{due} {links}"
 
+    final = summary.get("final") or {}
+    if final.get("text", "").strip():
+        # The user's own format comes first: it is the document people read. Its Markdown
+        # is kept as written; the generated headings are demoted under this note's title.
+        lines += [f"## Итоговый текст · {plain(final.get('title', ''))}", ""]
+        if final.get("warning"):
+            lines += [f"> {plain(final['warning'])}", ""]
+        lines += [demote_headings(final["text"].strip()), ""]
+    # Tasks ticked off in the app stay ticked in the note.
+    done = store.checkpoint(mid, "tasks-done", 0) or {}
     sections = [("Кратко · тезисы", brief, True), ("Подробная сводка", detailed, False)]
     if resolved := detailed.get("resolved"):
         sections.append(
@@ -288,24 +305,13 @@ def export(store, mid, settings):
     return note
 
 
-def summary_text(view, refs):
-    lines = [view["overview"], ""]
-    for kind, label in LABELS.items():
-        items = [item for item in view["items"] if item["kind"] == kind]
-        if not items:
-            continue
-        lines += [label.upper()]
-        for item in items:
-            state = STATUS_LABELS.get(item.get("status"), "")
-            lines.append(
-                "• "
-                + item["text"]
-                + (f" [{state}]" if state else "")
-                + (f" — {item['owner']}" if item.get("owner") else "")
-                + (f" · {item['due']}" if item.get("due") else "")
-                + "  ["
-                + ", ".join(refs.get(r, str(r)) for r in item["evidence"])
-                + "]"
-            )
-        lines += [""]
-    return "\n".join(lines)
+def demote_headings(markdown):
+    """`# x` → `### x`: the final text sits inside the meeting note under a `##` heading."""
+    out, fenced = [], False
+    for line in markdown.splitlines():
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+        if not fenced and re.match(r"#{1,4} ", line):
+            line = "##" + line
+        out.append(line)
+    return "\n".join(out)

@@ -5,13 +5,12 @@ import pytest
 
 from samarizator.knowledge import export
 from samarizator.summary import (
-    ChatClient,
+    LocalClient,
     SummaryFormatError,
     contextual_blocks,
     review_source,
     summarize,
 )
-from samarizator.summary_browser import summary_html
 from samarizator.summary_prompts import MAP_PROMPT, REVIEW_PROMPT
 
 
@@ -63,7 +62,7 @@ def test_http_review_corrects_status_and_adds_omitted_condition_before_synthesis
     calls = []
 
     def handler(request):
-        assert request.url.host == "company.example"
+        assert request.url.host == "127.0.0.1"
         prompt = json.loads(request.content)["messages"][-1]["content"]
         if prompt.startswith(MAP_PROMPT):
             calls.append("map")
@@ -97,7 +96,7 @@ def test_http_review_corrects_status_and_adds_omitted_condition_before_synthesis
             },
         )
 
-    client = ChatClient(settings, transport=httpx.MockTransport(handler), key="test")
+    client = LocalClient(settings, "http://127.0.0.1:9", key="test", transport=httpx.MockTransport(handler))
     result = summarize(store, mid, settings, client=client)
     assert len(result["detailed"]["items"]) == 2
     assert result["detailed"]["items"][0]["status"] == "proposed"
@@ -148,7 +147,7 @@ def test_review_failure_preserves_draft_warns_and_retries_without_reextracting(m
     result = summarize(store, mid, settings, client=client)
     assert result["detailed"]["items"] == draft["items"]
     warning = result["detailed"]["quality_warning"]
-    assert warning and warning in summary_html(result["brief"], {sid: "00:00:00"})
+    assert warning and result["brief"]["quality_warning"] == warning
     store.update(mid, summary=json.dumps(result))
     assert warning in export(store, mid, settings).read_text()
     assert client.audits == (1 if failure == "network" else 3)

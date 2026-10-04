@@ -2,21 +2,28 @@
 
 import hashlib
 import json
+import math
 import re
-import ssl
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import httpx
-import truststore
 
-from .config import get_api_key
+from .speech import tidy_rows
 from .summary_prompts import (
     BRIEF_PROMPT,
+    DEFAULT_FORMAT,
+    FINAL_FORMATS,
+    FINAL_PROMPT,
+    FINAL_SYSTEM,
     MAP_PROMPT,
     RECONCILE_PROMPT,
     REDUCE_PROMPT,
     REVIEW_PROMPT,
     SYSTEM,
+    USER_INSTRUCTIONS,
 )
 
 KINDS = {"point", "decision", "action", "risk", "question"}
@@ -75,18 +82,17 @@ STATUS_ALIASES = {
 def summary_views(summary):
     """Read both current results and notes created before dual summaries existed."""
     brief = summary.get("brief", summary)
-    detailed = summary.get(
-        "detailed",
-        dict(
-            overview="Существенные пункты исходных блоков. Возможны повторы между блоками.",
-            items=summary.get("ledger", summary["items"]),
-            topics=summary["topics"],
-        ),
+    if "detailed" in summary:
+        return brief, summary["detailed"]
+    detailed = dict(
+        overview="Существенные пункты исходных блоков. Возможны повторы между блоками.",
+        items=summary.get("ledger", summary["items"]),
+        topics=summary["topics"],
     )
     return brief, detailed
 
 
-def package_summary(brief, ledger, maps, resolved):
+def package_summary(brief, ledger, maps, resolved, parts=None):
     # Detailed facts bypass lossy reduction entirely, including topics mentioned only once.
     detailed = dict(
         overview="\n\n".join(f"Часть {i + 1}. {m['overview']}" for i, m in enumerate(maps)),
@@ -95,6 +101,8 @@ def package_summary(brief, ledger, maps, resolved):
         # Final status after reconciling later revisions/cancellations; the ledger above
         # is never edited or shortened because of this -- it stays the full history.
         resolved=resolved,
+        # Ledger index ranges per source block, for the timeline view: [first, last).
+        parts=parts or [],
     )
     return dict(**brief, brief=brief, detailed=detailed, ledger=ledger, blocks=len(maps), version=2)
 
@@ -237,10 +245,63 @@ def parse_model_summary(content, allowed):
             obj, _ = json.JSONDecoder().raw_decode(content[start:])
         except json.JSONDecodeError:
             raise SummaryFormatError("Модель вернула некорректный JSON.") from None
+    if is_review_diff(obj):
+        return obj  # only the changes of a review: expanded and validated by review_source()
     try:
         return validate_summary(normalize_model_summary(obj), allowed)
     except (ValueError, TypeError) as exc:
         raise SummaryFormatError(str(exc)) from None
+
+
+def is_review_diff(obj):
+    return isinstance(obj, dict) and "items" not in obj and any(k in obj for k in ("keep", "edit", "add"))
+
+
+def expand_review(diff, draft):
+    """A review that lists only its changes, as the full reviewed summary.
+
+    Kept points are copied from the draft unchanged, so the model does not spend time
+    writing them again; edited points take the place of the first point they replace;
+    added points come last. Accounting for every draft point is checked afterwards.
+    """
+
+    def ids(value):
+        return value if isinstance(value, list) else []
+
+    def int_list(value):
+        if not isinstance(value, list) or any(type(i) is not int for i in value):
+            raise SummaryFormatError("keep и draft_ids должны быть списками индексов черновика.")
+        return value
+
+    draft_items = draft["items"]
+    keep = set(int_list(ids(diff.get("keep"))))
+    edits = [dict(e) for e in ids(diff.get("edit")) if isinstance(e, dict)]
+    by_first = {}
+    for edit in edits:
+        replaced = int_list(edit.get("draft_ids", []))
+        if not replaced:
+            raise SummaryFormatError("Исправленный пункт должен указывать draft_ids заменяемых пунктов.")
+        by_first.setdefault(min(replaced), []).append(edit)
+    items = []
+    for index, item in enumerate(draft_items):
+        if index in keep:
+            items.append(dict(item, draft_ids=[index]))
+        items.extend(by_first.get(index, []))
+    # Out-of-range indices are kept so that the accounting check reports them.
+    for first in sorted(i for i in by_first if not 0 <= i < len(draft_items)):
+        items.extend(by_first[first])
+    for added in ids(diff.get("add")):
+        if isinstance(added, dict):
+            items.append(dict(added, draft_ids=[]))
+    overview = diff.get("overview")
+    topics = diff.get("topics")
+    full = dict(
+        overview=overview if isinstance(overview, str) and overview.strip() else draft["overview"],
+        topics=topics if isinstance(topics, list) else draft["topics"],
+        items=items,
+        removed=diff.get("removed", []),
+    )
+    return normalize_model_summary(full)
 
 
 def validate_summary(obj, allowed):
@@ -274,76 +335,245 @@ def validate_summary(obj, allowed):
     return obj
 
 
-class ChatClient:
-    def __init__(self, settings, transport=None, key=None):
-        settings.validate(api=True)
-        self.settings = settings
-        self.key = get_api_key() if key is None else key
-        if not self.key:
-            raise ValueError("Сохраните API-ключ модели в настройках.")
-        self.transport = transport
+def system_prompt(settings):
+    """Evidence rules first; the user's own wishes ride along without overriding them."""
+    extra = settings.summary_instructions.strip()
+    return SYSTEM + (USER_INSTRUCTIONS + extra if extra else "")
 
-    def complete(self, prompt, allowed):
-        s = self.settings
-        headers = {"Authorization": f"Bearer {self.key}", "Content-Type": "application/json"}
-        payload = dict(
-            model=s.model,
-            temperature=0.1,
-            max_tokens=s.max_output_tokens,
-            messages=[dict(role="system", content=SYSTEM), dict(role="user", content=prompt)],
-        )
-        # Verify against the OS trust store, so a corporate root installed in the system
-        # keychain works the way curl does. certifi alone would reject an intercepted TLS chain.
-        context = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        # No redirect, telemetry, public fallback, or implicit environment proxy.
-        with httpx.Client(
-            verify=context,
+
+def model_identity(settings):
+    """Part of every checkpoint digest: another model or quantization means a new answer."""
+    path = Path(settings.llm_model).expanduser()
+    try:
+        size = path.stat().st_size
+    except OSError:
+        size = 0
+    return f"{path.name}:{size}"
+
+
+THINKING = re.compile(r"<think>.*?</think>", re.S)
+# End-of-turn markers as text (llama-server runs with --special). A free-text answer stops at
+# the first of them: GigaChat 3 ends a turn with <|message_sep|>, which llama.cpp does not
+# treat as end of generation. Grammar answers end by their grammar instead.
+END_MARKERS = [
+    "<|message_sep|>",
+    "<|im_end|>",
+    "<|eot_id|>",
+    "<|endoftext|>",
+    "<end_of_turn>",
+    "<turn|>",
+    "<eos>",
+    "</s>",
+]
+SPECIAL_TOKENS = re.compile(r"<\|[A-Za-z0-9_]+\|>|</s>|<end_of_turn>|<start_of_turn>|<turn\|>|<eos>")
+# Chat template wrappers (roles, special tokens) around system and user text.
+TEMPLATE_TOKENS = 64
+# Kept free in every request so a slightly longer template never overflows the window.
+CONTEXT_MARGIN = 128
+# Fallback when the server cannot tokenize: digits and JSON punctuation make Russian
+# meeting rows as dense as ~1.6 characters per token in Qwen and Gemma tokenizers.
+ESTIMATE_CHARS_PER_TOKEN = 1.5
+# A request is given up as stuck after this many times its expected duration, plus a grace.
+STUCK_FACTOR = 3
+STUCK_GRACE = 30
+
+# llama.cpp's grammars/json.gbnf: the sampler can only produce a JSON object. Whitespace is
+# limited to single spaces: indentation and line breaks cost tokens and say nothing. Passed as a
+# raw grammar (not response_format) because the server then skips its own chat-format
+# parser, which answers HTTP 500 instead of finish_reason=length on a cut-off JSON.
+JSON_GRAMMAR = r"""root   ::= object
+value  ::= object | array | string | number | ("true" | "false" | "null") ws
+object ::= "{" ws ( string ":" ws value ("," ws string ":" ws value)* )? "}" ws
+array  ::= "[" ws ( value ("," ws value)* )? "]" ws
+string ::= "\"" ( [^"\\\x7F\x00-\x1F] | "\\" (["\\bfnrt] | "u" [0-9a-fA-F]{4}) )* "\"" ws
+number ::= ("-"? ([0-9] | [1-9] [0-9]{0,15})) ("." [0-9]+)? ([eE] [-+]? [0-9] [1-9]{0,15})? ws
+ws ::= | " "
+"""
+
+
+class LocalClient:
+    """OpenAI-compatible chat requests to the llama-server started for this job.
+
+    Requests never leave 127.0.0.1: no proxy from the environment, no redirects.
+    JSON answers are constrained by a llama.cpp grammar, which removes most
+    broken-JSON retries that small local models otherwise need.
+    """
+
+    def __init__(self, settings, url, key="", transport=None):
+        from .local_llm import context_tokens
+
+        self.settings = settings
+        self.base = url.rstrip("/")
+        self.url = self.base + "/v1/chat/completions"
+        self.key = key
+        self.transport = transport
+        self.system = system_prompt(settings)
+        # The server is started with exactly this window (local_llm.server_args).
+        self.n_ctx = context_tokens(settings)
+        self.tokenizer = None  # unknown until the first /tokenize call
+        # Called before each generation; a summary job pauses here while the Mac is hot.
+        self.pace = lambda: None
+        # Receives the server's timings of every answer (tokens read and written, and how
+        # long each took): the summary plans its remaining steps by the measured speed.
+        self.observe = None
+        # Expected seconds of a request, (prompt tokens, answer tokens) → seconds, once the
+        # speed is known; a request that takes three times longer is given up as stuck.
+        self.expected = None
+        self.counted = {}  # system prompts repeat in every request
+        self.counts = {}
+        self.client = httpx.Client(
             trust_env=False,
             follow_redirects=False,
-            timeout=httpx.Timeout(180, connect=20),
-            transport=self.transport,
-        ) as client:
-            for attempt in range(3):
-                try:
-                    with client.stream("POST", s.chat_url(), headers=headers, json=payload) as response:
-                        if response.status_code in {429, 502, 503, 504} and attempt < 2:
-                            time.sleep(2**attempt)
-                            continue
-                        if not 200 <= response.status_code < 300:
-                            raise ValueError(
-                                f"API модели: HTTP {response.status_code}. "
-                                "Проверьте base URL, название модели и ключ."
-                            )
-                        raw = bytearray()
-                        for block in response.iter_bytes():
-                            raw.extend(block)
-                            if len(raw) > 2_000_000:
-                                raise ValueError("Ответ модели слишком большой.")
-                    body = json.loads(raw)
-                    choice = body["choices"][0]
-                    if choice.get("finish_reason") == "length":
-                        raise SummaryTooLong(
-                            "Модель обрезала ответ. Уменьшите входной блок или увеличьте лимит ответа."
-                        )
-                    if choice.get("finish_reason") not in {"stop", None}:
-                        raise ValueError(
-                            "API не завершил сводку: проверьте ограничения корпоративной модели."
-                        )
-                    content = choice["message"]["content"]
-                    if not isinstance(content, str):
-                        raise SummaryFormatError("Модель вернула нетекстовый ответ.")
-                    return parse_model_summary(content, allowed)
-                except httpx.HTTPError:
-                    if attempt == 2:
-                        raise ValueError(
-                            "Нет соединения с API модели. Проверьте base URL, VPN и доверие корпоративному сертификату."
-                        ) from None
-                    time.sleep(2**attempt)
-                except (KeyError, IndexError, TypeError, json.JSONDecodeError):
-                    raise ValueError(
-                        "API вернул ответ в неподдерживаемом формате. Нужен Chat Completions JSON."
-                    ) from None
-        raise RuntimeError("API модели недоступен.")
+            # One long generation on a laptop can take many minutes.
+            timeout=httpx.Timeout(3600, connect=10),
+            transport=transport,
+        )
+
+    def close(self):
+        self.client.close()
+
+    def headers(self):
+        headers = {"Content-Type": "application/json"}
+        if self.key:
+            headers["Authorization"] = f"Bearer {self.key}"
+        return headers
+
+    def count_tokens(self, text):
+        """Tokens by the model's own tokenizer; a deliberately high estimate if it is unavailable.
+
+        The last few texts are remembered: a request is measured for its room and for its
+        expected duration, and the system prompt repeats in every request.
+        """
+        key = hash(text)
+        if key in self.counts:
+            return self.counts[key]
+        count = self._count_tokens(text)
+        if len(self.counts) > 64:
+            self.counts.clear()
+        self.counts[key] = count
+        return count
+
+    def _count_tokens(self, text):
+        if self.tokenizer is not False:
+            try:
+                response = self.client.post(
+                    self.base + "/tokenize", headers=self.headers(), json=dict(content=text)
+                )
+                tokens = response.json()["tokens"] if response.status_code == 200 else None
+                if isinstance(tokens, list):
+                    self.tokenizer = True
+                    return len(tokens)
+            except (httpx.HTTPError, ValueError, KeyError, TypeError):
+                pass
+            self.tokenizer = False
+        return math.ceil(len(text) / ESTIMATE_CHARS_PER_TOKEN)
+
+    def prompt_tokens(self, system, prompt):
+        """Tokens a request takes before the answer."""
+        if system not in self.counted:
+            self.counted[system] = self.count_tokens(system)
+        return self.counted[system] + self.count_tokens(prompt) + TEMPLATE_TOKENS
+
+    def room(self, system, prompt, wanted, minimum):
+        """Answer tokens that fit next to this prompt in the model's context window.
+
+        A request that leaves less than `minimum` is refused up front with SummaryTooLong,
+        so the caller splits its input instead of getting an answer cut off mid-way.
+        """
+        free = self.n_ctx - self.prompt_tokens(system, prompt) - CONTEXT_MARGIN
+        if free < min(wanted, minimum):
+            raise SummaryTooLong("Запрос не поместился в контекст модели.")
+        return min(wanted, free)
+
+    def timeout(self, prompt_tokens, max_tokens):
+        """Seconds to wait for one answer: generous against a stuck server, never a whole hour."""
+        if self.expected is None:
+            return httpx.Timeout(3600, connect=10)
+        return httpx.Timeout(STUCK_GRACE + STUCK_FACTOR * self.expected(prompt_tokens, max_tokens), connect=10)
+
+    def _choice(self, payload, raw=False, prompt_tokens=0):
+        self.pace()
+        headers = self.headers()
+        timeout = self.timeout(prompt_tokens, payload.get("max_tokens") or 0)
+        for attempt in range(3):
+            try:
+                response = self.client.post(self.url, headers=headers, json=payload, timeout=timeout)
+            except httpx.TimeoutException:
+                # Closing the connection frees the slot: llama-server cancels an abandoned task.
+                raise SummaryTooLong("Модель не ответила за отведённое время; блок будет разделён.") from None
+            except httpx.HTTPError:
+                if attempt == 2:
+                    raise RuntimeError("Локальная модель сводок перестала отвечать.") from None
+                continue
+            if response.status_code == 503 and attempt < 2:
+                continue  # still loading or busy
+            if response.status_code == 400 and "context" in response.text.lower():
+                raise SummaryTooLong("Запрос не поместился в контекст модели.")
+            if not 200 <= response.status_code < 300:
+                raise RuntimeError(f"Локальная модель сводок: HTTP {response.status_code}.")
+            if len(response.content) > 4_000_000:
+                raise ValueError("Ответ модели слишком большой.")
+            try:
+                data = response.json()
+                choice = data["choices"][0]
+                content = choice["message"]["content"]
+            except (KeyError, IndexError, TypeError, ValueError):
+                raise RuntimeError("Локальная модель вернула ответ в неожиданном формате.") from None
+            if not isinstance(content, str):
+                raise SummaryFormatError("Модель вернула нетекстовый ответ.")
+            if self.observe is not None and isinstance(data.get("timings"), dict):
+                self.observe(data["timings"])
+            content = SPECIAL_TOKENS.sub("", THINKING.sub("", content))
+            return choice.get("finish_reason"), content if raw else content.strip()
+        raise RuntimeError("Локальная модель сводок недоступна.")
+
+    def _payload(self, system, prompt, max_tokens, json_mode, minimum=1024, grammar=None):
+        """(request body, prompt tokens)."""
+        room = self.room(system, prompt, max_tokens, minimum)
+        used = self.prompt_tokens(system, prompt)
+        payload = dict(
+            temperature=0.2,
+            top_p=0.9,
+            max_tokens=room,
+            messages=[dict(role="system", content=system), dict(role="user", content=prompt)],
+            chat_template_kwargs=dict(enable_thinking=False),
+        )
+        if json_mode or grammar:
+            payload["grammar"] = grammar or JSON_GRAMMAR
+        else:
+            payload["stop"] = END_MARKERS
+        return payload, used
+
+    def complete(self, prompt, allowed):
+        finish, content = self._choice(
+            *self._payload(self.system, prompt, self.settings.max_output_tokens, json_mode=True)
+        )
+        if finish == "length":
+            raise SummaryTooLong("Модель не уложилась в лимит ответа; блок будет разделён.")
+        return parse_model_summary(content, allowed)
+
+    def complete_json(self, system, prompt, max_tokens):
+        """Any JSON object under the grammar, for callers with their own schema (questions)."""
+        from .qa import parse_json
+
+        finish, content = self._choice(*self._payload(system, prompt, max_tokens, json_mode=True))
+        if finish == "length":
+            raise SummaryTooLong("Модель не уложилась в лимит ответа.")
+        return parse_json(content)
+
+    def complete_text(self, system, prompt, max_tokens, minimum=1024, continuation=False, grammar=None):
+        """Free Markdown text, or lines in the shape of a GBNF `grammar`. Returns (text, truncated).
+
+        A continuation keeps its leading space or line break: it is glued to a cut-off text.
+        """
+        payload, used = self._payload(system, prompt, max_tokens, False, minimum, grammar)
+        finish, content = self._choice(payload, raw=True, prompt_tokens=used)
+        content = content.rstrip() if continuation else content.strip()
+        if content.startswith("```"):
+            lines = content.splitlines()
+            if lines[-1].strip() == "```":
+                content = "\n".join(lines[1:-1]).strip()
+        return content, finish == "length"
 
 
 def _size_groups(items, max_chars):
@@ -373,19 +603,29 @@ def reconcile_decisions(client, ledger, input_chars, progress=lambda *_: None, o
     current = [item for item in ledger if item["kind"] in {"decision", "action"}]
     if not current:
         return []
+    def reconcile(group):
+        """One group; halved while the request does not fit the model's context."""
+        allowed = {ref for item in group for ref in item["evidence"]}
+        try:
+            result = checked_complete(client, RECONCILE_PROMPT + json.dumps(group, ensure_ascii=False), allowed)
+        except SummaryTooLong:
+            if len(group) < 2:
+                raise
+            half = len(group) // 2
+            return reconcile(group[:half]) + reconcile(group[half:])
+        if {ref for item in result["items"] for ref in item["evidence"]} != allowed:
+            raise ValueError("Согласование потеряло ссылки на часть исходных решений.")
+        return [result["items"]]
+
     for level in range(4):
         groups = _size_groups(current, input_chars)
-        reduced = []
+        reduced, pieces = [], 0
         for i, group in enumerate(groups):
-            allowed = {ref for item in group for ref in item["evidence"]}
-            result = checked_complete(
-                client, RECONCILE_PROMPT + json.dumps(group, ensure_ascii=False), allowed
-            )
-            if {ref for item in result["items"] for ref in item["evidence"]} != allowed:
-                raise ValueError("Согласование потеряло ссылки на часть исходных решений.")
-            reduced.extend(result["items"])
+            for items in reconcile(group):
+                reduced.extend(items)
+                pieces += 1
             progress(f"Согласование решений: уровень {level + 1}, блок {i + 1}/{len(groups)}")
-        if len(groups) == 1:
+        if pieces == 1:
             return reduced
         if len(json.dumps(reduced)) >= len(json.dumps(current)):
             on_warning(
@@ -493,7 +733,7 @@ def source_fallback(block, reason):
     if not items:
         raise ValueError("В блоке нет текста, который можно сохранить в резервную сводку.")
     warning = (
-        "Корпоративная модель не вернула корректный JSON для этой части даже после уменьшения "
+        "Модель сводок не вернула корректный JSON для этой части даже после уменьшения "
         "блока. Исходные реплики сохранены без перефразирования; проверьте этот фрагмент. "
         + str(reason)[:300]
     )
@@ -538,7 +778,9 @@ def review_source(client, source, draft, max_chars):
         if len(data) > max_chars:
             raise SummaryFormatError("Материал проверки превышает размер входного блока.")
 
-        def validate_review(result):
+        def validate_review(result, draft=payload["draft"]):
+            if is_review_diff(result):
+                result = expand_review(result, draft)
             _source_result(result, allowed, primary)
             expected = set(range(len(payload["draft"]["items"])))
             accounted = []
@@ -598,20 +840,325 @@ def review_source(client, source, draft, max_chars):
     return dict(_source_result(result, allowed, primary), review_receipts=receipts)
 
 
-def summarize(store, mid, settings, progress=lambda *_: None, client=None):
-    client = client or ChatClient(settings)
-    maps = []
+def summarize(store, mid, settings, progress=lambda *_: None, client=None, work=None, decider=None):
+    """Whole pipeline. Without a client, starts the local model for the duration of the job.
 
-    def map_block(block, index, before, after, node=1, depth=0):
+    First a small decision model may set aside empty fragments (decide.py); it runs and
+    stops before the summary model loads, so the two never share the memory.
+    """
+    from .decide import select_fragments
+
+    dropped = select_fragments(store, mid, settings, progress, decider, work, local=client is None)
+    if client is not None:
+        return _summarize(store, mid, settings, progress, client, dropped)
+    with local_model(settings, work, progress) as client:
+        return _summarize(store, mid, settings, progress, client, dropped)
+
+
+class local_model:
+    """Context manager: llama-server for this job plus a client bound to it."""
+
+    def __init__(self, settings, work, progress):
+        import tempfile
+
+        from .local_llm import check_fits
+
+        settings.validate(llm=True)
+        check_fits(settings)
+        self.temp = None if work else tempfile.TemporaryDirectory(prefix="samarizator-llm-")
+        self.work = work or self.temp.name
+        self.server = None
+        self.settings = settings
+        self.progress = progress
+        self.client = None
+
+    def __enter__(self):
+        from .local_llm import start_summary_server
+        from .thermal import cool_down
+
+        self.server = start_summary_server(self.settings, self.work, self.progress)
+        self.client = LocalClient(self.settings, self.server.url, self.server.key)
+        self.client.parallel = self.server.slots
+        self.client.pace = lambda: cool_down(self.progress, self.settings.cool_down)
+        return self.client
+
+    def __exit__(self, *exc):
+        if self.client:
+            self.client.close()
+        if self.server:
+            self.server.__exit__(*exc)
+        if self.temp:
+            self.temp.cleanup()
+        return False
+
+
+def _summarize(store, mid, settings, progress, client, dropped=(set(), 0.0)):
+    started = time.monotonic()
+    if settings.summary_algorithm == "notes":
+        from .summary_notes import summarize_notes
+
+        result = summarize_notes(store, mid, settings, progress, client, dropped)
+    else:
+        result = _summarize_classic(store, mid, settings, progress, client, dropped)
+    result["algorithm"] = settings.summary_algorithm
+    timings = result.setdefault("timings", {})
+    timings["total"] = round(time.monotonic() - started, 1)
+    line = "Сводка готова за " + duration_text(timings["total"]) + timing_details(timings)
+    budget = result.get("budget") or {}
+    if budget.get("limit") and timings["total"] > budget["limit"] and budget.get("predict_speed"):
+        line += f". Дольше лимита в {budget['limit'] // 60} мин: модель пишет {budget['predict_speed']:.0f} ток/с"
+    progress(line)
+    return result
+
+
+TIMING_NAMES = dict(blocks="разбор", assembly="сборка", final="итоговый текст")
+
+
+def duration_text(seconds):
+    seconds = max(0, int(round(seconds)))
+    return f"{seconds // 60} мин {seconds % 60} с" if seconds >= 60 else f"{seconds} с"
+
+
+def timing_details(timings):
+    parts = [f"{name} {duration_text(timings[key])}" for key, name in TIMING_NAMES.items() if key in timings]
+    return " (" + ", ".join(parts) + ")" if parts else ""
+
+
+def prepared_rows(store, mid, settings, dropped, progress, preparation):
+    """Rows the model reads: tidied, without the fragments the decision model set aside."""
+    left_out, left_seconds = dropped
+    stats = {}
+    rows = [
+        row
+        for row in tidy_rows(store.iter_segments(mid), settings.clean_input, stats)
+        if row["id"] not in left_out
+    ]
+    if left_out:
+        fragments = len(left_out)
+        preparation.update(pruned=fragments, pruned_seconds=round(left_seconds, 1))
+        progress(f"Подготовка: {fragments} пустых реплик не пойдут в сводку")
+    if stats.get("before") and stats["after"] < stats["before"]:
+        saved = round(100 * (1 - stats["after"] / stats["before"]))
+        preparation["cleaned_percent"] = saved
+        if saved:
+            progress(f"Подготовка: убрано {saved}% текста — паузы, повторы и слова-паразиты")
+    return rows
+
+
+def run_blocks(planned, work, client, progress, suffix=lambda: ""):
+    """work(index, *block) for every planned block; several at once when the server has slots.
+
+    Results keep the order of the recording whatever order the blocks finish in. `suffix()`
+    is added to the progress line after each block — the time still expected, for instance.
+    """
+    total = len(planned)
+    workers = max(1, min(getattr(client, "parallel", 1), total))
+    if workers == 1:
+        produced = []
+        for index, block in enumerate(planned):
+            progress(f"Разбор записи: блок {index + 1} из {total}{suffix()}")
+            produced.append(work(index, *block))
+        return produced
+    progress(f"Разбор записи: блок 1 из {total} · {workers} одновременно")
+    done = []
+    lock = threading.Lock()
+
+    def run(index, *block):
+        result = work(index, *block)
+        with lock:
+            done.append(index)
+            progress(f"Разбор записи: блок {len(done)} из {total} · {workers} одновременно{suffix()}")
+        return result
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(run, i, *block) for i, block in enumerate(planned)]
+        return [future.result() for future in futures]
+
+
+def ledger_and_parts(produced):
+    """Block results → (maps, deduplicated ledger in recording order, per-block parts)."""
+    maps, ledger, seen, parts = [], [], set(), []
+    for results in produced:
+        maps.extend(results)
+        first = len(ledger)
+        for result in results:
+            for item in result["items"]:
+                signature = (
+                    item["kind"],
+                    item["text"].casefold(),
+                    tuple(sorted(item["evidence"])),
+                    item.get("owner"),
+                    item.get("due"),
+                    item.get("status"),
+                )
+                if signature not in seen:
+                    ledger.append(item)
+                    seen.add(signature)
+        titles = [r["title"].strip() for r in results if isinstance(r.get("title"), str) and r["title"].strip()]
+        parts.append(
+            dict(
+                title=titles[0][:120] if titles else "",
+                overview=" ".join(r["overview"].strip() for r in results if r["overview"].strip()),
+                first=first,
+                last=len(ledger),
+            )
+        )
+    if not maps:
+        raise ValueError("Нет распознанной речи для сводки.")
+    return maps, ledger, parts
+
+
+def resolve_classic(store, mid, settings, client, ledger, progress):
+    """Final status of decisions and tasks by the bounded multi-level reconciliation."""
+    resolve_digest = hashlib.sha256(
+        (
+            model_identity(settings)
+            + str(settings.max_output_tokens)
+            + system_prompt(settings)
+            + RECONCILE_PROMPT
+            + "safe-resolution-v2"
+            + str(settings.input_chars)
+            + json.dumps(ledger, ensure_ascii=False)
+        ).encode()
+    ).hexdigest()
+    cached = store.checkpoint(mid, "summary-resolve", 0)
+    if cached and cached.get("digest") == resolve_digest:
+        return cached["result"], cached.get("warnings", [])
+    warnings = []
+    try:
+        resolved = reconcile_decisions(client, ledger, settings.input_chars, progress, warnings.append)
+    except (ValueError, RuntimeError, httpx.HTTPError):
+        # Optional enrichment must never discard the two primary summaries.
+        warnings.append(
+            "Дополнительное согласование не удалось. Краткая сводка и полный реестр сохранены; итоговый статус решений проверьте по записи."
+        )
+        return [], warnings
+    store.save_checkpoint(
+        mid, "summary-resolve", 0, dict(digest=resolve_digest, result=resolved, warnings=warnings)
+    )
+    return resolved, warnings
+
+
+class ReduceFallback(Exception):
+    """The multi-level reduction could not produce a valid brief; the reason is shown."""
+
+
+def reduce_classic(client, ledger, settings, progress, levels):
+    """The brief by multi-level reduction of the ledger; None for an empty ledger.
+
+    Intermediate registers are appended to `levels`: the final text may use them.
+    """
+
+    def reduce_group(group, final):
+        """Compress one group; halved while the request does not fit the model's context."""
+        instruction = BRIEF_PROMPT if final else REDUCE_PROMPT
+        prompt = (
+            instruction + "Не смешивай противоположные мнения и разных ответственных. "
+            "Пункты упорядочены по времени: явно отрази отмену или пересмотр решений.\n"
+            + json.dumps(group, ensure_ascii=False)
+        )
+        allowed = {ref for item in group for ref in item["evidence"]}
+        try:
+            return [checked_complete(client, prompt, allowed)]
+        except SummaryTooLong:
+            if len(group) < 2:
+                raise
+            progress("Делю блок объединения на меньшие части, чтобы он поместился в модель…")
+            half = len(group) // 2
+            return reduce_group(group[:half], False) + reduce_group(group[half:], False)
+
+    # A reduction unit is an item, not a whole map: every request remains bounded.
+    current = ledger
+    for level in range(8):
+        units, group, size = [], [], 2
+        for item in current:
+            length = len(json.dumps(item, ensure_ascii=False)) + 2
+            if length + 2 > settings.input_chars:
+                raise ReduceFallback("Один пункт подробной сводки не поместился в блок финального сжатия.")
+            if group and size + length > settings.input_chars:
+                units.append(group)
+                group, size = [], 2
+            group.append(item)
+            size += length
+        if group:
+            units.append(group)
+        if not units:
+            return None
+        reduced, results = [], []
+        try:
+            for i, group in enumerate(units):
+                for result in reduce_group(group, final=len(units) == 1):
+                    results.append(result)
+                    reduced.extend(result["items"])
+                progress(f"Объединение: уровень {level + 1}, блок {i + 1}/{len(units)}")
+        except (SummaryFormatError, SummaryTooLong) as exc:
+            raise ReduceFallback(str(exc)) from None
+        last = results[-1]
+        if len(results) == 1:
+            if len(last["items"]) > 9:
+                raise ReduceFallback("Модель вернула более 9 кратких тезисов.")
+            return last
+        if len(json.dumps(reduced)) >= len(json.dumps(current)):
+            raise ReduceFallback("Модель не сократила промежуточный результат.")
+        current = reduced
+        levels.append(reduced)
+    raise ReduceFallback("Достигнут предел объединения сводки.")
+
+
+def fallback_brief(ledger, maps, reason):
+    """A selection of ledger points shown instead of a brief the model failed to write."""
+    priorities = {"decision": 0, "action": 1, "risk": 2, "question": 3, "point": 4}
+    selected = sorted(enumerate(ledger), key=lambda pair: (priorities.get(pair[1]["kind"], 9), pair[0]))[:9]
+    selected = [item for _, item in sorted(selected)]
+    overview = " ".join(m["overview"].strip() for m in maps if m["overview"].strip())[:1000]
+    return dict(
+        overview=overview or "Существенные пункты встречи сохранены ниже.",
+        items=selected,
+        topics=sorted({topic for m in maps for topic in m["topics"]})[:30],
+        generation_warning=(
+            "Финальное сжатие ответа модели не прошло проверку. "
+            "Показана выборка пунктов подробной сводки; это запасной вариант, не финальный синтез. "
+            + reason
+        ),
+    )
+
+
+def finish_summary(store, mid, settings, client, progress, brief, built, timings=None, final=None):
+    """The stored result: both summaries, warnings, and the final text written from them.
+
+    `built` holds ledger, maps, resolved, parts, preparation, resolve_warnings and levels;
+    `final` — (answer tokens, continuations) when the remaining time bounds the final text.
+    """
+    result = package_summary(brief, built["ledger"], built["maps"], built["resolved"], built["parts"])
+    result["preparation"] = built["preparation"]
+    result["detailed"]["resolution_warning"] = " ".join(built["resolve_warnings"])
+    maps = built["maps"]
+    warning = " ".join(dict.fromkeys(m["quality_warning"] for m in maps if m.get("quality_warning")))
+    if warning:
+        result["brief"]["quality_warning"] = warning
+        result["detailed"]["quality_warning"] = warning
+    # Intermediate registers: the final text takes the most detailed one that fits.
+    result["reduce_levels"] = built["levels"]
+    times = {row["id"]: row["start"] for row in store.iter_segments(mid)}
+    started = time.monotonic()
+    limit, continuations = final or (None, None)
+    result["final"] = final_document(client, settings, result, times, progress, limit, continuations)
+    result["timings"] = dict(timings or {}, final=round(time.monotonic() - started, 1))
+    return result
+
+
+def _summarize_classic(store, mid, settings, progress, client, dropped=(set(), 0.0)):
+    preparation = dict(pruned=0, pruned_seconds=0.0, cleaned_percent=0)
+
+    def map_block(index, block, before, after, node=1, depth=0):
         source = dict(before=before, segments=[json.loads(line) for _, line in block], after=after)
         prompt = MAP_PROMPT + _json(dict(source=source))
         digest = hashlib.sha256(
             (
-                settings.chat_url()
-                + settings.model
+                model_identity(settings)
                 + str(settings.max_output_tokens)
                 + str(settings.input_chars)
-                + SYSTEM
+                + system_prompt(settings)
                 + REVIEW_PROMPT
                 + prompt
             ).encode()
@@ -654,9 +1201,9 @@ def summarize(store, mid, settings, progress=lambda *_: None, client=None):
             progress(f"Делю блок {index + 1} на меньшие части для полного ответа…")
             limit = min(1200, settings.input_chars // 10)
             return map_block(
-                halves[0], index, before, _context(halves[1], limit), node * 2, depth + 1
+                index, halves[0], before, _context(halves[1], limit), node * 2, depth + 1
             ) + map_block(
-                halves[1], index, _context(halves[0], limit, tail=True), after, node * 2 + 1, depth + 1
+                index, halves[1], _context(halves[0], limit, tail=True), after, node * 2 + 1, depth + 1
             )
 
         if cached.get("split"):
@@ -671,7 +1218,7 @@ def summarize(store, mid, settings, progress=lambda *_: None, client=None):
             return split(exc)
         # Keep extraction even if the more expensive review is interrupted or fails.
         store.save_checkpoint(mid, phase, part, dict(digest=digest, draft=draft))
-        progress(f"Проверка полноты и точности блока {index + 1} по расшифровке…")
+        progress(f"Проверка блока {index + 1} из {total} по расшифровке…")
         try:
             reviewed = review_source(client, source, draft, settings.input_chars)
         except (ValueError, RuntimeError, httpx.HTTPError):
@@ -685,137 +1232,226 @@ def summarize(store, mid, settings, progress=lambda *_: None, client=None):
                 )
             ]
         receipts = reviewed.pop("review_receipts", [])
+        # The review returns the standard schema; the block's short title comes from the draft.
+        if not reviewed.get("title") and isinstance(draft.get("title"), str):
+            reviewed["title"] = draft["title"]
         store.save_checkpoint(
             mid, phase, part, dict(digest=digest, parts=[reviewed], draft=draft, review_receipts=receipts)
         )
         return [reviewed]
 
-    for index, (block, before, after) in enumerate(
-        contextual_blocks(store.iter_segments(mid), settings.input_chars)
-    ):
-        maps.extend(map_block(block, index, before, after))
-        progress(f"Сводка: обработан блок {index + 1}")
-    if not maps:
-        raise ValueError("Нет распознанной речи для сводки.")
+    # Planned up front so progress can say "block 8 of 22" instead of a bare counter.
+    # The model reads a tidied copy: hesitations and stutters cost tokens and mean nothing.
+    rows = prepared_rows(store, mid, settings, dropped, progress, preparation)
+    planned = list(contextual_blocks(rows, settings.input_chars))
+    total = len(planned)
+    started = time.monotonic()
+    produced = run_blocks(planned, map_block, client, progress)
+    timings = dict(blocks=round(time.monotonic() - started, 1))
+    maps, ledger, parts = ledger_and_parts(produced)
+    started = time.monotonic()
     # Keep source-grounded map items separately so reduction cannot erase a topic.
-    ledger, seen = [], set()
-    for result in maps:
-        for item in result["items"]:
-            signature = (
-                item["kind"],
-                item["text"].casefold(),
-                tuple(sorted(item["evidence"])),
-                item.get("owner"),
-                item.get("due"),
-                item.get("status"),
-            )
-            if signature not in seen:
-                ledger.append(item)
-                seen.add(signature)
-    resolve_digest = hashlib.sha256(
-        (
-            settings.chat_url()
-            + settings.model
-            + str(settings.max_output_tokens)
-            + SYSTEM
-            + RECONCILE_PROMPT
-            + "safe-resolution-v2"
-            + str(settings.input_chars)
-            + json.dumps(ledger, ensure_ascii=False)
-        ).encode()
-    ).hexdigest()
-    cached_resolve = store.checkpoint(mid, "summary-resolve", 0)
-    resolve_warnings = []
-    if cached_resolve and cached_resolve.get("digest") == resolve_digest:
-        resolved = cached_resolve["result"]
-        resolve_warnings = cached_resolve.get("warnings", [])
-    else:
-        try:
-            resolved = reconcile_decisions(
-                client, ledger, settings.input_chars, progress, resolve_warnings.append
-            )
-        except (ValueError, RuntimeError, httpx.HTTPError):
-            # Optional enrichment must never discard the two primary summaries.
-            resolved = []
-            resolve_warnings.append(
-                "Дополнительное согласование не удалось. Краткая сводка и полный реестр сохранены; итоговый статус решений проверьте по записи."
-            )
-        else:
-            store.save_checkpoint(
-                mid,
-                "summary-resolve",
-                0,
-                dict(digest=resolve_digest, result=resolved, warnings=resolve_warnings),
-            )
+    resolved, resolve_warnings = resolve_classic(store, mid, settings, client, ledger, progress)
+    built = dict(
+        ledger=ledger,
+        maps=maps,
+        resolved=resolved,
+        parts=parts,
+        preparation=preparation,
+        resolve_warnings=resolve_warnings,
+        levels=[],
+    )
+    try:
+        brief = reduce_classic(client, ledger, settings, progress, built["levels"])
+    except ReduceFallback as exc:
+        brief = fallback_brief(ledger, maps, str(exc))
+    if brief is None:
+        brief = dict(overview=maps[0]["overview"], items=[], topics=[])
+    timings["assembly"] = round(time.monotonic() - started, 1)
+    return finish_summary(store, mid, settings, client, progress, brief, built, timings)
 
-    def package(brief):
-        result = package_summary(brief, ledger, maps, resolved)
-        result["detailed"]["resolution_warning"] = " ".join(resolve_warnings)
-        warning = " ".join(dict.fromkeys(m["quality_warning"] for m in maps if m.get("quality_warning")))
-        if warning:
-            result["brief"]["quality_warning"] = warning
-            result["detailed"]["quality_warning"] = warning
-        return result
 
-    def fallback_brief(reason):
-        priorities = {"decision": 0, "action": 1, "risk": 2, "question": 3, "point": 4}
-        selected = sorted(enumerate(ledger), key=lambda pair: (priorities.get(pair[1]["kind"], 9), pair[0]))[
-            :9
+KIND_NAMES = dict(point="Тезис", decision="Решение", action="Задача", risk="Риск", question="Вопрос")
+STATUS_NAMES = dict(
+    proposed="предложено", agreed="согласовано", cancelled="отменено", disputed="оспаривается"
+)
+
+
+def _clock(seconds):
+    seconds = max(0, int(seconds))
+    return f"{seconds // 3600:02}:{seconds // 60 % 60:02}:{seconds % 60:02}"
+
+
+def material_line(item, times):
+    starts = [times[ref] for ref in item.get("evidence", []) if ref in times]
+    parts = [KIND_NAMES.get(item.get("kind"), "Тезис")]
+    if status := STATUS_NAMES.get(item.get("status")):
+        parts.append(status)
+    if item.get("owner"):
+        parts.append("ответственный: " + str(item["owner"]))
+    if item.get("due"):
+        parts.append("срок: " + str(item["due"]))
+    stamp = f"[{_clock(min(starts))}] " if starts else ""
+    return f"- {stamp}{' · '.join(parts)} — {' '.join(str(item['text']).split())}"
+
+
+def render_material(overview, items, resolved, times, parts=None):
+    lines = ["Обзор записи: " + " ".join(str(overview).split())]
+    if parts:
+        lines += ["", "Обзоры частей записи по порядку:", *(" ".join(p.split()) for p in parts if p.strip())]
+    lines += ["", "Пункты в порядке записи:", *(material_line(item, times) for item in items)]
+    if resolved:
+        lines += [
+            "",
+            "Итоговый статус решений и задач с учётом пересмотров (приоритетнее ранних пунктов):",
+            *(material_line(item, times) for item in resolved),
         ]
-        selected = [item for _, item in sorted(selected)]
-        overview = " ".join(m["overview"].strip() for m in maps if m["overview"].strip())[:1000]
-        brief = dict(
-            overview=overview or "Существенные пункты встречи сохранены ниже.",
-            items=selected,
-            topics=sorted({topic for m in maps for topic in m["topics"]})[:30],
-            generation_warning=(
-                "Финальное сжатие ответа модели не прошло проверку. "
-                "Показана выборка пунктов подробной сводки; это запасной вариант, не финальный синтез. "
-                + reason
-            ),
-        )
-        return package(brief)
+    return "\n".join(lines)
 
-    # A reduction unit is an item, not a whole map: every request remains bounded.
-    current = ledger
-    for level in range(8):
-        units, group, size = [], [], 2
-        for item in current:
-            length = len(json.dumps(item, ensure_ascii=False)) + 2
-            if length + 2 > settings.input_chars:
-                return fallback_brief(
-                    "Один пункт подробной сводки не поместился в блок финального сжатия."
-                )
-            if group and size + length > settings.input_chars:
-                units.append(group)
-                group, size = [], 2
-            group.append(item)
-            size += length
-        if group:
-            units.append(group)
-        if not units:
-            return package(dict(overview=maps[0]["overview"], items=[], topics=[]))
-        reduced = []
-        last = None
-        for i, group in enumerate(units):
-            instruction = BRIEF_PROMPT if len(units) == 1 else REDUCE_PROMPT
-            prompt = (
-                instruction + "Не смешивай противоположные мнения и разных ответственных. "
-                "Пункты упорядочены по времени: явно отрази отмену или пересмотр решений.\n"
-                + json.dumps(group, ensure_ascii=False)
-            )
-            allowed = {ref for item in group for ref in item["evidence"]}
+
+def final_candidates(summary, times, budget):
+    """Material for the final text, most detailed first: full ledger → reduced registers → brief.
+
+    Only options within `budget` characters are offered; the brief always comes last, so
+    there is something to write from even when every register is too long.
+    """
+    brief, detailed = summary_views(summary)
+    resolved = detailed.get("resolved") or []
+    overview = brief.get("overview", "")
+    parts = [p for p in str(detailed.get("overview", "")).split("\n\n") if p.strip()]
+    candidates = [
+        ("full", dict(items=detailed["items"], parts=parts)),
+        ("full", dict(items=detailed["items"])),
+        *((f"level-{n + 1}", dict(items=level)) for n, level in enumerate(summary.get("reduce_levels") or [])),
+    ]
+    for name, option in candidates:
+        material = render_material(overview, option["items"], resolved, times, option.get("parts"))
+        if len(material) <= budget:
+            yield name, material
+    yield "brief", render_material(overview, brief["items"], resolved, times)
+
+
+FINAL_SOURCES = {
+    "full": "",
+    "brief": "Запись слишком длинная для одного запроса: итоговый текст составлен по краткой сводке. "
+    "Подробности — во вкладке «Подробная сводка».",
+}
+
+
+# Answer room the final text needs at least; a smaller register is used otherwise.
+FINAL_MIN_TOKENS = 2048
+# How many times a final text cut off by the answer limit is continued.
+FINAL_CONTINUATIONS = 4
+# The end of the written text the model sees when it continues.
+CONTINUE_TAIL_CHARS = 1500
+CONTINUE_PROMPT = """
+
+Ты уже начал писать этот документ, и ответ оборвался на лимите длины. Последние строки
+написанного (между <<< и >>>):
+<<<
+{tail}
+>>>
+Продолжи документ ровно с места обрыва: если оборвалось слово или строка таблицы, допиши
+их. Не повторяй написанное, не начинай документ заново, сохрани формат и разметку. Верни
+только продолжение."""
+
+
+def join_continuation(text, more):
+    """Glue a continuation to the cut-off text, dropping a repeated last line."""
+    more = more.lstrip("\n") if text.endswith("\n") else more
+    last = text.rstrip().rsplit("\n", 1)[-1].strip()
+    if last and more.lstrip().startswith(last) and len(last) > 20:
+        more = more.lstrip()[len(last) :]
+    return text + more
+
+
+def final_document(client, settings, summary, times, progress=lambda *_: None, limit=None, continuations=None):
+    """Markdown in the user's format. Optional: a failure here never discards the summaries.
+
+    Every request is measured against the model's context window: the material shrinks
+    until the answer has room, and a text cut off by the answer limit is continued from
+    where it stopped, so a long protocol is not silently truncated. `limit` is a smaller
+    answer room when the summary has little time left; `continuations` likewise.
+    """
+    from .local_llm import final_input_chars, final_output_tokens
+
+    key = settings.final_format if settings.final_format in FINAL_FORMATS else DEFAULT_FORMAT
+    custom = settings.final_prompt.strip()
+    template = custom or FINAL_FORMATS[key][1]
+    title = FINAL_FORMATS[key][0] if template == FINAL_FORMATS[key][1] else "Свой формат"
+    system = FINAL_SYSTEM
+    if extra := settings.summary_instructions.strip():
+        system += USER_INSTRUCTIONS + extra
+    progress("Итоговый текст по выбранному формату…")
+    wanted = min(final_output_tokens(settings), limit) if limit else final_output_tokens(settings)
+    continuations = FINAL_CONTINUATIONS if continuations is None else continuations
+    # Clients that cannot measure (test doubles) accept the most detailed material.
+    room = getattr(client, "room", lambda *_: wanted)
+    source = prompt = None
+    rounds = 0
+    try:
+        for source, material in final_candidates(summary, times, final_input_chars(settings)):
+            candidate = FINAL_PROMPT.format(template=template, material=material)
             try:
-                last = checked_complete(client, prompt, allowed)
-            except (SummaryFormatError, SummaryTooLong) as exc:
-                return fallback_brief(str(exc))
-            reduced.extend(last["items"])
-            progress(f"Объединение: уровень {level + 1}, блок {i + 1}/{len(units)}")
-        if len(units) == 1:
-            if len(last["items"]) > 9:
-                return fallback_brief("Модель вернула более 9 кратких тезисов.")
-            return package(last)
-        if len(json.dumps(reduced)) >= len(json.dumps(current)):
-            return fallback_brief("Модель не сократила промежуточный результат.")
-        current = reduced
-    return fallback_brief("Достигнут предел объединения сводки.")
+                room(system, candidate, wanted, FINAL_MIN_TOKENS)
+            except SummaryTooLong:
+                continue
+            prompt = candidate
+            break
+        if prompt is None:
+            raise SummaryTooLong(
+                "Материал не поместился в контекст модели даже в кратком виде. Уменьшите размер блока "
+                "в настройках или выберите модель с большей памятью."
+            )
+        text, truncated = client.complete_text(system, prompt, wanted, FINAL_MIN_TOKENS)
+        while truncated and rounds < continuations:
+            rounds += 1
+            progress(f"Итоговый текст длинный — дописываю продолжение ({rounds})…")
+            follow = prompt + CONTINUE_PROMPT.format(tail=text[-CONTINUE_TAIL_CHARS:])
+            try:
+                more, truncated = client.complete_text(system, follow, wanted, 512, continuation=True)
+            except SummaryTooLong:
+                break
+            if not more.strip():
+                break
+            text = join_continuation(text, more)
+    except (ValueError, RuntimeError, httpx.HTTPError) as exc:
+        return dict(
+            title=title,
+            format=key,
+            text="",
+            warning="Итоговый текст не создан: " + str(exc)[:300] + " Краткая и подробная сводки сохранены.",
+        )
+    warnings = []
+    if source.startswith("level-"):
+        warnings.append(
+            "Запись длинная: итоговый текст составлен по сжатому реестру пунктов. "
+            "Полный список — во вкладке «Подробная сводка»."
+        )
+    elif FINAL_SOURCES.get(source):
+        warnings.append(FINAL_SOURCES[source])
+    if truncated:
+        warnings.append(
+            "Текст получился очень длинным и после нескольких продолжений всё ещё обрывается: конец может "
+            "отсутствовать. Выберите более краткий формат или сделайте сводку заново."
+        )
+    if not text.strip():
+        warnings.append("Модель вернула пустой текст. Попробуйте другой формат или модель.")
+    return dict(
+        title=title, format=key, text=text, source=source, continued=rounds, warning=" ".join(warnings)
+    )
+
+
+def regenerate_final(store, mid, settings, progress=lambda *_: None, client=None, work=None):
+    """Only the final text, from a stored summary: fast way to try another format."""
+    meeting = store.meeting(mid)
+    if not meeting["summary"]:
+        raise ValueError("Сначала создайте сводку.")
+    summary = json.loads(meeting["summary"])
+    times = {row["id"]: row["start"] for row in store.iter_segments(mid)}
+    if client is not None:
+        summary["final"] = final_document(client, settings, summary, times, progress)
+        return summary
+    with local_model(settings, work, progress) as client:
+        summary["final"] = final_document(client, settings, summary, times, progress)
+    return summary

@@ -6,7 +6,7 @@ import pytest
 
 from samarizator.knowledge import export
 from samarizator.summary import (
-    ChatClient,
+    LocalClient,
     SummaryFormatError,
     SummaryTooLong,
     checked_complete,
@@ -24,6 +24,8 @@ def test_invalid_model_json_is_retried_without_changing_endpoint(meeting):
     requests = []
 
     def handler(request):
+        if request.url.path == "/tokenize":
+            return httpx.Response(404)
         requests.append(request)
         content = (
             "broken JSON"
@@ -34,10 +36,10 @@ def test_invalid_model_json_is_retried_without_changing_endpoint(meeting):
             200, json={"choices": [{"finish_reason": "stop", "message": {"content": content}}]}
         )
 
-    client = ChatClient(settings, transport=httpx.MockTransport(handler), key="test-key")
+    client = LocalClient(settings, "http://127.0.0.1:9", key="test-key", transport=httpx.MockTransport(handler))
     assert checked_complete(client, "private input", {1})["items"][0]["evidence"] == [1]
     assert len(requests) == 2
-    assert all(r.url.host == "company.example" for r in requests)
+    assert all(r.url.host == "127.0.0.1" for r in requests)
     assert json.loads(requests[1].content)["messages"][-1]["content"].startswith("private input")
 
 
@@ -174,12 +176,14 @@ def test_permanent_bad_json_is_bounded(meeting):
     calls = []
 
     def handler(request):
+        if request.url.path == "/tokenize":
+            return httpx.Response(404)
         calls.append(request)
         return httpx.Response(
             200, json={"choices": [{"message": {"content": "invalid"}, "finish_reason": "stop"}]}
         )
 
-    client = ChatClient(settings, transport=httpx.MockTransport(handler), key="test")
+    client = LocalClient(settings, "http://127.0.0.1:9", key="test", transport=httpx.MockTransport(handler))
     with pytest.raises(ValueError, match="JSON"):
         checked_complete(client, "input", {1})
     assert len(calls) == 3
@@ -190,12 +194,14 @@ def test_api_length_signal_is_preserved_for_adaptive_split(meeting):
     calls = []
 
     def handler(request):
+        if request.url.path == "/tokenize":
+            return httpx.Response(404)
         calls.append(request)
         return httpx.Response(
             200, json={"choices": [{"message": {"content": '{"over'}, "finish_reason": "length"}]}
         )
 
-    client = ChatClient(settings, transport=httpx.MockTransport(handler), key="test")
+    client = LocalClient(settings, "http://127.0.0.1:9", key="test", transport=httpx.MockTransport(handler))
     with pytest.raises(SummaryTooLong):
         checked_complete(client, "input", {1})
     assert len(calls) == 1

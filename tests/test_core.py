@@ -85,7 +85,7 @@ def test_gpu_setting_controls_the_no_gpu_flag(tmp_path, monkeypatch):
         calls.append(args)
         (tmp_path / "whisper-result.json").write_text('{"transcription": []}')
 
-    monkeypatch.setattr("samarizator.media.shutil.which", lambda name: "/usr/bin/whisper-cli")
+    monkeypatch.setattr("samarizator.media.tool", lambda name: "/usr/bin/whisper-cli")
     monkeypatch.setattr("samarizator.media.run_command", fake_run)
     whisper(tmp_path / "chunk.wav", "model.bin", "ru", 4, tmp_path)
     whisper(tmp_path / "chunk.wav", "model.bin", "ru", 4, tmp_path, gpu=True)
@@ -152,45 +152,44 @@ def test_invalid_evidence_and_owner_rejected():
         validate_summary(obj, {1})
 
 
-@pytest.mark.parametrize(
-    "url", ["http://corp.test/v1", "https://user:secret@corp.test/v1", "", "file:///tmp/x"]
-)
-def test_base_url_validation(url):
-    with pytest.raises(ValueError):
-        Settings(base_url=url, model="corp").validate(api=True)
+def test_summary_model_must_be_an_existing_gguf(tmp_path):
+    with pytest.raises(ValueError, match="не найдена"):
+        Settings(llm_model="").validate(llm=True)
+    with pytest.raises(ValueError, match="не найдена"):
+        Settings(llm_model=str(tmp_path / "missing.gguf")).validate(llm=True)
+    wrong = tmp_path / "model.bin"
+    wrong.write_bytes(b"ggml" + b"\0" * 100)
+    with pytest.raises(ValueError, match="GGUF"):
+        Settings(llm_model=str(wrong)).validate(llm=True)
+    good = tmp_path / "model.gguf"
+    good.write_bytes(b"GGUF" + b"\0" * 100)
+    Settings(llm_model=str(good)).validate(llm=True)
 
 
-@pytest.mark.parametrize(
-    "url", ["https://openrouter.ai/api/v1", "http://localhost:11434/v1", "http://127.0.0.1:1234/v1"]
-)
-def test_https_and_loopback_http_accepted(url):
-    Settings(base_url=url, model="llama").validate(api=True)
-
-
-@pytest.mark.parametrize(
-    ("base_url", "expected"),
-    [
-        ("https://openrouter.ai/api/v1", "https://openrouter.ai/api/v1/chat/completions"),
-        ("https://openrouter.ai/api/v1/", "https://openrouter.ai/api/v1/chat/completions"),
-        ("https://corp.test/v1/chat/completions", "https://corp.test/v1/chat/completions"),
-    ],
-)
-def test_chat_url_building(base_url, expected):
-    assert Settings(base_url=base_url).chat_url() == expected
-
-
-def test_old_settings_migrate_and_unknown_fields_ignored():
+def test_old_cloud_settings_are_dropped_without_error():
     old = dict(
         endpoint="https://corp.test/v1/chat/completions",
+        base_url="https://corp.test/v1",
         auth_header="api-key",
-        auth_prefix="",
-        ca_file="/tmp/corp.pem",
         model="corp",
+        memory_gb=8,
     )
     settings = Settings.from_dict(old)
-    assert settings.base_url == "https://corp.test/v1"
-    # The migrated value must rebuild the exact previous URL so cached summary blocks stay valid.
-    assert settings.chat_url() == old["endpoint"]
+    assert settings.memory_gb == 8
+    assert not hasattr(settings, "base_url") and not hasattr(settings, "model")
+
+
+def test_moved_app_repoints_bundled_models(tmp_path, monkeypatch):
+    monkeypatch.setenv("SAMARIZATOR_HOME", str(tmp_path / "home"))
+    resources = tmp_path / "New.app/Contents/Resources"
+    (resources / "models").mkdir(parents=True)
+    (resources / "models/ggml-small-q5_1.bin").write_bytes(b"x")
+    monkeypatch.setenv("SAMARIZATOR_RESOURCES", str(resources))
+    old = Settings(whisper_model="/Users/me/Downloads/Old.app/Contents/Resources/models/ggml-small-q5_1.bin")
+    assert old.resolved().whisper_model == str(resources / "models/ggml-small-q5_1.bin")
+    first = Settings.first_run()
+    assert first.whisper_model == str(resources / "models/ggml-small-q5_1.bin")
+    assert not first.vad  # VAD model is not in this bundle
 
 
 def test_ledger_preserves_late_topics_and_cached_maps(meeting):

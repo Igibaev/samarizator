@@ -9,6 +9,7 @@ from .audio_quality import cut_points, diagnose, plan_chunks
 from .config import Settings, data_dir
 from .media import dedup_seam, extract, fingerprint, parse_whisper, probe, whisper
 from .store import Store
+from .thermal import cool_down
 
 
 def status(store, mid, message):
@@ -24,6 +25,7 @@ def transcribe_chunk(store, mid, settings, work, source, duration, index, lower,
     # Cleanup touches only what Whisper hears; the recording on disk stays untouched.
     extract(source, wav, work, start, length, cleanup=settings.audio_cleanup)
     diagnostics = [dict(channel=None, **diagnose(wav))]
+    cool_down(lambda message: status(store, mid, message), settings.cool_down)
     result = whisper(
         wav,
         settings.whisper_model,
@@ -64,9 +66,9 @@ def transcribe(store, mid, settings, work):
         raise ValueError("Исходный файл перемещён. Верните его по прежнему пути или импортируйте заново.")
     settings.validate()
     if not Path(settings.whisper_model).is_file():
-        raise ValueError("Модель Whisper не найдена. Запустите ./start.sh или выберите .bin в настройках.")
+        raise ValueError("Модель Whisper не найдена. Выберите .bin в настройках (или запустите ./start.sh из исходников).")
     if settings.vad and not Path(settings.vad_model).is_file():
-        raise ValueError("Модель VAD не найдена. Запустите ./start.sh --quality или отключите VAD.")
+        raise ValueError("Модель VAD не найдена. Отключите VAD в настройках или запустите ./start.sh --quality.")
     if Path(settings.whisper_model).stat().st_size * 2.5 + 600 * 1024**2 > settings.memory_gb * 1024**3 * 0.8:
         raise ValueError(
             "Выбранная модель слишком велика для бюджета. Выберите small-q5_1/base или увеличьте бюджет."
@@ -120,9 +122,9 @@ def catchup(store, mid, settings, work, poll=2.0, sleep=None):
     source = Path(store.meeting(mid)["source"])
     settings.validate()
     if not Path(settings.whisper_model).is_file():
-        raise ValueError("Модель Whisper не найдена. Запустите ./start.sh или выберите .bin в настройках.")
+        raise ValueError("Модель Whisper не найдена. Выберите .bin в настройках (или запустите ./start.sh из исходников).")
     if settings.vad and not Path(settings.vad_model).is_file():
-        raise ValueError("Модель VAD не найдена. Запустите ./start.sh --quality или отключите VAD.")
+        raise ValueError("Модель VAD не найдена. Отключите VAD в настройках или запустите ./start.sh --quality.")
     while True:
         stopped = bool(store.checkpoint(mid, "live-stopped", 0))
         available = 0.0
@@ -205,6 +207,7 @@ def retry_uncertain(store, mid, settings, work, limit=20, pad=2.0):
             channel=row.get("source_channel"),
             cleanup=settings.audio_cleanup,
         )
+        cool_down(lambda message: status(store, mid, message), settings.cool_down)
         result = whisper(
             wav,
             settings.whisper_model,
@@ -227,7 +230,8 @@ def retry_uncertain(store, mid, settings, work, limit=20, pad=2.0):
 def main():
     phase, mid = sys.argv[1:3]
     store = Store()
-    settings = Settings.from_dict(json.loads(store.meeting(mid)["settings"]))
+    # Model paths are re-pointed if the app was moved since the meeting was created.
+    settings = Settings.from_dict(json.loads(store.meeting(mid)["settings"])).resolved()
     os.environ["SAMARIZATOR_THREADS"] = str(settings.threads)
     work_root = data_dir() / "work"
     work_root.mkdir(exist_ok=True)
@@ -243,7 +247,17 @@ def main():
                 from .knowledge import export
                 from .summary import summarize
 
-                result = summarize(store, mid, settings, lambda msg: status(store, mid, msg))
+                result = summarize(store, mid, settings, lambda msg: status(store, mid, msg), work=Path(temp))
+                store.update(mid, summary=json.dumps(result, ensure_ascii=False))
+                export(store, mid, settings)
+                store.update(mid, status="done", error=None)
+            elif phase == "final":
+                from .knowledge import export
+                from .summary import regenerate_final
+
+                result = regenerate_final(
+                    store, mid, settings, lambda msg: status(store, mid, msg), work=Path(temp)
+                )
                 store.update(mid, summary=json.dumps(result, ensure_ascii=False))
                 export(store, mid, settings)
                 store.update(mid, status="done", error=None)

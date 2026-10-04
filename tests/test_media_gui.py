@@ -1,6 +1,7 @@
 import json
 import shutil
 import subprocess
+import types
 import wave
 
 import pytest
@@ -92,9 +93,13 @@ def test_gui_constructs_and_shows_recording(tmp_path, monkeypatch):
 
     popen_calls = []
     monkeypatch.setattr("samarizator.app.shutil.which", lambda name: "/usr/bin/ffplay")
-    monkeypatch.setattr(
-        "samarizator.app.subprocess.Popen", lambda args, **kw: popen_calls.append(args) or FakeProc()
+    # Only the app module sees the fake: the settings dialog below still lists audio
+    # devices through the real subprocess module on macOS.
+    fake_subprocess = types.SimpleNamespace(
+        **{name: getattr(subprocess, name) for name in ("DEVNULL", "run", "SubprocessError")},
+        Popen=lambda args, **kw: popen_calls.append(args) or FakeProc(),
     )
+    monkeypatch.setattr("samarizator.app.subprocess", fake_subprocess)
     w.play_segment()
     assert popen_calls and popen_calls[0][0] == "/usr/bin/ffplay"
     assert "-ss" in popen_calls[0] and "-t" in popen_calls[0]
@@ -110,12 +115,17 @@ def test_gui_constructs_and_shows_recording(tmp_path, monkeypatch):
     detailed = dict(overview="Детали обсуждения", items=[item], topics=["Бюджет"], resolved=[resolved_item])
     w.store.update(mid, summary=json.dumps(dict(**brief, brief=brief, detailed=detailed)))
     w.load_detail()
-    assert "Короткий итог" in w.summary.toPlainText()
-    assert "17 млн" not in w.summary.toPlainText()
-    assert "17 млн" in w.detailed_summary.toPlainText()
-    assert "▶" in w.detailed_summary.toPlainText()
-    assert "00:00:00" not in w.detailed_summary.toPlainText()
-    assert "Бюджет утверждён (итог)" in w.resolved_summary.toPlainText()
+    page = w.summary_page
+    assert "Короткий итог" in page.plain_text("brief")
+    assert "17 млн" not in page.plain_text("brief")
+    assert "17 млн" in page.plain_text("detailed")
+    assert page.evidence_buttons("detailed")
+    assert "Бюджет утверждён (итог)" in page.plain_text("decisions")
+    # Opening the record shows the result first; the views switch without reloading.
+    w.set_view("summary")
+    assert w.stack.currentWidget() is page
+    w.set_view("transcript")
+    assert w.stack.currentWidget() is w.transcript_page
     from PySide6.QtWidgets import QMessageBox
 
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
@@ -136,11 +146,12 @@ def test_gui_constructs_and_shows_recording(tmp_path, monkeypatch):
     assert dialog.fields["memory_gb"].value() == 16
     assert dialog.fields["vad"].isChecked()
     assert dialog.fields["whisper_model"].text() == old_model
-    dialog.fields["base_url"].setText("https://typed-by-hand.example/v1")
-    dialog.pick_provider(dialog.provider.findData("https://openrouter.ai/api/v1"))
-    assert dialog.fields["base_url"].text() == "https://openrouter.ai/api/v1"
-    dialog.pick_provider(dialog.provider.findData(""))
-    assert dialog.fields["base_url"].text() == "https://openrouter.ai/api/v1"
+    assert not {"base_url", "model"} & dialog.fields.keys()
+    lecture = dialog.fields["final_format"].findData("lecture")
+    dialog.pick_format(lecture)
+    assert "Основные идеи" in dialog.fields["final_prompt"].toPlainText()
+    assert "✓" not in dialog.llm_state.text()  # no summary model downloaded yet
+    assert w.model_button.isVisibleTo(w)
     from PySide6.QtCore import QCoreApplication, QEvent
 
     w.timer.stop()

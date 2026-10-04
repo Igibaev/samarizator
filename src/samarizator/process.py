@@ -1,12 +1,53 @@
-"""CPU-only subprocesses and aggregate RSS watchdog (not an OS hard quota)."""
+"""Subprocesses under an aggregate memory watchdog (not an OS hard quota).
 
+On macOS the watchdog reads each process's physical footprint, the number Activity
+Monitor shows as "Memory": unlike RSS it includes Metal (GPU) allocations, so
+recognition and summaries can run on the GPU and still stay inside the budget.
+"""
+
+import ctypes
+import ctypes.util
 import os
 import signal
+import struct
 import subprocess
+import sys
 import time
 from pathlib import Path
 
 import psutil
+
+# libproc's proc_pid_rusage(pid, RUSAGE_INFO_V2, buffer): ri_phys_footprint follows a
+# 16-byte UUID and seven uint64 counters (sys/resource.h, struct rusage_info_v2).
+RUSAGE_INFO_V2 = 2
+RUSAGE_V2_SIZE = 16 + 18 * 8
+FOOTPRINT_OFFSET = 16 + 7 * 8
+_libproc = None
+
+
+def phys_footprint(pid):
+    """Bytes of physical memory charged to `pid` on macOS, GPU memory included; None elsewhere."""
+    global _libproc
+    if sys.platform != "darwin":
+        return None
+    try:
+        if _libproc is None:
+            _libproc = ctypes.CDLL(ctypes.util.find_library("proc") or "/usr/lib/libproc.dylib")
+            _libproc.proc_pid_rusage.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
+            _libproc.proc_pid_rusage.restype = ctypes.c_int
+        buffer = ctypes.create_string_buffer(RUSAGE_V2_SIZE)
+        if _libproc.proc_pid_rusage(pid, RUSAGE_INFO_V2, buffer) != 0:
+            return None
+        return struct.unpack_from("<Q", buffer.raw, FOOTPRINT_OFFSET)[0]
+    except (OSError, AttributeError):
+        return None
+
+
+def process_memory(process):
+    """The larger of RSS (mapped model files) and the footprint (Metal buffers)."""
+    rss = process.memory_info().rss
+    footprint = phys_footprint(process.pid)
+    return max(rss, footprint or 0)
 
 
 class BudgetExceeded(RuntimeError):
@@ -22,7 +63,7 @@ def rss_tree(pid):
     total = 0
     for p in procs:
         try:
-            total += p.memory_info().rss
+            total += process_memory(p)
         except psutil.NoSuchProcess:
             pass
         except psutil.AccessDenied:

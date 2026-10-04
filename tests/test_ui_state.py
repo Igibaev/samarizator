@@ -56,7 +56,7 @@ def test_exactly_one_step_is_highlighted(window, tmp_path):
     # Recognition is done, so the highlight moves on instead of the button turning into a label.
     assert win.transcribe.property("primary") is False
     assert win.summarize.property("primary") is True
-    assert win.transcribe.text() == "1. Распознать / продолжить"
+    assert win.transcribe.text() == "Распознать"
     assert "уже завершено" in win.transcribe.toolTip()
 
 

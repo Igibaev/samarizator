@@ -6,6 +6,12 @@ __pycache__/
 .DS_Store
 .env
 *.bin
+*.gguf
+*.part
+# Model weights are downloaded, never committed; models/ keeps only the manifest and guide.
+models/*
+!models/bundle.json
+!models/README.md
 *.onnx
 *.wav
 *.mp4

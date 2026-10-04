@@ -5,6 +5,12 @@ from pathlib import Path
 
 
 def build_label():
+    from .bundle import resources
+
+    # The packaged app has no git checkout: build.sh writes the commit next to its tools.
+    root = resources()
+    if root is not None and (root / "build.txt").is_file():
+        return "Локальные сводки · " + (root / "build.txt").read_text().strip()
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--short", "HEAD"],
@@ -17,4 +23,4 @@ def build_label():
         revision = result.stdout.strip()
     except (OSError, subprocess.SubprocessError):
         revision = "архив"
-    return "Сводки 2.6 · Live: две дорожки · " + revision
+    return "Локальные сводки · " + revision

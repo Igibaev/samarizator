@@ -1,0 +1,6 @@
+{
+  "whisper": "",
+  "vad": "ggml-silero-v6.2.0.bin",
+  "llm": "",
+  "files": {}
+}

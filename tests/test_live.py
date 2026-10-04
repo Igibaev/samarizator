@@ -342,7 +342,7 @@ def test_settings_dialog_exposes_live_source_and_devices(tmp_path, monkeypatch):
     from samarizator.app import SettingsDialog
     from samarizator.config import Settings
 
-    monkeypatch.setattr("samarizator.app.audio_devices", lambda ffmpeg: list(DEVICES))
+    monkeypatch.setattr("samarizator.live.audio_devices", lambda ffmpeg: list(DEVICES))
     app = QApplication.instance() or QApplication([])
     settings = Settings(live_source="system", live_system_device="BlackHole 2ch")
     dialog = SettingsDialog(settings)

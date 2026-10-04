@@ -2,9 +2,9 @@ import hashlib
 import json
 import math
 import re
-import shutil
 from pathlib import Path
 
+from .bundle import tool
 from .process import run_command
 
 _TOKEN = re.compile(r"\S+")
@@ -22,7 +22,7 @@ def probe(path, work):
     out = work / "probe.json"
     run_command(
         [
-            "ffprobe",
+            tool("ffprobe"),
             "-v",
             "error",
             "-select_streams",
@@ -60,7 +60,7 @@ CLEANUP_PROFILES = {
 
 def extract(source, target, work, start=0, duration=None, channel=None, cleanup="off"):
     args = [
-        "ffmpeg",
+        tool("ffmpeg"),
         "-nostdin",
         "-v",
         "error",
@@ -152,9 +152,9 @@ def dedup_seam(prev_text, text, max_words=12):
 
 
 def whisper(wav, model, language, threads, work, gpu=False, *, vad_model="", glossary="", beam_size=5):
-    binary = shutil.which("whisper-cli")
-    if not binary:
-        raise ValueError("whisper-cli не найден. Запустите ./start.sh для установки.")
+    binary = tool("whisper-cli")
+    if not Path(binary).is_absolute():
+        raise ValueError("whisper-cli не найден. Переустановите Samarizator или запустите ./start.sh.")
     prefix = work / "whisper-result"
     result = prefix.with_suffix(".json")
     result.unlink(missing_ok=True)

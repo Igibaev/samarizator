@@ -46,12 +46,13 @@ def test_audio_diagnostics_distinguish_silence_and_clipping(tmp_path):
     assert diagnose(path)["warnings"] == []
 
 
-def test_profile_keeps_user_models_and_api(tmp_path, monkeypatch):
+def test_profile_keeps_user_models(tmp_path, monkeypatch):
     monkeypatch.setenv("SAMARIZATOR_HOME", str(tmp_path))
-    s = Settings(whisper_model="my-better-model.bin", base_url="https://corp/v1", model="corp")
+    s = Settings(whisper_model="my-better-model.bin", llm_model="summary.gguf", final_format="lecture")
     q = s.quality_profile()
-    assert q.whisper_model == s.whisper_model and q.base_url == s.base_url and q.model == s.model
-    assert q.memory_gb == 16 and q.vad and q.pause_boundaries and not q.gpu
+    assert q.whisper_model == s.whisper_model and q.llm_model == s.llm_model
+    assert q.final_format == "lecture"
+    assert q.memory_gb == 16 and q.vad and q.pause_boundaries and q.gpu
     assert s.memory_gb == 4  # profile does not mutate the settings behind an open dialog
 
 
@@ -77,7 +78,7 @@ def test_decoder_receives_vad_and_literal_glossary(tmp_path, monkeypatch):
         calls.append(args)
         (tmp_path / "whisper-result.json").write_text('{"transcription": []}')
 
-    monkeypatch.setattr("samarizator.media.shutil.which", lambda _: "whisper-cli")
+    monkeypatch.setattr("samarizator.media.tool", lambda _: "/opt/whisper-cli")
     monkeypatch.setattr("samarizator.media.run_command", run)
     whisper("audio.wav", "asr.bin", "ru", 8, tmp_path, vad_model="vad.bin", glossary="EBITDA, Иванов")
     assert "-ojf" in calls[0] and "--vad" in calls[0]
