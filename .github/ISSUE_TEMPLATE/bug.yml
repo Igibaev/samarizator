@@ -1,0 +1,58 @@
+name: Ошибка
+description: Что-то работает не так, как ожидалось
+title: "Ошибка: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Спасибо, что сообщаете! Сообщения здесь видны всем — **не прикладывайте записи,
+        расшифровки и сводки с персональными данными**. Если нужен пример текста, используйте
+        вкладку «Обезличивание».
+  - type: textarea
+    id: what
+    attributes:
+      label: Что случилось
+      description: Что вы делали и что пошло не так. Скриншот можно вставить прямо сюда.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Как повторить
+      placeholder: |
+        1. Добавил запись на 30 минут
+        2. Нажал «Создать сводку»
+        3. Через 20 минут прогресс не изменился
+  - type: textarea
+    id: expected
+    attributes:
+      label: Чего вы ожидали
+  - type: input
+    id: version
+    attributes:
+      label: Версия Samarizator
+      description: Меню «Samarizator» → «О программе Samarizator»
+      placeholder: "0.2.0"
+  - type: input
+    id: macos
+    attributes:
+      label: Версия macOS
+      placeholder: "15.6"
+  - type: input
+    id: mac
+    attributes:
+      label: Mac и память
+      placeholder: "MacBook Pro M4 Pro, 48 ГБ"
+  - type: input
+    id: model
+    attributes:
+      label: Модели
+      description: Модель распознавания и модель сводок (Настройки → Основное)
+      placeholder: "Podlodka Turbo, GigaChat 3.1 Lightning"
+  - type: textarea
+    id: log
+    attributes:
+      label: Текст ошибки
+      description: Кнопка «Скопировать ошибку» под названием записи или строка состояния внизу окна
+      render: text

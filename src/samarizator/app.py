@@ -9,6 +9,7 @@ import time
 from collections import deque
 from dataclasses import asdict
 from datetime import datetime, timedelta
+from html import escape
 from pathlib import Path
 
 from PySide6.QtCore import QLockFile, QSize, Qt, QThread, QTimer, QUrl, Signal
@@ -37,7 +38,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import local_llm, obsidian
+from . import __version__, feedback, local_llm, obsidian
 from . import progress as work
 from .bundle import python_command, tool
 from .chat import ChatEngine, ChatPanel, ChatWorker
@@ -331,12 +332,48 @@ class Window(QMainWindow):
         settings.setMenuRole(QAction.MenuRole.PreferencesRole)
         settings.triggered.connect(self.configure)
         self.addAction(settings)
+        # «О программе Samarizator»: Qt puts it into the app menu, as on every Mac.
+        about = QAction("О программе Samarizator", self)
+        about.setMenuRole(QAction.MenuRole.AboutRole)
+        about.triggered.connect(self.show_about)
+        self.addAction(about)
         if sys.platform == "darwin":
             menu = self.menuBar().addMenu("Файл")
             menu.addAction(settings)
             add = menu.addAction("Добавить аудио или видео…", self.add_file)
             add.setShortcut(QKeySequence.StandardKey.Open)
+            help_menu = self.menuBar().addMenu("Справка")
+            help_menu.addAction(about)
+            help_menu.addAction("Сообщить об ошибке…", self.report_bug)
+            help_menu.addAction("Предложить улучшение…", lambda: self.open_url(feedback.idea_url()))
+            help_menu.addAction("Страница Samarizator", lambda: self.open_url(feedback.PAGE))
         self.settings_action = settings
+        self.about_action = about
+
+    @staticmethod
+    def open_url(url):
+        QDesktopServices.openUrl(QUrl(url))
+
+    def report_bug(self):
+        """The bug form of the project with version, macOS, memory and models filled in."""
+        self.open_url(feedback.bug_url(self.settings))
+
+    def about_text(self):
+        return (
+            f"<p><b>Samarizator {__version__}</b><br>{escape(self.build_label)}</p>"
+            "<p>Расшифровка записей и сводки встреч на этом Mac — без интернета и облака.</p>"
+            f'<p><a href="{feedback.PAGE}">Страница и последняя версия</a><br>'
+            f'<a href="{escape(feedback.bug_url(self.settings))}">Сообщить об ошибке</a> · '
+            f'<a href="{escape(feedback.idea_url())}">Предложить улучшение</a></p>'
+        )
+
+    def show_about(self):
+        box = QMessageBox(self)
+        box.setWindowTitle("О программе Samarizator")
+        box.setIconPixmap(app_icon(64))
+        box.setTextFormat(Qt.TextFormat.RichText)
+        box.setText(self.about_text())
+        box.exec()
 
     def build_content(self):
         content = QWidget()

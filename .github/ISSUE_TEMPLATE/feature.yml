@@ -1,0 +1,21 @@
+name: Предложение
+description: Идея, как сделать Samarizator удобнее
+title: "Предложение: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: Что предлагаете
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Зачем это нужно
+      description: Какую задачу это решит — например, как вы сейчас обходитесь без этого.
+  - type: input
+    id: version
+    attributes:
+      label: Версия Samarizator
+      description: Меню «Samarizator» → «О программе Samarizator»
