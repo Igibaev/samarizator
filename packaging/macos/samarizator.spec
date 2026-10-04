@@ -1,7 +1,7 @@
 # PyInstaller spec for Samarizator.app. Run through packaging/macos/build.sh.
 import os
 
-from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_submodules
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_submodules, copy_metadata
 
 ROOT = os.path.abspath(os.path.join(SPECPATH, "..", ".."))
 VERSION = os.environ.get("SAMARIZATOR_VERSION", "0.1.0")
@@ -21,6 +21,9 @@ try:
         + ["jinja2"]
     )
     mlx_datas = collect_data_files("mlx") + collect_data_files("mlx_lm") + collect_data_files("transformers")
+    # These packages read their own (and their dependencies') metadata when imported.
+    for package in ("mlx-lm", "llguidance", "transformers"):
+        mlx_datas += copy_metadata(package, recursive=True)
     mlx_binaries = collect_dynamic_libs("mlx")
 except ImportError:
     pass

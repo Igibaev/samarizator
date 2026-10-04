@@ -182,7 +182,15 @@ SUFFIX="${SAMARIZATOR_BUNDLE_LLM:+-with-$SAMARIZATOR_BUNDLE_LLM}"
 DMG="$ROOT/dist/Samarizator-$VERSION-$ARCH$SUFFIX.dmg"
 mkdir -p "$ROOT/dist"
 rm -f "$DMG"
-hdiutil create -volname "Samarizator" -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null
+# hdiutil sometimes reports "Resource busy" while macOS still scans the fresh bundle: retry.
+for attempt in 1 2 3 4 5; do
+  if hdiutil create -volname "Samarizator" -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null; then
+    break
+  fi
+  [[ $attempt -lt 5 ]] || { echo "hdiutil не смог создать образ" >&2; exit 1; }
+  echo "hdiutil занят, повтор через $((attempt * 5)) с…"
+  sleep $((attempt * 5))
+done
 [[ "$IDENTITY" == "-" ]] || codesign --force --sign "$IDENTITY" "$DMG"
 notarize "$DMG" "$DMG"
 say "Готово: $DMG ($(du -h "$DMG" | cut -f1))"
