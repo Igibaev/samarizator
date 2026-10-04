@@ -156,6 +156,16 @@ class SummaryPage(QScrollArea):
             banner = Banner("warn")
             banner.set_text("Проверьте по записи", " ".join(dict.fromkeys(warnings)))
             self.column.addWidget(banner)
+        prepared = summary.get("preparation") or {}
+        if prepared.get("pruned"):
+            minutes = max(1, round(prepared.get("pruned_seconds", 0) / 60))
+            note = Banner("info")
+            note.set_text(
+                "Пустые фрагменты не вошли в сводку",
+                f"{prepared['pruned']} реплик, около {minutes} мин: приветствия, проверка связи, шум. "
+                "В расшифровке они остались.",
+            )
+            self.column.addWidget(note)
         self.add_brief(brief)
         points = [item for item in brief["items"] if item["kind"] not in {"decision", "action"}]
         main = [item for item in points if item["kind"] == "point"]

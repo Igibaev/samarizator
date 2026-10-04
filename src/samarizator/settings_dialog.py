@@ -267,6 +267,16 @@ class SettingsDialog(QDialog):
             self.fields["llm_gpu"],
             subtitle="Metal на Apple Silicon: сводка в разы быстрее, чем на процессоре.",
         )
+        self.fields["prune_fragments"] = Switch(s.prune_fragments)
+        self.decider_button = QPushButton("Скачать 0,6 ГБ")
+        self.decider_button.clicked.connect(self.download_decider)
+        self.decider_detail = models.row(
+            "Отбор пустых фрагментов",
+            self.decider_button,
+            self.fields["prune_fragments"],
+            subtitle="",
+        )
+        self.describe_decider()
         manage = QPushButton("Управлять…")
         manage.clicked.connect(self.manage_models)
         self.models_detail = models.row("Скачанные модели", manage, subtitle="")
@@ -617,6 +627,27 @@ class SettingsDialog(QDialog):
             self.whisper_detail.setText(line or "Скачайте модель — это нужно один раз.")
             self.whisper_detail.setVisible(True)
 
+    def describe_decider(self):
+        ready = local_llm.decision_model_path().is_file()
+        self.decider_button.setVisible(not ready)
+        self.decider_detail.setText(
+            "Маленькая модель отсеивает приветствия, «меня слышно?» и шум до сводки — основная "
+            "модель читает меньше. " + ("Модель скачана." if ready else "Нужно скачать модель один раз.")
+        )
+        self.decider_detail.setVisible(True)
+
+    def download_decider(self):
+        dialog = ModelDownloadDialog(
+            self,
+            {local_llm.DECISION_PRESET.key: local_llm.DECISION_PRESET},
+            "Модель отбора фрагментов",
+            "Маленькая модель перед сводкой отсеивает пустые фрагменты, чтобы основная модель не тратила "
+            "на них время. Скачивается один раз.",
+        )
+        dialog.exec()
+        self.describe_decider()
+        self.describe_storage()
+
     def describe_storage(self):
         files = downloaded_models()
         total = sum(size for _, size in files)
@@ -639,6 +670,7 @@ class SettingsDialog(QDialog):
             if key == "vad_model":
                 self.fields["vad"].setChecked(False)
         self.describe_storage()
+        self.describe_decider()
 
     def pick(self, key, widget):
         path = (
@@ -712,6 +744,8 @@ def describe_model_file(path):
     if path.suffix == ".part":
         name = path.name.removesuffix(".part")
         return f"Недокачанная загрузка · {name}", "Можно удалить: загрузка начнётся заново"
+    if path.name == local_llm.DECISION_PRESET.file:
+        return preset_name(local_llm.DECISION_PRESET), "Отбор фрагментов перед сводкой"
     for presets in (local_llm.PRESETS, WHISPER_PRESETS):
         preset = next((p for p in presets.values() if p.file == path.name), None)
         if preset:

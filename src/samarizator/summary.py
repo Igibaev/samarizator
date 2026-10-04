@@ -779,12 +779,19 @@ def review_source(client, source, draft, max_chars):
     return dict(_source_result(result, allowed, primary), review_receipts=receipts)
 
 
-def summarize(store, mid, settings, progress=lambda *_: None, client=None, work=None):
-    """Whole pipeline. Without a client, starts the local model for the duration of the job."""
+def summarize(store, mid, settings, progress=lambda *_: None, client=None, work=None, decider=None):
+    """Whole pipeline. Without a client, starts the local model for the duration of the job.
+
+    First a small decision model may set aside empty fragments (decide.py); it runs and
+    stops before the summary model loads, so the two never share the memory.
+    """
+    from .decide import select_fragments
+
+    dropped = select_fragments(store, mid, settings, progress, decider, work, local=client is None)
     if client is not None:
-        return _summarize(store, mid, settings, progress, client)
+        return _summarize(store, mid, settings, progress, client, dropped)
     with local_model(settings, work, progress) as client:
-        return _summarize(store, mid, settings, progress, client)
+        return _summarize(store, mid, settings, progress, client, dropped)
 
 
 class local_model:
@@ -821,8 +828,10 @@ class local_model:
         return False
 
 
-def _summarize(store, mid, settings, progress, client):
+def _summarize(store, mid, settings, progress, client, dropped=(set(), 0.0)):
     maps = []
+    left_out, left_seconds = dropped
+    preparation = dict(pruned=0, pruned_seconds=0.0, cleaned_percent=0)
 
     def map_block(block, index, before, after, node=1, depth=0):
         source = dict(before=before, segments=[json.loads(line) for _, line in block], after=after)
@@ -917,10 +926,19 @@ def _summarize(store, mid, settings, progress, client):
     # Planned up front so progress can say "block 8 of 22" instead of a bare counter.
     # The model reads a tidied copy: hesitations and stutters cost tokens and mean nothing.
     stats = {}
-    rows = tidy_rows(store.iter_segments(mid), settings.clean_input, stats)
+    rows = (
+        row
+        for row in tidy_rows(store.iter_segments(mid), settings.clean_input, stats)
+        if row["id"] not in left_out
+    )
     planned = list(contextual_blocks(rows, settings.input_chars))
+    if left_out:
+        fragments = len(left_out)
+        preparation.update(pruned=fragments, pruned_seconds=round(left_seconds, 1))
+        progress(f"Подготовка: {fragments} пустых реплик не пойдут в сводку")
     if stats.get("before") and stats["after"] < stats["before"]:
         saved = round(100 * (1 - stats["after"] / stats["before"]))
+        preparation["cleaned_percent"] = saved
         if saved:
             progress(f"Подготовка: убрано {saved}% текста — паузы, повторы и слова-паразиты")
     total = len(planned)
@@ -1015,6 +1033,7 @@ def _summarize(store, mid, settings, progress, client):
 
     def package(brief):
         result = package_summary(brief, ledger, maps, resolved, parts)
+        result["preparation"] = preparation
         result["detailed"]["resolution_warning"] = " ".join(resolve_warnings)
         warning = " ".join(dict.fromkeys(m["quality_warning"] for m in maps if m.get("quality_warning")))
         if warning:

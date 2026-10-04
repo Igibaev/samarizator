@@ -192,3 +192,109 @@ def test_blocks_are_written_in_parallel_and_kept_in_order(meeting):
     firsts = [it["evidence"][0] for it in result["detailed"]["items"]]
     assert firsts == sorted(firsts)  # the register keeps the order of the recording
     assert any("одновременно" in line for line in progress)
+
+
+def test_decision_model_answers_with_probabilities_not_text():
+    import math
+
+    import httpx
+
+    from samarizator.decide import Decider
+
+    seen = []
+
+    def handler(request):
+        body = json.loads(request.content)
+        seen.append(body)
+        top = [dict(token="no", logprob=math.log(0.95)), dict(token=" yes", logprob=math.log(0.04))]
+        choice = dict(message=dict(content="no"), logprobs=dict(content=[dict(token="no", top_logprobs=top)]))
+        return httpx.Response(200, json=dict(choices=[choice]))
+
+    decider = Decider("http://127.0.0.1:9", "k", transport=httpx.MockTransport(handler))
+    assert abs(decider.keep_probability("Меня слышно?") - 0.04 / 0.99) < 1e-9
+    assert seen[0]["max_tokens"] == 1 and seen[0]["logprobs"] is True
+    assert "Меня слышно?" in seen[0]["messages"][-1]["content"]
+
+
+class FakeDecider:
+    parallel = 2
+
+    def __init__(self, empty):
+        self.empty = empty
+        self.asked = []
+
+    def keep_probability(self, text):
+        self.asked.append(text)
+        return 0.02 if any(word in text for word in self.empty) else 0.97
+
+
+def test_only_short_fragments_the_model_is_sure_about_are_left_out(meeting):
+    from samarizator.summary import summarize
+    from samarizator.summary_prompts import MAP_PROMPT
+
+    store, mid, settings = meeting
+    rows = [
+        dict(start=0, end=3, speaker="Речь", text="Добрый день! Меня слышно?", uncertain=0),
+        dict(start=10, end=14, speaker="Речь", text="Бюджет утвердили, 17 миллионов.", uncertain=0),
+        dict(
+            start=80, end=200, speaker="Речь", text="Слышно. " + "Подробно о плане продаж. " * 30, uncertain=0
+        ),
+    ]
+    store.save_chunk(mid, 0, rows)
+    ids = [row["id"] for row in store.segments(mid)]
+    decider = FakeDecider(["Меня слышно", "Слышно."])
+
+    class Fake:
+        def __init__(self):
+            self.seen = set()
+
+        def complete(self, prompt, allowed):
+            if prompt.startswith(REVIEW_PROMPT):
+                draft = json.loads(prompt[len(REVIEW_PROMPT) :])["draft"]
+                return dict(keep=list(range(len(draft["items"]))), edit=[], add=[], removed=[])
+            if prompt.startswith(MAP_PROMPT):
+                self.seen |= {r["id"] for r in json.loads(prompt[len(MAP_PROMPT) :])["source"]["segments"]}
+            return dict(overview="Обзор.", topics=[], items=[item("Бюджет", min(allowed))])
+
+    fake = Fake()
+    result = summarize(store, mid, settings, client=fake, decider=decider)
+    assert ids[0] not in fake.seen and {ids[1], ids[2]} <= fake.seen
+    # The long fragment is never asked about, whatever it starts with.
+    assert len(decider.asked) == 2 and not any("плане продаж" in text for text in decider.asked)
+    assert result["preparation"]["pruned"] == 1 and result["preparation"]["pruned_seconds"] == 3
+    # Decisions are kept with the meeting: a repeated summary does not ask again.
+    again = FakeDecider(["Меня слышно"])
+    summarize(store, mid, settings, client=Fake(), decider=again)
+    assert again.asked == []
+
+
+def test_a_failing_decision_model_never_blocks_the_summary(meeting):
+    from samarizator.decide import select_fragments
+
+    store, mid, settings = meeting
+    store.save_chunk(mid, 0, [dict(start=0, end=2, speaker="Речь", text="Алло?", uncertain=0)])
+
+    class Broken:
+        parallel = 1
+
+        def keep_probability(self, text):
+            raise RuntimeError("server gone")
+
+    notes = []
+    assert select_fragments(store, mid, settings, notes.append, Broken()) == (set(), 0.0)
+    assert any("пропущен" in note for note in notes)
+    settings.prune_fragments = False
+    assert select_fragments(store, mid, settings, notes.append, FakeDecider(["Алло"])) == (set(), 0.0)
+
+
+def test_decision_model_is_downloaded_in_the_closest_quantisation():
+    from samarizator import local_llm
+
+    gb = 1024**3
+    listing = [
+        dict(type="file", path="Qwen3-0.6B-Q4_K_M.gguf", size=gb),
+        dict(type="file", path="Qwen3-0.6B-Q8_0.gguf", size=gb),
+    ]
+    assert local_llm.pick_gguf(listing) == "Qwen3-0.6B-Q4_K_M.gguf"
+    assert local_llm.pick_gguf(listing, prefer="q8_0") == "Qwen3-0.6B-Q8_0.gguf"
+    assert local_llm.DECISION_PRESET.url.endswith("#q8_0")

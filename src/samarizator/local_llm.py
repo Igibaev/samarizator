@@ -103,6 +103,24 @@ PRESETS = {
     ]
 }
 
+# A small model asked typed questions («есть ли в фрагменте что-то по делу: yes/no») —
+# decisions with probabilities instead of text, in the spirit of System One models.
+DECISION_PRESET = Preset(
+    "qwen3-0.6b",
+    "Отбор фрагментов · Qwen3 0.6B",
+    "Qwen3-0.6B-Q8_0.gguf",
+    "hf-repo:unsloth/Qwen3-0.6B-GGUF|ggml-org/Qwen3-0.6B-GGUF#q8_0",
+    0.64,
+    0,
+    "Отсеивает пустые фрагменты перед сводкой: приветствия, «меня слышно?», шум.",
+    ram_gb=1.2,
+)
+
+
+def decision_model_path():
+    return models_dir() / DECISION_PRESET.file
+
+
 # Russian text in JSON costs roughly 2.5–3 characters per token for these tokenizers;
 # 2.0 leaves room for escaping and denser text.
 CHARS_PER_TOKEN = 2.0
@@ -360,8 +378,9 @@ def pick_ggml(entries):
 GGUF_QUANTS = ("q4_k_m", "ud-q4_k_xl", "q4_k_xl", "q4_k_s", "q4_0", "q5_k_m", "q6_k", "q8_0")
 
 
-def pick_gguf(entries):
+def pick_gguf(entries, prefer=None):
     """The single-file GGUF of the preferred quantisation in a tree listing, or None."""
+    quants = ((prefer,) if prefer else ()) + tuple(q for q in GGUF_QUANTS if q != prefer)
     files = []
     for entry in entries:
         path = str(entry.get("path", ""))
@@ -372,10 +391,10 @@ def pick_gguf(entries):
             or not name.endswith(".gguf")
             or "mmproj" in name  # vision projector, not the language model
             or "-of-0" in name  # split files: llama-server is given one file
-            or size < 500 * 1024**2
+            or size < 200 * 1024**2
         ):
             continue
-        rank = next((i for i, quant in enumerate(GGUF_QUANTS) if quant in name), None)
+        rank = next((i for i, quant in enumerate(quants) if quant in name), None)
         if rank is not None:
             files.append((rank, path.count("/"), path))
     return min(files)[2] if files else None
@@ -385,7 +404,11 @@ def resolve_hf_repo(spec, opener, pick=pick_ggml):
     """Download address of the weights in the first repository that has them."""
     import json
 
-    for repo in spec.removeprefix(HF_REPO).split("|"):
+    # "…#q8_0" asks for another quantisation than the default Q4_K_M.
+    spec, _, prefer = spec.removeprefix(HF_REPO).partition("#")
+    if prefer and pick is pick_gguf:
+        pick = lambda entries, choose=pick_gguf: choose(entries, prefer)  # noqa: E731
+    for repo in spec.split("|"):
         request = urllib.request.Request(
             f"{HF}api/models/{repo}/tree/main?recursive=true", headers={"User-Agent": "Samarizator"}
         )
@@ -408,7 +431,9 @@ def free_port():
         return s.getsockname()[1]
 
 
-def server_args(settings, port, key, binary=None, speculative=True, slots=1, compact_kv=False):
+def server_args(
+    settings, port, key, binary=None, speculative=True, slots=1, compact_kv=False, ctx_size=None
+):
     args = [
         binary or tool("llama-server"),
         "--model",
@@ -421,7 +446,7 @@ def server_args(settings, port, key, binary=None, speculative=True, slots=1, com
         key,
         # Every slot gets the context of the largest request; the system prompt stays cached.
         "--ctx-size",
-        str(context_tokens(settings) * slots),
+        str((ctx_size or context_tokens(settings)) * slots),
         "--parallel",
         str(slots),
         # An 8-bit KV cache: half the memory and bandwidth, quality practically unchanged.
@@ -481,9 +506,17 @@ class LlamaServer:
     """`with LlamaServer(settings, work) as server:` — server.url and server.key are ready."""
 
     def __init__(
-        self, settings, work, progress=lambda *_: None, binary=None, load_timeout=900, slots=None
+        self,
+        settings,
+        work,
+        progress=lambda *_: None,
+        binary=None,
+        load_timeout=900,
+        slots=None,
+        ctx_size=None,
     ):
         self.settings = settings
+        self.ctx_size = ctx_size
         # Fast start first; if llama-server refuses it, the plain one-slot start.
         fast = slots if slots is not None else parallel_slots(settings)
         self.plans = [(fast, settings.llm_gpu, True), (1, False, False)]
@@ -521,7 +554,9 @@ class LlamaServer:
         env.pop("SAMARIZATOR_API_KEY", None)
         with self.log.open("wb") as out:
             self.proc = subprocess.Popen(
-                server_args(self.settings, self.port, self.key, binary, speculative, slots, compact_kv),
+                server_args(
+                    self.settings, self.port, self.key, binary, speculative, slots, compact_kv, self.ctx_size
+                ),
                 stdout=out,
                 stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL,

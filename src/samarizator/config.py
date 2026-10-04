@@ -56,6 +56,8 @@ class Settings:
     clean_input: bool = True
     # Blocks the summary model writes at once; 0 — as many as this Mac's memory allows.
     llm_parallel: int = 0
+    # A small decision model sets aside empty fragments (greetings, sound checks).
+    prune_fragments: bool = True
     # Saved-settings format; older files are migrated in from_dict().
     version: int = SETTINGS_VERSION
 

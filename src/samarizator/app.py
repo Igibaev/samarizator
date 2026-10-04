@@ -647,6 +647,8 @@ class Window(QMainWindow):
             missing.append(("whisper", self.whisper_preset()))
         if not self.has_llm():
             missing.append(("llm", local_llm.PRESETS[recommended(local_llm.PRESETS, self.settings)]))
+        if self.settings.prune_fragments and not local_llm.decision_model_path().is_file():
+            missing.append(("decide", local_llm.DECISION_PRESET))
         return missing
 
     def welcome_download(self):
@@ -692,8 +694,9 @@ class Window(QMainWindow):
             return
         if role == "whisper":
             self.adopt_whisper(target)
-        else:
+        elif role == "llm":
             self.adopt_model(target, preset.key)
+        # The decision model has a fixed place: nothing to select.
         self.download_queue = self.download_queue[1:]
         if self.download_queue:
             self.download_next()
@@ -718,8 +721,20 @@ class Window(QMainWindow):
             self.ensure_whisper()
         if "llm" in roles:
             self.download_model()
+        if "decide" in roles:
+            self.download_decider()
         self.show_page()
         self.controls()
+
+    def download_decider(self):
+        dialog = ModelDownloadDialog(
+            self,
+            {local_llm.DECISION_PRESET.key: local_llm.DECISION_PRESET},
+            "Модель отбора фрагментов",
+            "Маленькая модель перед сводкой отсеивает пустые фрагменты — приветствия, «меня слышно?», "
+            "шум, — чтобы основная модель не тратила на них время. Скачивается один раз.",
+        )
+        dialog.exec()
 
     def choose_model(self, role):
         """«Другая» / «Сменить» on the welcome screen."""
@@ -794,8 +809,9 @@ class Window(QMainWindow):
         if missing:
             total = sum(preset.size_gb for _, preset in missing)
             note = (
-                f"Подобраны под этот Mac ({local_llm.ram_gb():.0f} ГБ памяти), скачать один раз {gb(total)} ГБ. "
-                "Модели работают по очереди: памяти нужно под одну из них."
+                f"Подобраны под этот Mac ({local_llm.ram_gb():.0f} ГБ памяти), скачать один раз {gb(total)} ГБ"
+                + (" вместе с моделью отбора фрагментов" if any(r == "decide" for r, _ in missing) else "")
+                + ". Модели работают по очереди: памяти нужно под одну из них."
             )
         else:
             note = "Модели работают на этом Mac без интернета. Сменить их можно в настройках."
@@ -1951,13 +1967,12 @@ class Window(QMainWindow):
             self.playbar.setVisible(True)
         self.obsidian.setEnabled(ready and bool(meeting["note"]) and summarized)
         roles = [role for role, _ in self.missing_models()]
-        self.model_button.setText(
-            "Скачать модели"
-            if len(roles) == 2
-            else "Скачать модель распознавания"
-            if roles == ["whisper"]
-            else "Скачать модель сводок"
-        )
+        names = {
+            "whisper": "Скачать модель распознавания",
+            "llm": "Скачать модель сводок",
+            "decide": "Скачать модель отбора",
+        }
+        self.model_button.setText(names[roles[0]] if len(roles) == 1 else "Скачать модели")
         self.model_button.setVisible(bool(roles))
         self.model_row.setVisible(self.has_llm())
         if self.has_llm():

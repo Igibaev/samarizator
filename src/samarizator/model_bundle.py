@@ -31,12 +31,13 @@ DEFAULTS = {"whisper": "ggml-small-q5_1.bin", "vad": "ggml-silero-v6.2.0.bin", "
 
 def known_urls():
     """Download addresses of every model the app knows by file name."""
-    from .local_llm import PRESETS
+    from .local_llm import DECISION_PRESET, PRESETS
     from .setup_models import MODELS, QUALITY_MODELS, WHISPER_PRESETS
 
     urls = dict(MODELS)
     urls.update(QUALITY_MODELS)
     urls.update({preset.file: preset.url for preset in PRESETS.values()})
+    urls[DECISION_PRESET.file] = DECISION_PRESET.url
     urls.update({preset.file: preset.url for preset in WHISPER_PRESETS.values()})
     return urls
 
