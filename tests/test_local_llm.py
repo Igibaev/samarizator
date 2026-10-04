@@ -101,8 +101,10 @@ def test_summary_runs_end_to_end_through_a_local_server(meeting, fake_server):
     seen = requests_seen(script)
     args = seen[0]["args"]
     assert args[args.index("--host") + 1] == "127.0.0.1"
-    assert args[args.index("--parallel") + 1] == "1"
-    assert int(args[args.index("--ctx-size") + 1]) == local_llm.context_tokens(settings)
+    slots = local_llm.parallel_slots(settings)
+    assert args[args.index("--parallel") + 1] == str(slots)
+    assert int(args[args.index("--ctx-size") + 1]) == local_llm.context_tokens(settings) * slots
+    assert args[args.index("--cache-type-v") + 1] == "q8_0"
     final = [body for body in seen[1:] if "grammar" not in body]
     assert len(final) == 1
     assert "Бюджет 17 млн согласован" in final[0]["messages"][-1]["content"]

@@ -54,6 +54,8 @@ class Settings:
     cool_down: bool = True
     # The summary model reads the transcript without hesitations, stutters and set fillers.
     clean_input: bool = True
+    # Blocks the summary model writes at once; 0 — as many as this Mac's memory allows.
+    llm_parallel: int = 0
     # Saved-settings format; older files are migrated in from_dict().
     version: int = SETTINGS_VERSION
 

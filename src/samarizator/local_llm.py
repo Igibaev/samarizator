@@ -111,6 +111,10 @@ FINAL_INPUT_FACTOR = 2
 FINAL_OUTPUT_TOKENS = 6144
 # CPU threads of a fully offloaded model (they only sample).
 GPU_THREADS = 4
+# Parallel summary requests at most; more rarely helps on a laptop GPU.
+MAX_SLOTS = 4
+# q8_0 K and V caches against f16: 8.5 bits per value instead of 16.
+COMPACT_KV_FACTOR = 0.55
 # Rough KV-cache cost per context token across the presets (bytes).
 KV_BYTES_PER_TOKEN = 160 * 1024
 SERVER_OVERHEAD_GB = 1.5
@@ -160,18 +164,48 @@ def context_tokens(settings):
     return min(131072, int(math.ceil(max(extraction, final) / 1024) * 1024))
 
 
-def memory_estimate_gb(settings):
+def kv_gb(settings, slots=1, compact_kv=False):
+    """KV cache of `slots` parallel requests; an 8-bit cache takes about half of f16."""
+    per_token = KV_BYTES_PER_TOKEN * (COMPACT_KV_FACTOR if compact_kv else 1)
+    return slots * context_tokens(settings) * per_token / 1024**3
+
+
+def memory_estimate_gb(settings, slots=1, compact_kv=False):
     """Model weights + KV cache + server overhead. A planning number, not a measurement."""
     try:
         weights = Path(settings.llm_model).expanduser().stat().st_size / 1024**3
     except OSError:
         weights = 0.0
-    return weights + context_tokens(settings) * KV_BYTES_PER_TOKEN / 1024**3 + SERVER_OVERHEAD_GB
+    return weights + kv_gb(settings, slots, compact_kv) + SERVER_OVERHEAD_GB
+
+
+def parallel_slots(settings, total_gb=None):
+    """How many blocks the summary model writes at once.
+
+    Generation on Apple Silicon is limited by memory bandwidth, not by arithmetic, so
+    two to four requests decoded together cost little more than one: the job finishes
+    sooner and spends less energy per word. Each request needs its own KV cache, so the
+    number is what this Mac's memory allows (or the user's choice, if it fits).
+    """
+    if not settings.llm_gpu:
+        return 1
+    total_gb = ram_gb() if total_gb is None else total_gb
+    wanted = settings.llm_parallel or MAX_SLOTS
+    fitting = [
+        n
+        for n in range(1, min(wanted, MAX_SLOTS) + 1)
+        if memory_estimate_gb(settings, n, compact_kv=True) <= total_gb * 0.85
+    ]
+    return max(fitting, default=1)
 
 
 def job_budget_gb(settings):
     """Watchdog budget of a summary job: the model must fit, whatever the ASR budget is."""
-    return max(settings.memory_gb, math.ceil(memory_estimate_gb(settings) * 1.25 + 1))
+    need = max(
+        memory_estimate_gb(settings, parallel_slots(settings), compact_kv=True),
+        memory_estimate_gb(settings),  # the fallback start: one slot, full-precision cache
+    )
+    return max(settings.memory_gb, math.ceil(need * 1.25 + 1))
 
 
 def preset_ram_gb(preset, settings=None):
@@ -374,7 +408,7 @@ def free_port():
         return s.getsockname()[1]
 
 
-def server_args(settings, port, key, binary=None, speculative=True):
+def server_args(settings, port, key, binary=None, speculative=True, slots=1, compact_kv=False):
     args = [
         binary or tool("llama-server"),
         "--model",
@@ -385,11 +419,14 @@ def server_args(settings, port, key, binary=None, speculative=True):
         str(port),
         "--api-key",
         key,
+        # Every slot gets the context of the largest request; the system prompt stays cached.
         "--ctx-size",
-        str(context_tokens(settings)),
-        # One slot owns the whole context; the system prompt stays cached between requests.
+        str(context_tokens(settings) * slots),
         "--parallel",
-        "1",
+        str(slots),
+        # An 8-bit KV cache: half the memory and bandwidth, quality practically unchanged.
+        # It needs flash attention, which Metal supports for these models.
+        *(["--flash-attn", "on", "--cache-type-k", "q8_0", "--cache-type-v", "q8_0"] if compact_kv else []),
         # With every layer on the GPU the CPU threads only sample tokens: a few suffice,
         # and without polling they sleep instead of spinning (the default busy-waits).
         "--threads",
@@ -443,8 +480,14 @@ class ServerExited(RuntimeError):
 class LlamaServer:
     """`with LlamaServer(settings, work) as server:` — server.url and server.key are ready."""
 
-    def __init__(self, settings, work, progress=lambda *_: None, binary=None, load_timeout=900):
+    def __init__(
+        self, settings, work, progress=lambda *_: None, binary=None, load_timeout=900, slots=None
+    ):
         self.settings = settings
+        # Fast start first; if llama-server refuses it, the plain one-slot start.
+        fast = slots if slots is not None else parallel_slots(settings)
+        self.plans = [(fast, settings.llm_gpu, True), (1, False, False)]
+        self.slots = 1
         self.work = Path(work)
         self.progress = progress
         self.binary = binary
@@ -460,21 +503,25 @@ class LlamaServer:
         if not Path(binary).is_absolute():
             raise ValueError("llama-server не найден. Переустановите Samarizator или запустите ./start.sh.")
         self.work.mkdir(parents=True, exist_ok=True)
-        try:
-            self.start(binary, speculative=True)
-        except ServerExited:
-            # Speculative decoding is only an acceleration: a server that cannot start
-            # with it is started once more without it before the job is given up.
-            self.stop()
-            self.start(binary, speculative=False)
+        for attempt, (slots, compact_kv, speculative) in enumerate(self.plans):
+            try:
+                self.start(binary, speculative, slots, compact_kv)
+                self.slots = slots
+                return self
+            except ServerExited:
+                # Parallel slots, the 8-bit cache and speculative decoding only speed things
+                # up: a server that cannot start with them is started plain before giving up.
+                self.stop()
+                if attempt == len(self.plans) - 1:
+                    raise
         return self
 
-    def start(self, binary, speculative):
+    def start(self, binary, speculative, slots=1, compact_kv=False):
         env = os.environ.copy()
         env.pop("SAMARIZATOR_API_KEY", None)
         with self.log.open("wb") as out:
             self.proc = subprocess.Popen(
-                server_args(self.settings, self.port, self.key, binary, speculative),
+                server_args(self.settings, self.port, self.key, binary, speculative, slots, compact_kv),
                 stdout=out,
                 stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL,

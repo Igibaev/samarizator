@@ -58,7 +58,8 @@ class ChatEngine(QObject):
             check_fits(settings)
             work = data_dir() / "work" / "chat"
             work.mkdir(parents=True, exist_ok=True)
-            server = LlamaServer(settings, work, progress)
+            # Questions come one at a time: one slot, no memory for parallel requests.
+            server = LlamaServer(settings, work, progress, slots=1)
             server.__enter__()
             self.server, self.model = server, settings.llm_model
         return LocalClient(settings, self.server.url, self.server.key)

@@ -466,6 +466,16 @@ class SettingsDialog(QDialog):
             self.fields["gpu"],
             subtitle="Metal: в разы быстрее и холоднее, чем на процессоре. Выключайте только при сбоях.",
         )
+        parallel = QSpinBox()
+        parallel.setRange(0, local_llm.MAX_SLOTS)
+        parallel.setSpecialValueText("Авто")
+        parallel.setValue(s.llm_parallel)
+        self.fields["llm_parallel"] = parallel
+        resources.row(
+            "Блоков сводки одновременно",
+            parallel,
+            subtitle="«Авто» — сколько позволяет память Mac. Несколько блоков сразу почти не медленнее одного.",
+        )
         self.fields["clean_input"] = Switch(s.clean_input)
         resources.row(
             "Чистить расшифровку для сводки",

@@ -4,6 +4,8 @@ import hashlib
 import json
 import math
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import httpx
@@ -806,6 +808,7 @@ class local_model:
 
         self.server.__enter__()
         self.client = LocalClient(self.settings, self.server.url, self.server.key)
+        self.client.parallel = self.server.slots
         self.client.pace = lambda: cool_down(self.progress, self.settings.cool_down)
         return self.client
 
@@ -921,11 +924,30 @@ def _summarize(store, mid, settings, progress, client):
         if saved:
             progress(f"Подготовка: убрано {saved}% текста — паузы, повторы и слова-паразиты")
     total = len(planned)
-    produced = []
-    for index, (block, before, after) in enumerate(planned):
-        progress(f"Разбор записи: блок {index + 1} из {total}")
-        produced.append(map_block(block, index, before, after))
-        maps.extend(produced[-1])
+    workers = max(1, min(getattr(client, "parallel", 1), total))
+    if workers == 1:
+        produced = []
+        for index, (block, before, after) in enumerate(planned):
+            progress(f"Разбор записи: блок {index + 1} из {total}")
+            produced.append(map_block(block, index, before, after))
+    else:
+        # Several blocks at once, one per server slot; results keep the order of the record.
+        progress(f"Разбор записи: блок 1 из {total} · {workers} одновременно")
+        done = []
+        lock = threading.Lock()
+
+        def run(index, block, before, after):
+            result = map_block(block, index, before, after)
+            with lock:
+                done.append(index)
+                progress(f"Разбор записи: блок {len(done)} из {total} · {workers} одновременно")
+            return result
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(run, i, *planned_block) for i, planned_block in enumerate(planned)]
+            produced = [future.result() for future in futures]
+    for results in produced:
+        maps.extend(results)
     if not maps:
         raise ValueError("Нет распознанной речи для сводки.")
     # Keep source-grounded map items separately so reduction cannot erase a topic.

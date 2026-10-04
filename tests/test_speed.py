@@ -120,3 +120,75 @@ def test_the_model_reads_a_tidied_transcript_but_the_transcript_stays(meeting):
     store.reset_summary(mid)
     summarize(store, mid, settings, client=fake)
     assert fake.maps[0][0]["text"].startswith("Эээ")
+
+
+def test_parallel_slots_follow_the_memory_of_the_mac(tmp_path):
+    from samarizator import local_llm
+    from samarizator.config import Settings
+
+    model = tmp_path / "m.gguf"
+    with model.open("wb") as f:
+        f.truncate(int(6.4 * 1024**3))  # GigaChat Lightning
+    settings = Settings(llm_model=str(model))
+    # 16 GB: the 8-bit cache leaves room for a few blocks at once; 8 GB: one.
+    assert local_llm.parallel_slots(settings, total_gb=16) >= 2
+    assert local_llm.parallel_slots(settings, total_gb=10) == 1
+    assert local_llm.parallel_slots(settings, total_gb=128) == local_llm.MAX_SLOTS
+    settings.llm_parallel = 2
+    assert local_llm.parallel_slots(settings, total_gb=128) == 2
+    settings.llm_gpu = False
+    assert local_llm.parallel_slots(settings, total_gb=128) == 1
+    # The budget covers both the fast start and the plain fallback.
+    settings.llm_gpu, settings.llm_parallel = True, 0
+    fast = local_llm.memory_estimate_gb(settings, local_llm.parallel_slots(settings), compact_kv=True)
+    assert local_llm.job_budget_gb(settings) >= max(fast, local_llm.memory_estimate_gb(settings))
+
+
+def test_blocks_are_written_in_parallel_and_kept_in_order(meeting):
+    import threading
+    import time
+
+    from samarizator.summary import summarize
+    from samarizator.summary_prompts import MAP_PROMPT
+
+    store, mid, settings = meeting
+    settings.input_chars = 4000
+    store.save_chunk(
+        mid,
+        0,
+        [
+            dict(start=i * 10, end=i * 10 + 3, speaker="Речь", text=f"Тема {i}. " * 150, uncertain=0)
+            for i in range(6)
+        ],
+    )
+
+    class Fake:
+        parallel = 3
+
+        def __init__(self):
+            self.active = self.peak = 0
+            self.lock = threading.Lock()
+
+        def complete(self, prompt, allowed):
+            if prompt.startswith(REVIEW_PROMPT):
+                draft = json.loads(prompt[len(REVIEW_PROMPT) :])["draft"]
+                return dict(keep=list(range(len(draft["items"]))), edit=[], add=[], removed=[])
+            with self.lock:
+                self.active += 1
+                self.peak = max(self.peak, self.active)
+            time.sleep(0.05)
+            with self.lock:
+                self.active -= 1
+            ids = allowed
+            if prompt.startswith(MAP_PROMPT):
+                ids = {r["id"] for r in json.loads(prompt[len(MAP_PROMPT) :])["source"]["segments"]}
+            first = min(ids)
+            return dict(overview=f"Блок {first}.", topics=[], items=[item(f"Пункт {first}", first)])
+
+    fake = Fake()
+    progress = []
+    result = summarize(store, mid, settings, client=fake, progress=progress.append)
+    assert fake.peak >= 2  # requests really overlapped
+    firsts = [it["evidence"][0] for it in result["detailed"]["items"]]
+    assert firsts == sorted(firsts)  # the register keeps the order of the recording
+    assert any("одновременно" in line for line in progress)
