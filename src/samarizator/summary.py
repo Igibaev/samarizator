@@ -1442,6 +1442,32 @@ def final_document(client, settings, summary, times, progress=lambda *_: None, l
     )
 
 
+# A final text written by an external AI from the pseudonymised copy (privacy_page) and
+# returned with the real names. It is kept as the record's final text; without a summary of
+# the model on this Mac it is the record's only summary.
+EXTERNAL = "external"
+EXTERNAL_TITLE = "Ответ внешней нейросети"
+
+
+def model_summary(summary):
+    """True when the model on this Mac made the summary: it has registers and evidence."""
+    return bool(summary) and summary.get("source") != EXTERNAL
+
+
+def with_external_answer(summary, text, saved):
+    """The summary with `text` as its final text; a summary of its own when there is none.
+
+    The brief and the detailed summary of the model stay as they are; only the final text
+    changes. «Пересоздать итоговый текст» writes it with the model again.
+    """
+    final = dict(title=EXTERNAL_TITLE, format=EXTERNAL, source=EXTERNAL, text=text.strip(), saved=saved, warning="")
+    if model_summary(summary):
+        return dict(summary, final=final)
+    result = package_summary(dict(overview="", items=[], topics=[]), [], [], [], [])
+    result.update(source=EXTERNAL, final=final)
+    return result
+
+
 def regenerate_final(store, mid, settings, progress=lambda *_: None, client=None, work=None):
     """Only the final text, from a stored summary: fast way to try another format."""
     meeting = store.meeting(mid)

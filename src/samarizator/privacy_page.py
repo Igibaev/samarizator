@@ -4,7 +4,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QInputDialog,
+    QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QSplitter,
@@ -25,7 +26,7 @@ from PySide6.QtWidgets import (
 )
 
 from .privacy import KIND_TITLES, LABEL, Masker, clock, restore, transcript_markdown
-from .summary import summary_views
+from .summary import model_summary, summary_views, with_external_answer
 from .theme import ACCENT
 from .widgets import Banner, label, primary
 
@@ -62,11 +63,15 @@ def summary_markdown(summary, mask):
 
 
 class RestoreDialog(QDialog):
-    """Paste the answer of an external AI; the labels become the real names again."""
+    """Paste the answer of an external AI; the labels become the real names again.
 
-    def __init__(self, entries, parent=None):
+    `on_save(text)` keeps the restored answer in the record; it returns True when saved.
+    """
+
+    def __init__(self, entries, parent=None, on_save=None):
         super().__init__(parent)
         self.entries = entries
+        self.on_save = on_save
         self.setWindowTitle("Вернуть данные в ответ ИИ")
         self.resize(760, 560)
         layout = QVBoxLayout(self)
@@ -76,7 +81,8 @@ class RestoreDialog(QDialog):
         layout.addWidget(
             label(
                 "Вставьте ответ, который вернула внешняя нейросеть: метки вида [Человек 1] будут заменены "
-                "на исходные имена и номера из таблицы этой записи. Замена идёт только на этом Mac.",
+                "на исходные имена и номера из таблицы этой записи. Замена идёт только на этом Mac. "
+                "«Сохранить в запись» — ответ станет итоговым текстом записи.",
                 "hint",
                 wrap=True,
             )
@@ -95,10 +101,17 @@ class RestoreDialog(QDialog):
         row.addWidget(self.state, 1)
         close = QPushButton("Закрыть")
         close.clicked.connect(self.reject)
-        copy = primary(QPushButton("Скопировать результат"))
+        copy = QPushButton("Скопировать результат")
         copy.clicked.connect(lambda: QApplication.clipboard().setText(self.result.toPlainText()))
         row.addWidget(close)
         row.addWidget(copy)
+        if on_save is not None:
+            self.save_button = primary(QPushButton("Сохранить в запись"))
+            self.save_button.setToolTip("Ответ станет итоговым текстом этой записи — с настоящими данными")
+            self.save_button.clicked.connect(self.save)
+            row.addWidget(self.save_button)
+        else:
+            primary(copy)
         layout.addLayout(row)
         self.source.textChanged.connect(self.update_result)
 
@@ -108,11 +121,21 @@ class RestoreDialog(QDialog):
         found = len(LABEL.findall(text))
         self.state.setText(f"Заменено меток: {found}" if found else "")
 
+    def save(self):
+        text = self.result.toPlainText().strip()
+        if not text:
+            self.state.setText("Сначала вставьте ответ нейросети.")
+            return
+        if self.on_save(text):
+            self.accept()
+
 
 class PrivacyPage(QWidget):
     """Table of hidden data on the left, the pseudonymised document on the right."""
 
     COLUMNS = ["", "Метка", "Что скрыто", "Тип", "Раз"]
+    # The answer of an external AI became the record's final text: the window shows it.
+    answerSaved = Signal(str)
 
     def __init__(self, store, parent=None):
         super().__init__(parent)
@@ -332,4 +355,28 @@ class PrivacyPage(QWidget):
             Path(path).write_text(self.document(), encoding="utf-8")
 
     def restore_answer(self):
-        RestoreDialog(self.masker.ordered() if self.masker else [], self).exec()
+        RestoreDialog(self.masker.ordered() if self.masker else [], self, self.save_answer).exec()
+
+    def save_answer(self, text):
+        """Keep the restored answer as the record's final text. True when saved."""
+        summary = self.summary()
+        final = (summary or {}).get("final") or {}
+        if model_summary(summary) and final.get("text") and final.get("source") != "external":
+            if not self.confirm_replace():
+                return False
+        saved = datetime.now().isoformat(timespec="minutes")
+        updated = with_external_answer(summary, text, saved)
+        self.store.update(self.mid, summary=json.dumps(updated, ensure_ascii=False))
+        self.rebuild()
+        self.answerSaved.emit(self.mid)
+        return True
+
+    def confirm_replace(self):
+        answer = QMessageBox.question(
+            self,
+            "Заменить итоговый текст?",
+            "Итоговым текстом записи станет ответ внешней нейросети. Краткая и подробная сводка "
+            "останутся как есть. Текст модели можно написать снова: «⋯» → «Пересоздать итоговый текст».",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        return answer == QMessageBox.StandardButton.Yes
