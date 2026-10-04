@@ -466,6 +466,12 @@ class SettingsDialog(QDialog):
             self.fields["gpu"],
             subtitle="Metal: в разы быстрее и холоднее, чем на процессоре. Выключайте только при сбоях.",
         )
+        self.fields["clean_input"] = Switch(s.clean_input)
+        resources.row(
+            "Чистить расшифровку для сводки",
+            self.fields["clean_input"],
+            subtitle="Модель читает текст без «эээ», повторов и слов-паразитов — быстрее. Расшифровка не меняется.",
+        )
         self.fields["cool_down"] = Switch(s.cool_down)
         resources.row(
             "Беречь Mac от перегрева",

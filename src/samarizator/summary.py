@@ -8,6 +8,7 @@ from pathlib import Path
 
 import httpx
 
+from .speech import tidy_rows
 from .summary_prompts import (
     BRIEF_PROMPT,
     DEFAULT_FORMAT,
@@ -911,7 +912,14 @@ def _summarize(store, mid, settings, progress, client):
         return [reviewed]
 
     # Planned up front so progress can say "block 8 of 22" instead of a bare counter.
-    planned = list(contextual_blocks(store.iter_segments(mid), settings.input_chars))
+    # The model reads a tidied copy: hesitations and stutters cost tokens and mean nothing.
+    stats = {}
+    rows = tidy_rows(store.iter_segments(mid), settings.clean_input, stats)
+    planned = list(contextual_blocks(rows, settings.input_chars))
+    if stats.get("before") and stats["after"] < stats["before"]:
+        saved = round(100 * (1 - stats["after"] / stats["before"]))
+        if saved:
+            progress(f"Подготовка: убрано {saved}% текста — паузы, повторы и слова-паразиты")
     total = len(planned)
     produced = []
     for index, (block, before, after) in enumerate(planned):

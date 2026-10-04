@@ -74,3 +74,49 @@ def test_the_full_review_format_is_still_accepted():
     )
     result = review_source(Client(json.loads(json.dumps(full))), SOURCE, DRAFT, 100000)
     assert len(result["items"]) == 3 and result["overview"] == "Обзор"
+
+
+def test_the_model_reads_a_tidied_transcript_but_the_transcript_stays(meeting):
+    from samarizator.summary import summarize
+    from samarizator.summary_prompts import MAP_PROMPT
+
+    store, mid, settings = meeting
+    store.save_chunk(
+        mid,
+        0,
+        [
+            dict(
+                start=0,
+                end=2,
+                speaker="Речь",
+                text="Эээ, ну, я я я думаю, бюджет как бы 17 миллионов.",
+                uncertain=0,
+            ),
+            dict(start=2, end=3, speaker="Речь", text="Ммм… эм.", uncertain=0),
+            dict(start=3, end=5, speaker="Речь", text="Как бы не опоздать с отчётом.", uncertain=0),
+        ],
+    )
+    ids = [row["id"] for row in store.segments(mid)]
+
+    class Fake:
+        def __init__(self):
+            self.maps = []
+
+        def complete(self, prompt, allowed):
+            if prompt.startswith(REVIEW_PROMPT):
+                draft = json.loads(prompt[len(REVIEW_PROMPT) :])["draft"]
+                return dict(keep=list(range(len(draft["items"]))), edit=[], add=[], removed=[])
+            if prompt.startswith(MAP_PROMPT):
+                self.maps.append(json.loads(prompt[len(MAP_PROMPT) :])["source"]["segments"])
+            return dict(overview="Бюджет.", topics=[], items=[item("Бюджет 17 млн", min(allowed))])
+
+    fake = Fake()
+    summarize(store, mid, settings, client=fake)
+    texts = {row["id"]: row["text"] for row in fake.maps[0]}
+    assert texts == {ids[0]: "Я думаю, бюджет 17 миллионов.", ids[2]: "Как бы не опоздать с отчётом."}
+    assert store.segments(mid)[0]["text"].startswith("Эээ")  # the transcript itself is untouched
+    settings.clean_input = False
+    fake = Fake()
+    store.reset_summary(mid)
+    summarize(store, mid, settings, client=fake)
+    assert fake.maps[0][0]["text"].startswith("Эээ")

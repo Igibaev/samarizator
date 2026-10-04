@@ -52,6 +52,8 @@ class Settings:
     final_prompt: str = ""
     # Pause between steps while macOS reports serious thermal pressure.
     cool_down: bool = True
+    # The summary model reads the transcript without hesitations, stutters and set fillers.
+    clean_input: bool = True
     # Saved-settings format; older files are migrated in from_dict().
     version: int = SETTINGS_VERSION
 
