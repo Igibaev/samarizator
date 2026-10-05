@@ -43,6 +43,8 @@ from . import progress as work
 from .bundle import python_command, tool
 from .chat import ChatEngine, ChatPanel, ChatWorker
 from .config import Settings, data_dir
+from .hallucinations import REASON as HALLUCINATION
+from .hallucinations import hallucinated, is_hallucination
 from .knowledge import stamp
 from .live import (
     SOURCE_LABELS,
@@ -584,6 +586,15 @@ class Window(QMainWindow):
         self.retry.clicked.connect(lambda: self.start("retry"))
         self.review_banner.add(self.retry)
         box.addWidget(self.review_banner)
+        # Phrases Whisper invents on silence: the app finds them, the user only confirms.
+        self.junk_banner = Banner("warn")
+        self.junk_rows = []
+        self.clean_button = QPushButton("Удалить все…")
+        self.clean_button.setToolTip("Покажет найденные фразы и удалит их после подтверждения.")
+        self.clean_button.clicked.connect(self.clean_hallucinations)
+        self.junk_banner.add(self.clean_button)
+        self.junk_banner.hide()
+        box.addWidget(self.junk_banner)
         filters = QHBoxLayout()
         self.filter = SegmentedControl()
         self.all_rows = self.filter.add("all", "Все")
@@ -1328,6 +1339,15 @@ class Window(QMainWindow):
             "Поправьте имена и термины — сводка будет точнее. Проверка необязательна.",
         )
         self.review_banner.setVisible(bool(flagged) and not meeting["summary"])
+        self.junk_rows = hallucinated(self.store.iter_segments(self.mid))
+        found = len(self.junk_rows)
+        self.junk_banner.set_text(
+            f"Найдено {found} {self.plural(found, 'фраза', 'фразы', 'фраз')}, "
+            "которых, скорее всего, не было на записи",
+            "Whisper иногда дописывает на тишине титры из обучающих видео: «Субтитры создавал…», "
+            "«Редактор субтитров…», «Продолжение следует». Их можно удалить разом.",
+        )
+        self.junk_banner.setVisible(bool(found))
         times = {}
         if meeting["summary"]:
             try:
@@ -1564,7 +1584,8 @@ class Window(QMainWindow):
 
     def review_label(self, row):
         if not row["uncertain"]:
-            return ""
+            # Recognised before the filter existed: the flag is not stored, the phrase is still found.
+            return f"● {HALLUCINATION}" if is_hallucination(row["text"]) else ""
         reasons = [r.strip() for r in (row.get("review") or "").split(",") if r.strip() != "говорящий"]
         label_text = ", ".join(reasons) or "Проверить"
         if row.get("retry_text"):
@@ -1613,6 +1634,44 @@ class Window(QMainWindow):
         row = self.visible_rows[index]
         self.store.edit_segment(self.mid, row["id"], self.text.text())
         self.load_detail()
+
+    def clean_hallucinations(self):
+        busy = self.job is not None or self.live_recorder is not None
+        if busy or not self.mid or not self.junk_rows:
+            return False
+        rows = list(self.junk_rows)
+        if not self.confirm_cleanup(rows, bool(self.store.meeting(self.mid)["summary"])):
+            return False
+        removed = self.store.delete_segments(self.mid, [row["id"] for row in rows])
+        self.page = 0
+        self.refresh_list()
+        self.load_detail()
+        self.progress.setText(
+            f"Удалено {removed} {self.plural(removed, 'выдуманная фраза', 'выдуманные фразы', 'выдуманных фраз')}."
+        )
+        return True
+
+    def confirm_cleanup(self, rows, has_summary):
+        shown = 8
+        lines = [f"{stamp(row['start'])}  {row['text']}" for row in rows[:shown]]
+        if len(rows) > shown:
+            lines.append(f"…и ещё {len(rows) - shown}")
+        detail = "\n".join(lines)
+        if has_summary:
+            detail += "\n\nСводка будет сброшена — её нужно будет создать заново."
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("Удалить выдуманные фразы")
+        count = len(rows)
+        box.setText(
+            f"Удалить {count} {self.plural(count, 'фразу', 'фразы', 'фраз')} из расшифровки? "
+            "Вернуть их будет нельзя."
+        )
+        box.setInformativeText(detail)
+        delete = box.addButton("Удалить", QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton("Отмена", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        return box.clickedButton() is delete
 
     def accept_retry(self):
         index = self.table.currentRow()
@@ -2023,6 +2082,7 @@ class Window(QMainWindow):
             working if busy else "Сначала распознайте запись целиком.",
         )
         explain(self.retry_action, ready and not busy and complete, "")
+        explain(self.clean_button, ready and not busy, working if busy else pick)
         explain(self.rerun_button, ready and not busy, working if busy else pick)
         explain(
             self.regenerate_button, modelled and not busy, working if busy else "Сначала создайте сводку."

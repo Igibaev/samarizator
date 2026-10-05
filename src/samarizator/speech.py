@@ -4,9 +4,12 @@ Only the model's input is tidied: the transcript, its timestamps and the evidenc
 as recognised. Everything removed carries no meaning — hesitation sounds, stutter repeats
 and a few set filler phrases — so the model reads (and later quotes) less text for the
 same content. Words that are fillers only sometimes («вот», «типа», «значит») are kept.
+Replies Whisper invented on silence («Субтитры создавал …») do not reach the model either.
 """
 
 import re
+
+from .hallucinations import is_hallucination
 
 WORD = r"[А-ЯЁа-яёA-Za-z]+"
 # «э», «ээ», «э-э», «эм», «мм», «хм», «аа», «ну-у» as a sound, with the comma that follows.
@@ -42,7 +45,10 @@ def tidy_rows(rows, enabled=True, stats=None):
     """Rows with tidied text; rows left empty are skipped. `stats` counts characters."""
     for row in rows:
         text = row["text"]
-        cleaned = tidy(text) if enabled else text
+        if not enabled:
+            cleaned = text
+        else:
+            cleaned = "" if is_hallucination(text) else tidy(text)
         if stats is not None:
             stats["before"] = stats.get("before", 0) + len(text)
             stats["after"] = stats.get("after", 0) + len(cleaned)
