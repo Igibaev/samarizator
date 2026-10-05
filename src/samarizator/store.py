@@ -224,6 +224,26 @@ class Store:
             db.execute("DELETE FROM checkpoints WHERE meeting=? AND phase LIKE 'summary%'", (mid,))
             db.execute("UPDATE meetings SET summary=NULL,status='review' WHERE id=?", (mid,))
 
+    def delete_segments(self, mid, ids):
+        """Remove replies for good (the user confirmed); the summary built on them is reset."""
+        ids = [int(sid) for sid in ids]
+        if not ids:
+            return 0
+        marks = ",".join("?" * len(ids))
+        with self.connect() as db:
+            removed = db.execute(
+                f"DELETE FROM segments WHERE meeting=? AND id IN ({marks})", (mid, *ids)
+            ).rowcount
+            db.execute(f"DELETE FROM segment_history WHERE meeting=? AND segment IN ({marks})", (mid, *ids))
+            db.execute("DELETE FROM checkpoints WHERE meeting=? AND phase LIKE 'summary%'", (mid,))
+            # A paused transcription keeps its status so it can still be continued.
+            db.execute(
+                "UPDATE meetings SET summary=NULL,"
+                "status=CASE WHEN status='done' THEN 'review' ELSE status END WHERE id=?",
+                (mid,),
+            )
+        return removed
+
     def save_retry(self, mid, sid, text):
         with self.connect() as db:
             db.execute("UPDATE segments SET retry_text=? WHERE meeting=? AND id=?", (text, mid, sid))

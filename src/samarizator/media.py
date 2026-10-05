@@ -5,6 +5,8 @@ import re
 from pathlib import Path
 
 from .bundle import tool
+from .hallucinations import REASON as HALLUCINATION
+from .hallucinations import is_hallucination
 from .process import run_command
 
 _TOKEN = re.compile(r"\S+")
@@ -112,6 +114,8 @@ def parse_whisper(payload, offset, lower, upper, turns=(), channel=None):
         ]
         if scores and (sum(scores) / len(scores) < 0.55 or sum(p < 0.2 for p in scores) >= 2):
             reasons.append("низкая уверенность Whisper")
+        if is_hallucination(text):
+            reasons.append(HALLUCINATION)
         output.append(
             dict(
                 start=max(0, start),
@@ -163,6 +167,10 @@ def whisper(wav, model, language, threads, work, gpu=False, *, vad_model="", glo
         # Metal allocations stay outside the RSS the watchdog can see.
         args.append("-ng")
     args += ["-ojf", "-of", str(prefix), "-ml", "80", "-sow", "-bs", str(beam_size)]
+    # Against text invented on silence: no «[музыка]»/«♪» tokens, and a window the model
+    # itself rates as likely silence (and decodes unsure) is dropped a little earlier than
+    # the default 0.6. Credit lines are decoded confidently — hallucinations.py flags those.
+    args += ["--suppress-nst", "--no-speech-thold", "0.5"]
     if glossary.strip():
         # Hints only; do not carry unreviewed ASR text into the next chunk.
         args += ["--prompt", glossary.strip()[:800]]
