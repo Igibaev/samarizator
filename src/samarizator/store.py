@@ -244,6 +244,26 @@ class Store:
             )
         return removed
 
+    def finish_partial(self, mid):
+        """Close recognition at the text already recognised: the rest of the audio is lost.
+
+        Returns where the transcript ends, in seconds.
+        """
+        last = self.last_segment(mid)
+        if not last:
+            raise ValueError("Нет распознанного текста — сводку делать не из чего.")
+        with self.connect() as db:
+            for phase, data in (("asr_complete", True), ("asr-partial", last["end"])):
+                db.execute(
+                    "INSERT OR REPLACE INTO checkpoints VALUES(?,?,?,?)", (mid, phase, 0, json.dumps(data))
+                )
+            db.execute("UPDATE meetings SET status='review',error=NULL WHERE id=?", (mid,))
+        return last["end"]
+
+    def relocate(self, mid, source):
+        """Point the record at its audio found elsewhere; the caller checks it is the same file."""
+        self.update(mid, source=str(Path(source).resolve(strict=True)), error=None)
+
     def save_retry(self, mid, sid, text):
         with self.connect() as db:
             db.execute("UPDATE segments SET retry_text=? WHERE meeting=? AND id=?", (text, mid, sid))
@@ -294,7 +314,7 @@ class Store:
         with self.connect() as db:
             db.execute(
                 "UPDATE meetings SET status='interrupted',error='Предыдущий запуск прерван; можно продолжить.' "
-                "WHERE status IN ('transcribing','summarizing','retrying','speakers')"
+                "WHERE status IN ('recording','transcribing','summarizing','retrying','speakers')"
             )
 
     def delete(self, mid):

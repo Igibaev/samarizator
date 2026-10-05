@@ -492,11 +492,31 @@ def test_helper_failure_is_reported_instead_of_a_truncated_recording(tmp_path, m
         helper=binary,
     )
     recorder.start()
-    with pytest.raises(LiveCaptureError, match="Запись экрана и системного звука"):
+    recorder.partial.write_bytes(b"RIFF")  # the helper failed before any audio arrived
+    with pytest.raises(LiveCaptureError, match="Запись экрана и системного звука") as failure:
         recorder.stop()
+    assert failure.value.saved is None
     assert not recorder.path.exists() and not recorder.partial.exists()
     # The helper's report is kept: a failed session must stay diagnosable.
     assert "permission" in recorder.helper_log.read_text()
+
+
+def test_audio_recorded_before_a_failure_is_kept(tmp_path, monkeypatch):
+    monkeypatch.setenv("SAMARIZATOR_DEV", "1")
+    binary = available_helper(monkeypatch, tmp_path)
+    events = b'{"event": "error", "code": "permission", "message": "denied"}\n'
+    recorder = LiveRecorder(
+        folder=tmp_path,
+        ffmpeg="/usr/bin/ffmpeg",
+        popen_factory=native_popen(helper_events=events, helper_code=2),
+        source="system",
+        helper=binary,
+    )
+    recorder.start()  # the fake FFmpeg has already written 2 KB of audio
+    with pytest.raises(LiveCaptureError, match="сохранён и будет распознан") as failure:
+        recorder.stop()
+    assert failure.value.saved == recorder.path and recorder.path.is_file()
+    assert not recorder.partial.exists()
 
 
 def test_helper_status_reads_the_probe_answer(tmp_path, monkeypatch):

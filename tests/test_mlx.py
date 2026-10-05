@@ -258,7 +258,8 @@ def test_mlx_engine_writes_notes_in_the_line_format(engine_url):
     client = LocalClient(Settings(), engine_url, "key")
     text, truncated = client.complete_text("S", "Конспект", 60, 8, grammar=notes.NOTES_GRAMMAR)
     # Whatever a random model wants to say, the grammar starts the answer with the title line.
-    assert text.startswith("ТЕМА: ")
+    # (A random model may fill the title with spaces only, and the answer is stripped.)
+    assert text.startswith("ТЕМА:")
 
 
 def test_mlx_engine_honours_stop_strings(engine_url):

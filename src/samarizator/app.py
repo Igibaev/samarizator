@@ -53,6 +53,7 @@ from .live import (
     describe_tracks,
     recording_title,
 )
+from .media import fingerprint
 from .pages import FinalPage, ProcessingPage, StatePage, WelcomePage, app_icon
 from .playback import evidence_intervals
 from .privacy_page import PrivacyPage
@@ -398,6 +399,19 @@ class Window(QMainWindow):
             lambda: QApplication.clipboard().setText(self.error_detail.text())
         )
         self.error_box.add(self.copy_error_button)
+        # The audio is gone but text was recognised: find the file or keep what there is.
+        self.locate_button = QPushButton("Указать файл…")
+        self.locate_button.setToolTip(
+            "Если запись перенесли, укажите, где она теперь: распознавание продолжится."
+        )
+        self.locate_button.clicked.connect(self.locate_source)
+        self.error_box.add(self.locate_button)
+        self.partial_button = QPushButton("Сводка по готовой части")
+        self.partial_button.setToolTip(
+            "Завершить расшифровку на уже распознанном тексте, чтобы по нему можно было создать сводку."
+        )
+        self.partial_button.clicked.connect(self.finish_partial)
+        self.error_box.add(self.partial_button)
         notices.addWidget(self.error_box)
         body.addLayout(notices)
         self.stack = QStackedWidget()
@@ -1161,25 +1175,37 @@ class Window(QMainWindow):
             return
         self.live_recorder = None
         self.recording_id = None
+        warning = ""
         try:
             path = recorder.stop()
         except (LiveCaptureError, OSError, ValueError) as exc:
-            self.end_catchup(mid)
-            # An empty recording leaves nothing to keep unless catch-up already saved text.
-            if mid and not self.store.segments(mid, limit=1):
-                self.store.delete(mid)
-                self.mid = None
-            self.refresh_list()
-            self.progress.setText(str(exc))
-            QMessageBox.warning(self, "Live-запись", str(exc))
-            self.controls()
-            return
+            path, warning = getattr(exc, "saved", None), str(exc)
+            if path is None:
+                self.end_catchup(mid)
+                # An empty recording leaves nothing to keep unless catch-up already saved text.
+                if mid and not self.store.segments(mid, limit=1):
+                    self.store.delete(mid)
+                    self.mid = None
+                elif mid:
+                    self.store.update(
+                        mid,
+                        status="interrupted",
+                        error="Запись оборвалась, звук не сохранился. Уже распознанная часть "
+                        "осталась — по ней можно сделать сводку.",
+                    )
+                self.refresh_list()
+                self.progress.setText(warning)
+                QMessageBox.warning(self, "Live-запись", warning)
+                self.controls()
+                return
         self.store.update(mid, source=str(path), status="transcribing")
         self.end_catchup(mid)
         self.mid, self.page = mid, 0
         self.refresh_list()
         self.progress.setText("Live-запись сохранена локально.")
         self.controls()
+        if warning:
+            QMessageBox.warning(self, "Live-запись", warning)
         self.report_live_tracks(path, recorder.tracks, [e.name for e in recorder.inputs])
         if start_transcription:
             # Catch-up is still finishing its last fragment; chain the closing pass to it.
@@ -1324,11 +1350,10 @@ class Window(QMainWindow):
         state = STATUS.get(meeting["status"], meeting["status"])
         length = f" · {stamp(meeting['duration'])}" if meeting["duration"] else ""
         self.info.setText(f"{state}{length} · {NEXT_STEP.get(meeting['status'], '')}")
-        self.error_detail.setText(
-            meeting["error"]
-            if meeting["error"] and meeting["status"] not in RUNNING and meeting["status"] != "done"
-            else ""
-        )
+        error = meeting["error"] if meeting["status"] not in RUNNING and meeting["status"] != "done" else ""
+        if not error and self.source_lost(meeting):
+            error = f"Исходный файл не найден: {meeting['source']}"
+        self.error_detail.setText(error or "")
         self.error_box.set_text("Шаг не выполнен", self.error_detail.text())
         self.load_rows()
         total, flagged = self.store.segment_counts(self.mid)
@@ -1484,6 +1509,24 @@ class Window(QMainWindow):
                 ),
                 ("Создать сводку", lambda: self.start("summary")),
                 ("Открыть расшифровку", lambda: self.set_view("transcript")),
+            )
+            self.stack.setCurrentWidget(self.empty)
+        elif self.source_lost(meeting):
+            last = self.store.last_segment(self.mid)
+            actions = [("Указать файл…", self.locate_source)]
+            if last:
+                actions.insert(0, ("Сводка по готовой части", self.finish_partial))
+            self.empty.set(
+                "wave",
+                ORANGE,
+                "Звук записи не найден",
+                (
+                    f"Распознано до {stamp(last['end'])}. Можно сделать сводку по этой части "
+                    "или указать, где теперь файл, — распознавание продолжится."
+                    if last
+                    else "Укажите, где теперь файл записи, — распознавание продолжится."
+                ),
+                *actions,
             )
             self.stack.setCurrentWidget(self.empty)
         else:
@@ -1672,6 +1715,75 @@ class Window(QMainWindow):
         box.addButton("Отмена", QMessageBox.ButtonRole.RejectRole)
         box.exec()
         return box.clickedButton() is delete
+
+    def source_lost(self, meeting):
+        """Recognition is unfinished and its audio is not where the record says."""
+        return (
+            meeting["status"] not in RUNNING
+            and not self.store.checkpoint(meeting["id"], "asr_complete", 0)
+            and not Path(meeting["source"]).is_file()
+        )
+
+    def locate_source(self):
+        if self.job or self.live_recorder is not None or not self.mid:
+            return False
+        path = self.choose_source()
+        if not path:
+            return False
+        expected = self.store.checkpoint(self.mid, "source", 0)
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            same = not expected or fingerprint(path) == expected
+        except OSError:
+            same = False
+        finally:
+            QApplication.restoreOverrideCursor()
+        if not same:
+            QMessageBox.warning(
+                self,
+                "Другой файл",
+                "Это не тот файл, с которого начиналось распознавание: его содержимое отличается. "
+                "Укажите исходную запись или добавьте этот файл как новую.",
+            )
+            return False
+        self.store.relocate(self.mid, path)
+        self.load_detail()
+        self.start("transcribe")
+        return True
+
+    def choose_source(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Где теперь эта запись?",
+            str(Path(self.store.meeting(self.mid)["source"]).parent),
+            "Аудио и видео (*.mp3 *.mp4 *.m4a *.wav *.mov *.mkv *.webm *.ogg *.flac *.aac);;Все файлы (*)",
+        )
+        return path
+
+    def finish_partial(self):
+        if self.job or self.live_recorder is not None or not self.mid:
+            return False
+        last = self.store.last_segment(self.mid)
+        if not last or not self.confirm_partial(last["end"]):
+            return False
+        end = self.store.finish_partial(self.mid)
+        self.view = "transcript"
+        self.refresh_list()
+        self.load_detail()
+        self.progress.setText(
+            f"Расшифровка завершена на {stamp(end)}: дальше звука нет. Можно создавать сводку."
+        )
+        return True
+
+    def confirm_partial(self, end):
+        answer = QMessageBox.question(
+            self,
+            "Сводка по готовой части",
+            f"Распознано до {stamp(end)}. Звука дальше нет, поэтому остаток встречи в расшифровку "
+            "и сводку не попадёт.\n\nЗавершить расшифровку на этом месте?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+        )
+        return answer == QMessageBox.StandardButton.Yes
 
     def accept_retry(self):
         index = self.table.currentRow()
@@ -2100,6 +2212,14 @@ class Window(QMainWindow):
         has_text = ready and bool(self.store.segment_counts(self.mid)[0])
         explain(self.export_transcript_action, has_text, "Расшифровки ещё нет.")
         self.copy_error_button.setVisible(bool(self.error_detail.text()))
+        lost = ready and self.source_lost(meeting)
+        has_speech = lost and bool(self.store.segment_counts(self.mid)[0])
+        # Outside the transcript the page itself offers these two steps.
+        in_text = self.view == "transcript"
+        self.locate_button.setVisible(lost and in_text)
+        explain(self.locate_button, lost and not busy, working)
+        self.partial_button.setVisible(has_speech and in_text)
+        explain(self.partial_button, has_speech and not busy, working)
         explain(self.copy_error_button, bool(self.error_detail.text()))
         self.error_box.setVisible(bool(self.error_detail.text()))
         # The hint line is for states without their own explanation on the page.
@@ -2108,7 +2228,8 @@ class Window(QMainWindow):
         step = self.summarize if complete else self.transcribe
         for button in (self.transcribe, self.summarize):
             primary(button, button is step and button.isEnabled())
-        self.transcribe.setVisible(ready and not complete and not here)
+        # Without its audio the record cannot be recognised further: the banner offers the way out.
+        self.transcribe.setVisible(ready and not complete and not here and not lost)
         self.summarize.setVisible(ready and complete and not modelled and not here)
         resumable = bool(complete) and not modelled and self.store.summary_progress(self.mid)
         self.summarize.setText("Продолжить сводку" if resumable else "Создать сводку")
