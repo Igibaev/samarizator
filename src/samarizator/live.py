@@ -99,7 +99,11 @@ NO_LOOPBACK_DEVICE = (
 
 
 class LiveCaptureError(RuntimeError):
-    pass
+    """A capture problem. `saved` is the finished file when audio was recorded before it."""
+
+    def __init__(self, message, saved=None):
+        super().__init__(message)
+        self.saved = saved
 
 
 def capture_supported():
@@ -364,6 +368,9 @@ class LiveRecorder:
         self.started = time.monotonic()
         return self.path
 
+    def _has_audio(self):
+        return self.partial.is_file() and self.partial.stat().st_size > 1024
+
     def _check_helper(self):
         report = screencapture.status(self.helper)
         if not report["available"]:
@@ -406,14 +413,20 @@ class LiveRecorder:
         helper_problem, helper_detail = self._stop_helper(timeout)
         self._stop_ffmpeg(timeout)
         self._close_log()
-        if helper_problem:
+        problem = helper_problem
+        if not problem and self.process.returncode != 0:
+            problem = self._failure_message()
+        if problem and self._has_audio():
+            # Whatever was recorded before the failure is the meeting: never thrown away.
+            self.partial.replace(self.path)
+            raise LiveCaptureError(
+                problem + "\nЗвук, записанный до сбоя, сохранён и будет распознан.", saved=self.path
+            )
+        if problem:
             self.partial.unlink(missing_ok=True)
             self.log.unlink(missing_ok=True)
-            raise LiveCaptureError(helper_problem)
-        if self.process.returncode != 0:
-            self.partial.unlink(missing_ok=True)
-            raise LiveCaptureError(self._failure_message())
-        if not self.partial.is_file() or self.partial.stat().st_size <= 1024:
+            raise LiveCaptureError(problem)
+        if not self._has_audio():
             self.partial.unlink(missing_ok=True)
             raise LiveCaptureError(self._silence_message(helper_detail))
         self.partial.replace(self.path)
