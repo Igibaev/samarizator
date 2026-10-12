@@ -83,16 +83,15 @@ class WelcomePage(QWidget):
     download = Signal()
     other_model = Signal(str)
     add_file = Signal()
-    record = Signal()
     stop_download = Signal()
 
     FEATURES = [
         (
-            "mic",
+            "wave",
             "#e8f0fb",
             ACCENT,
-            "Запись или файл",
-            "Микрофон и звук звонка или любой аудио- и видеофайл.",
+            "Готовые файлы",
+            "Любой аудио- или видеофайл: перетащите его в окно.",
         ),
         (
             "lines",
@@ -173,11 +172,6 @@ class WelcomePage(QWidget):
         self.main = primary(QPushButton("Скачать модели и начать"), large=True)
         self.main.clicked.connect(self.on_main)
         layout.addWidget(self.main)
-        layout.addSpacing(8)
-        self.second = QPushButton("Начать запись")
-        self.second.setProperty("large", True)
-        self.second.clicked.connect(self.record)
-        layout.addWidget(self.second)
         layout.addSpacing(10)
         self.hint = label("Загрузку можно прервать — она продолжится с того же места.", "hint", wrap=True)
         self.hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -224,7 +218,6 @@ class WelcomePage(QWidget):
         self.ready = all(row[4] for row in rows)
         self.rows, self.note = rows, note
         self.main.setText("Выбрать аудио или видео" if self.ready else "Скачать модели и начать")
-        self.second.setVisible(self.ready)
         self.hint.setText(
             "Можно просто перетащить файл в это окно."
             if self.ready

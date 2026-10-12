@@ -40,7 +40,7 @@ say() { printf '\n==> %s\n' "$*"; }
 need() { command -v "$1" >/dev/null 2>&1 || { echo "Не найден $1. $2"; exit 1; }; }
 
 [[ "$(uname -s)" == "Darwin" ]] || { echo "Сборка .app возможна только на macOS."; exit 1; }
-need swiftc "Установите Xcode Command Line Tools: xcode-select --install"
+need clang "Установите Xcode Command Line Tools: xcode-select --install"
 need cmake "brew install cmake"
 need git "xcode-select --install"
 need uv "brew install uv"
@@ -67,7 +67,8 @@ if [[ ! -x "$OUT/bin/ffmpeg" || ! -x "$OUT/bin/ffprobe" ]]; then
     ./configure --prefix="$WORK/ffmpeg-$ARCH" ${FFMPEG_ASM[@]+"${FFMPEG_ASM[@]}"} \
       --enable-static --disable-shared --disable-doc --disable-debug \
       --disable-ffplay --disable-network --disable-autodetect \
-      --enable-avfoundation --enable-audiotoolbox --enable-zlib \
+      --disable-indevs --disable-outdevs \
+      --enable-audiotoolbox --enable-zlib \
       --extra-cflags="-mmacosx-version-min=$MIN_MACOS" --extra-ldflags="-mmacosx-version-min=$MIN_MACOS"
     make -j"$JOBS"
     cp ffmpeg ffprobe "$OUT/bin/"
@@ -97,10 +98,6 @@ if [[ ! -x "$OUT/bin/llama-server" ]]; then
   cmake_tool llama.cpp llama llama-server -DLLAMA_CURL=OFF -DLLAMA_OPENSSL=OFF \
     -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_USE_PREBUILT_UI=OFF
 fi
-
-say "Helper системного звука (ScreenCaptureKit)"
-swiftc -swift-version 5 -O -target "$ARCH-apple-macos$MIN_MACOS" \
-  -o "$OUT/bin/samarizator-system-audio" native/macos-capture/main.swift
 
 for binary in "$OUT"/bin/*; do
   # Static means: nothing outside /usr/lib and /System. A Homebrew path here would

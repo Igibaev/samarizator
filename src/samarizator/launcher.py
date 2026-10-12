@@ -12,9 +12,7 @@ import sys
 
 ALLOWED = {
     "samarizator.worker",
-    "samarizator.screencapture",
     "samarizator.mlx_server",
-    "samarizator.live",
     "samarizator.setup_models",
     "samarizator.selfcheck",
 }

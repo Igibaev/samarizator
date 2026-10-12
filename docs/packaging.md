@@ -8,10 +8,9 @@
 | Путь | Что |
 |---|---|
 | `Contents/MacOS/Samarizator` | Python + PySide6, замороженные PyInstaller. Тот же исполняемый файл запускает фоновые задачи: `Samarizator --run-module samarizator.worker …` |
-| `Contents/Resources/bin/ffmpeg`, `ffprobe` | FFmpeg, статически, только системные фреймворки macOS (AVFoundation для микрофона) |
+| `Contents/Resources/bin/ffmpeg`, `ffprobe` | FFmpeg, статически, только системные фреймворки macOS, без устройств ввода и вывода (`--disable-indevs --disable-outdevs`): читает только файлы |
 | `Contents/Resources/bin/whisper-cli` | whisper.cpp, статически, Metal встроен |
 | `Contents/Resources/bin/llama-server` | llama.cpp, статически, Metal встроен — модель сводок |
-| `Contents/Resources/bin/samarizator-system-audio` | helper ScreenCaptureKit (`native/macos-capture`) |
 | `Contents/Resources/models/` | модели из `models/bundle.json` (по умолчанию только VAD, ~1 МБ) и сам манифест |
 | `Contents/Resources/build.txt` | версия и коммит, видны в заголовке окна |
 

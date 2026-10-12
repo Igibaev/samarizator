@@ -14,7 +14,6 @@ TOOLS = [
     ("ffprobe", ["-hide_banner", "-version"]),
     ("whisper-cli", ["--help"]),
     ("llama-server", ["--version"]),
-    ("samarizator-system-audio", ["probe"]),
 ]
 MODELS = ["ggml-small-q5_1.bin", "ggml-silero-v6.2.0.bin"]
 
@@ -26,8 +25,8 @@ def run(strict=True):
         path = tool(name)
         try:
             result = subprocess.run([path, *args], capture_output=True, text=True, timeout=30)
-            # whisper-cli --help exits non-zero on some versions; the helper's probe may
-            # report a missing permission. Starting at all is what matters here.
+            # whisper-cli --help exits non-zero on some versions. Starting at all is what
+            # matters here.
             print(f"✓ {name}: {path} (код {result.returncode})")
         except (OSError, subprocess.SubprocessError) as exc:
             print(f"✗ {name}: {path} — {exc}")

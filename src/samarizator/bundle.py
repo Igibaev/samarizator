@@ -1,6 +1,6 @@
 """Where tools and bundled models live: inside Samarizator.app or on a developer checkout.
 
-The portable app carries FFmpeg, whisper-cli, llama-server, the ScreenCaptureKit helper
+The portable app carries FFmpeg, whisper-cli, llama-server
 and the small Whisper/VAD models in `Contents/Resources`. A checkout started with
 `./start.sh` finds the same tools on PATH (Homebrew) and models in Application Support.
 """

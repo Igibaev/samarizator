@@ -46,13 +46,6 @@ from .config import Settings, data_dir
 from .hallucinations import REASON as HALLUCINATION
 from .hallucinations import hallucinated, is_hallucination
 from .knowledge import stamp
-from .live import (
-    SOURCE_LABELS,
-    LiveCaptureError,
-    LiveRecorder,
-    describe_tracks,
-    recording_title,
-)
 from .media import fingerprint
 from .pages import FinalPage, ProcessingPage, StatePage, WelcomePage, app_icon
 from .playback import evidence_intervals
@@ -79,7 +72,6 @@ __all__ = ["ModelDownloadDialog", "SettingsDialog", "Window", "apply_theme", "ma
 
 STATUS = {
     "new": "Новая",
-    "recording": "Идёт запись",
     "transcribing": "Распознавание",
     "review": "Готова к проверке",
     "retrying": "Повторный проход по сомнительным репликам",
@@ -92,8 +84,6 @@ STATUS = {
 
 NEXT_STEP = {
     "new": "Нажмите «Распознать» — текст создаётся на этом Mac, аудио никуда не уходит.",
-    "recording": "Идёт запись, готовые фрагменты распознаются по ходу. "
-    "Нажмите «Остановить запись», когда встреча закончится.",
     "transcribing": "Идёт распознавание. Кнопки шагов включатся, когда оно закончится.",
     "retrying": "Идёт повторный проход по отмеченным репликам.",
     "review": "Проверьте отмеченные реплики, при необходимости исправьте текст — затем «Создать сводку».",
@@ -104,7 +94,7 @@ NEXT_STEP = {
     "уже готовые фрагменты сохранены.",
 }
 
-RUNNING = {"recording", "transcribing", "summarizing", "retrying"}
+RUNNING = {"transcribing", "summarizing", "retrying"}
 PAGE_SIZE = 200
 
 
@@ -136,8 +126,6 @@ def list_status(meeting, complete):
     status = meeting["status"]
     if status == "done":
         return "Готово", GREEN
-    if status == "recording":
-        return "Идёт запись", RED
     if status in {"transcribing", "summarizing", "retrying"}:
         return work.percent(status, meeting["error"]) or STATUS[status], ACCENT
     if status == "error":
@@ -224,7 +212,6 @@ class Window(QMainWindow):
         cleanup()
         self.job = None
         self.job_started = 0.0
-        self.pending_phase = ""
         self.active_id = None
         self.mid = None
         self.page = 0
@@ -233,8 +220,6 @@ class Window(QMainWindow):
         self.playback_queue = deque()
         self.playback_total = 0
         self.playback_mid = None
-        self.live_recorder = None
-        self.recording_id = None
         self.download_job = None
         self.download_queue = []
         self.chat_engine = ChatEngine(self)
@@ -279,11 +264,8 @@ class Window(QMainWindow):
         brand.setStyleSheet("font-weight: 700; font-size: 14px; padding-left: 6px;")
         top.addWidget(brand)
         top.addStretch(1)
-        self.live_button = tool_button("mic", "Начать live-запись", "● Live: начать запись")
-        self.live_button.clicked.connect(self.toggle_live)
         self.add_button = tool_button("plus", "Добавить аудио или видео", "+ Добавить аудио или видео")
         self.add_button.clicked.connect(self.add_file)
-        top.addWidget(self.live_button)
         top.addWidget(self.add_button)
         side.addLayout(top)
         self.search = QLineEdit()
@@ -420,7 +402,6 @@ class Window(QMainWindow):
         self.welcome.stop_download.connect(lambda: self.download_job and self.download_job.stop.set())
         self.welcome.other_model.connect(self.choose_model)
         self.welcome.add_file.connect(self.add_file)
-        self.welcome.record.connect(self.toggle_live)
         self.empty = StatePage()
         self.processing = ProcessingPage()
         self.final_page = FinalPage()
@@ -524,15 +505,13 @@ class Window(QMainWindow):
         right.addWidget(self.more_button)
         self.cancel = QPushButton("Остановить")
         self.cancel.clicked.connect(self.cancel_job)
-        self.stop_live_button = QPushButton("■  Остановить запись")
-        self.stop_live_button.clicked.connect(self.toggle_live)
         self.transcribe = QPushButton("Распознать")
         self.transcribe.clicked.connect(lambda: self.start("transcribe"))
         self.summarize = QPushButton("Создать сводку")
         self.summarize.clicked.connect(lambda: self.start("summary"))
         self.obsidian = primary(QPushButton("Открыть в Obsidian"))
         self.obsidian.clicked.connect(self.open_obsidian)
-        for button in [self.cancel, self.stop_live_button, self.transcribe, self.summarize, self.obsidian]:
+        for button in [self.cancel, self.transcribe, self.summarize, self.obsidian]:
             right.addWidget(button)
         holder = QWidget()
         holder.setLayout(right)
@@ -1095,8 +1074,6 @@ class Window(QMainWindow):
             self.add_path(path)
 
     def add_path(self, path):
-        if self.live_recorder is not None:
-            return
         self.mid = self.store.create(path, self.settings)
         self.page = 0
         self.view = "final"
@@ -1111,135 +1088,6 @@ class Window(QMainWindow):
             if url.isLocalFile() and Path(url.toLocalFile()).is_file():
                 self.add_path(url.toLocalFile())
         event.acceptProposedAction()
-
-    def toggle_live(self):
-        # Stopping comes first: catch-up recognition runs as a job during the whole
-        # recording, and it must never block the button that ends the meeting.
-        if self.live_recorder is not None:
-            self.stop_live()
-            return
-        if self.job:
-            return
-        try:
-            recorder = LiveRecorder(
-                source=self.settings.live_source,
-                microphone_device=self.settings.live_microphone_device,
-                system_device=self.settings.live_system_device,
-                system_backend=self.settings.live_system_backend,
-                mix=self.settings.live_mix,
-            )
-            recorder.start()
-        except LiveCaptureError as exc:
-            QMessageBox.warning(self, "Live-запись", str(exc))
-            return
-        self.live_recorder = recorder
-        self.stop_playback()
-        # The meeting exists from the first second so recognition can run alongside
-        # the recording; its source moves to the finished file when capture stops.
-        self.mid = self.store.create(recorder.partial, self.settings)
-        # The list stays browsable during a meeting, so the recording keeps its own id.
-        self.recording_id = self.mid
-        self.store.update(
-            self.mid,
-            title=recording_title(recorder.source, recorder.partial.stem),
-            status="recording",
-        )
-        self.page = 0
-        self.view = "final"
-        self.refresh_list()
-        self.start_catchup()
-        self.progress.setText(
-            f"Live-запись началась ({SOURCE_LABELS[recorder.source]}). "
-            "Аудио сохраняется только на этом Mac, распознавание идёт по ходу записи."
-        )
-        self.controls()
-
-    def start_catchup(self):
-        """Recognise finished fragments while the meeting is still being recorded."""
-        if self.job or not self.mid:
-            return
-        self.active_id = self.mid
-        self.job = Job("catchup", self.mid, self.settings.memory_gb)
-        self.job_started = time.monotonic()
-        self.job.memory.connect(
-            lambda rss: self.ram.setText(f"Память: {rss:.2f} из {self.settings.memory_gb:g} ГиБ")
-        )
-        self.job.result.connect(self.job_result)
-        self.job.finished.connect(self.job_finished)
-        self.job.start()
-
-    def stop_live(self, start_transcription=True):
-        recorder = self.live_recorder
-        mid = self.recording_id or self.mid
-        if recorder is None:
-            return
-        self.live_recorder = None
-        self.recording_id = None
-        warning = ""
-        try:
-            path = recorder.stop()
-        except (LiveCaptureError, OSError, ValueError) as exc:
-            path, warning = getattr(exc, "saved", None), str(exc)
-            if path is None:
-                self.end_catchup(mid)
-                # An empty recording leaves nothing to keep unless catch-up already saved text.
-                if mid and not self.store.segments(mid, limit=1):
-                    self.store.delete(mid)
-                    self.mid = None
-                elif mid:
-                    self.store.update(
-                        mid,
-                        status="interrupted",
-                        error="Запись оборвалась, звук не сохранился. Уже распознанная часть "
-                        "осталась — по ней можно сделать сводку.",
-                    )
-                self.refresh_list()
-                self.progress.setText(warning)
-                QMessageBox.warning(self, "Live-запись", warning)
-                self.controls()
-                return
-        self.store.update(mid, source=str(path), status="transcribing")
-        self.end_catchup(mid)
-        self.mid, self.page = mid, 0
-        self.refresh_list()
-        self.progress.setText("Live-запись сохранена локально.")
-        self.controls()
-        if warning:
-            QMessageBox.warning(self, "Live-запись", warning)
-        self.report_live_tracks(path, recorder.tracks, [e.name for e in recorder.inputs])
-        if start_transcription:
-            # Catch-up is still finishing its last fragment; chain the closing pass to it.
-            if self.job is not None and self.job.phase == "catchup":
-                self.pending_phase = "transcribe"
-            else:
-                self.start("transcribe")
-
-    def end_catchup(self, mid):
-        """Tell the catch-up worker the recording is over, so it stops after the tail."""
-        if mid:
-            self.store.save_checkpoint(mid, "live-stopped", 0, True)
-
-    def report_live_tracks(self, path, tracks, names=()):
-        """Say which source made it into the file, instead of leaving it to the ear."""
-        if len(tracks) < 2:
-            return
-        try:
-            report, silent = describe_tracks(path, tracks, names)
-        except (OSError, ValueError, RuntimeError) as exc:
-            self.progress.setText(f"Запись сохранена, проверить дорожки не удалось: {exc}")
-            return
-        self.progress.setText("Live-запись сохранена локально. " + report.replace("\n", " · "))
-        if silent:
-            QMessageBox.warning(
-                self,
-                "Live-запись",
-                "В записи нет звука на дорожке: "
-                + ", ".join(silent)
-                + ".\n\n"
-                + report
-                + "\n\nЗапись сохранена, распознавание продолжится. Измерены первые "
-                "30 секунд: если источник молчал в начале, предупреждение ложное.",
-            )
 
     # -- the list ---------------------------------------------------------------------
 
@@ -1285,7 +1133,7 @@ class Window(QMainWindow):
             return
         menu = QMenu(self)
         remove = menu.addAction("Удалить запись…")
-        remove.setEnabled(self.job is None and self.live_recorder is None)
+        remove.setEnabled(self.job is None)
         if menu.exec(self.list.viewport().mapToGlobal(point)) is remove:
             self.delete_meeting(item.data(Qt.ItemDataRole.UserRole))
 
@@ -1305,7 +1153,7 @@ class Window(QMainWindow):
 
     def delete_meeting(self, mid=None):
         mid = mid or self.mid
-        if self.job or self.live_recorder is not None or not mid:
+        if self.job or not mid:
             return
         meeting = self.store.meeting(mid)
         confirm = QMessageBox.question(
@@ -1445,7 +1293,6 @@ class Window(QMainWindow):
                     "Выберите запись слева",
                     "Или добавьте новую: перетащите аудио или видео в окно.",
                     ("Добавить файл", self.add_file),
-                    ("Начать запись", self.toggle_live),
                 )
                 self.stack.setCurrentWidget(self.empty)
             return
@@ -1544,27 +1391,6 @@ class Window(QMainWindow):
         status, message = meeting["status"], meeting["error"] or ""
         running_here = self.job is not None and self.active_id == meeting["id"]
         elapsed = time.monotonic() - self.job_started if running_here else 0
-        if status == "recording":
-            seconds = self.live_recorder.elapsed if self.live_recorder else 0
-            source = SOURCE_LABELS.get(self.live_recorder.source, "") if self.live_recorder else ""
-            self.processing.set(
-                "Идёт запись",
-                f"{source} · аудио сохраняется только на этом Mac".strip(" ·"),
-                None,
-                stamp(seconds),
-                [
-                    ("Запись звука", source, "current"),
-                    (
-                        "Распознавание по ходу записи",
-                        message.split(":")[-1].strip() if message else "",
-                        "current",
-                    ),
-                    ("Сводка", "после остановки", "todo"),
-                ],
-                "Готовые фрагменты распознаются сразу, поэтому после остановки остаётся только хвост.",
-                RED,
-            )
-            return
         if status == "transcribing":
             info = work.transcription(message)
             steps = [
@@ -1679,7 +1505,7 @@ class Window(QMainWindow):
         self.load_detail()
 
     def clean_hallucinations(self):
-        busy = self.job is not None or self.live_recorder is not None
+        busy = self.job is not None
         if busy or not self.mid or not self.junk_rows:
             return False
         rows = list(self.junk_rows)
@@ -1725,7 +1551,7 @@ class Window(QMainWindow):
         )
 
     def locate_source(self):
-        if self.job or self.live_recorder is not None or not self.mid:
+        if self.job or not self.mid:
             return False
         path = self.choose_source()
         if not path:
@@ -1761,7 +1587,7 @@ class Window(QMainWindow):
         return path
 
     def finish_partial(self):
-        if self.job or self.live_recorder is not None or not self.mid:
+        if self.job or not self.mid:
             return False
         last = self.store.last_segment(self.mid)
         if not last or not self.confirm_partial(last["end"]):
@@ -1940,7 +1766,7 @@ class Window(QMainWindow):
 
     def redo_summary(self):
         """Rebuild the whole summary from the transcript, ignoring every saved step."""
-        if self.job or self.live_recorder is not None or not self.mid:
+        if self.job or not self.mid:
             return
         if not self.store.checkpoint(self.mid, "asr_complete", 0):
             QMessageBox.information(self, "Сводка", "Сначала распознайте запись целиком.")
@@ -2007,7 +1833,7 @@ class Window(QMainWindow):
         self.start("transcribe")
 
     def start(self, phase):
-        if self.job or self.live_recorder is not None or not self.mid:
+        if self.job or not self.mid:
             return
         try:
             meeting = self.store.meeting(self.mid)
@@ -2093,7 +1919,6 @@ class Window(QMainWindow):
 
     def job_finished(self):
         meeting = self.store.meeting(self.active_id)
-        pending, self.pending_phase = self.pending_phase, ""
         if self.mid == self.active_id:
             if self.job.phase in {"summary", "final"} and meeting["summary"]:
                 self.view = "final"
@@ -2105,8 +1930,6 @@ class Window(QMainWindow):
         self.active_id = None
         self.refresh_list()
         self.controls()
-        if pending:
-            self.start(pending)
 
     def cancel_job(self):
         if self.job:
@@ -2114,21 +1937,10 @@ class Window(QMainWindow):
             self.progress.setText("Остановка обработчиков…")
 
     def poll(self):
-        if self.live_recorder is not None:
-            if self.live_recorder.recording:
-                # One line during a meeting: the timer plus whatever catch-up is doing.
-                note = (self.store.meeting(self.active_id)["error"] or "") if self.active_id else ""
-                self.progress.setText(
-                    f"● Live-запись · {SOURCE_LABELS[self.live_recorder.source]} · "
-                    f"{stamp(self.live_recorder.elapsed)} · "
-                    + (note.strip() or "нажмите кнопку ещё раз для остановки")
-                )
-            else:
-                self.stop_live(start_transcription=False)
-        elif self.active_id:
+        if self.active_id:
             meeting = self.store.meeting(self.active_id)
             self.progress.setText(meeting["error"] or "Подготовка…")
-        busy_id = self.active_id or self.recording_id
+        busy_id = self.active_id
         if busy_id:
             for index in range(self.list.count()):
                 item = self.list.item(index)
@@ -2151,29 +1963,19 @@ class Window(QMainWindow):
             self.controls()
 
     def controls(self):
-        recording = self.live_recorder is not None
-        busy = self.job is not None or recording
+        busy = self.job is not None
         ready = self.mid is not None
         meeting = self.store.meeting(self.mid) if ready else None
-        working = "Дождитесь конца текущей обработки." if self.job else "Идёт запись."
+        working = "Дождитесь конца текущей обработки."
         pick = "Выберите запись в списке слева."
         explain(self.settings_button, not busy, working)
         self.settings_action.setEnabled(not busy)
-        explain(self.add_button, not recording, "Идёт запись.")
         explain(self.model_button, not busy, working)
-        # Stopping must stay possible while catch-up recognition is running.
-        explain(self.live_button, self.job is None or recording, working)
-        self.live_button.setText("■ Live: остановить и распознать" if recording else "● Live: начать запись")
-        self.live_button.setToolTip("Остановить запись и распознать" if recording else "Начать live-запись")
-        self.live_button.setIcon(icon("stop", RED) if recording else icon("mic"))
         complete = ready and bool(self.store.checkpoint(self.mid, "asr_complete", 0))
         summarized = ready and bool(meeting["summary"])
         # A record that has only the answer of an external AI can still get the model's summary.
         modelled = summarized and model_summary(json.loads(meeting["summary"]))
-        here = ready and (
-            (self.job is not None and self.active_id == self.mid)
-            or (recording and self.recording_id == self.mid)
-        )
+        here = ready and self.job is not None and self.active_id == self.mid
         explain(
             self.transcribe,
             ready and not busy and not complete,
@@ -2186,7 +1988,7 @@ class Window(QMainWindow):
             bool(complete) and not busy,
             working if busy else ("Сначала распознайте запись целиком." if ready else pick),
         )
-        explain(self.cancel, self.job is not None and not recording, "Сейчас нечего останавливать.")
+        explain(self.cancel, self.job is not None, "Сейчас нечего останавливать.")
         explain(self.save_segment, ready and not busy, working if busy else pick)
         explain(
             self.retry,
@@ -2234,8 +2036,7 @@ class Window(QMainWindow):
         resumable = bool(complete) and not modelled and self.store.summary_progress(self.mid)
         self.summarize.setText("Продолжить сводку" if resumable else "Создать сводку")
         self.obsidian.setVisible(ready and summarized and not here)
-        self.cancel.setVisible(here and not recording)
-        self.stop_live_button.setVisible(recording and self.recording_id == self.mid)
+        self.cancel.setVisible(here)
         self.views.setVisible(ready)
         self.more_button.setVisible(ready)
         self.copy_final_button.setVisible(ready and summarized and self.view == "final")
@@ -2314,8 +2115,6 @@ class Window(QMainWindow):
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(note).parent)))
 
     def closeEvent(self, event):
-        if self.live_recorder is not None:
-            self.stop_live(start_transcription=False)
         if self.download_job:
             self.download_job.stop.set()
             self.download_job.wait(5000)

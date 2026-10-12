@@ -80,10 +80,6 @@ app = BUNDLE(
         "LSMinimumSystemVersion": "13.0",
         "LSApplicationCategoryType": "public.app-category.productivity",
         "NSHighResolutionCapable": True,
-        "NSMicrophoneUsageDescription": (
-            "Samarizator записывает микрофон для live-записи встречи. Запись и расшифровка "
-            "остаются на этом Mac."
-        ),
         "NSHumanReadableCopyright": "Samarizator",
     },
 )

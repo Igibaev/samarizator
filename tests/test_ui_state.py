@@ -66,9 +66,6 @@ def test_status_line_names_the_next_action(window, tmp_path):
     assert NEXT_STEP["review"] in win.info.text()
     assert "Готова к проверке" in win.info.text()
 
-    recording(win, tmp_path, status="recording")
-    assert NEXT_STEP["recording"] in win.info.text()
-
 
 def test_error_button_appears_only_with_an_error(window, tmp_path):
     win, _ = window

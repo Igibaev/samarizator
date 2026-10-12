@@ -54,7 +54,7 @@ jobs:
           path: |
             build/macos/src
             build/macos/out-arm64
-          key: deps-arm64-${{ hashFiles('packaging/macos/build.sh', 'native/macos-capture/main.swift', 'models/bundle.json') }}
+          key: deps-arm64-${{ hashFiles('packaging/macos/build.sh', 'models/bundle.json') }}
 
       - name: Import signing certificate
         if: env.HAS_CERTIFICATE == 'true'

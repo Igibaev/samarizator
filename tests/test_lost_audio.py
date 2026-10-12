@@ -20,7 +20,8 @@ def test_finishing_at_the_recognised_part(meeting):
     assert record["status"] == "review" and record["error"] is None
 
 
-def test_a_crash_while_recording_leaves_a_record_that_can_continue(meeting):
+def test_a_record_left_recording_by_an_older_version_can_continue(meeting):
+    # Versions before allowed-by-security had live recording; their database may keep the status.
     store, mid, settings = meeting
     store.update(mid, status="recording")
     store.recover()
@@ -100,74 +101,3 @@ def test_the_moved_file_is_found_and_recognition_continues(lost, tmp_path, monke
     monkeypatch.setattr(Window, "choose_source", lambda self: str(moved))
     assert w.locate_source() is True and phases == ["transcribe"]
     assert w.store.meeting(mid)["source"] == str(moved.resolve())
-
-
-def test_a_failed_live_recording_keeps_its_audio(tmp_path, monkeypatch):
-    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
-    monkeypatch.setenv("SAMARIZATOR_HOME", str(tmp_path / "home"))
-    from PySide6.QtWidgets import QApplication
-
-    from samarizator.app import Window
-    from samarizator.live import LiveCaptureError
-
-    app = QApplication.instance() or QApplication([])
-    recorded = tmp_path / "live.wav"
-    partial = tmp_path / "live.partial.wav"
-    saved = []
-
-    class Recorder:
-        recording = True
-        elapsed = 3
-        source = "system"
-        tracks = ("system",)
-        inputs = ()
-
-        def __init__(self, **kwargs):
-            self.partial = partial
-
-        def start(self):
-            partial.write_bytes(b"RIFF" + b"\0" * 2048)
-            return recorded
-
-        def stop(self):
-            self.recording = False
-            if saved:
-                partial.replace(recorded)
-                raise LiveCaptureError("Захват прервался.\nЗвук сохранён.", saved=recorded)
-            partial.unlink()
-            raise LiveCaptureError("Захват прервался.")
-
-    monkeypatch.setattr("samarizator.app.LiveRecorder", Recorder)
-    warnings = []
-    monkeypatch.setattr("samarizator.app.QMessageBox.warning", lambda *args: warnings.append(args[2]))
-    w = Window()
-    phases = []
-    monkeypatch.setattr(w, "start", phases.append)
-    monkeypatch.setattr(w, "start_catchup", lambda: None)
-
-    saved.append(True)
-    w.toggle_live()
-    mid = w.mid
-    w.toggle_live()
-    assert w.store.meeting(mid)["source"] == str(recorded) and phases == ["transcribe"]
-    assert warnings and "Звук сохранён" in warnings[0]
-
-    # No audio at all, but catch-up recognised the beginning: the text stays, honestly marked.
-    saved.clear()
-    phases.clear()
-    w.toggle_live()
-    mid = w.mid
-    w.store.save_chunk(mid, 0, SPEECH)
-    w.toggle_live()
-    record = w.store.meeting(mid)
-    assert phases == [] and record["status"] == "interrupted" and "звук не сохранился" in record["error"]
-    w.mid = mid
-    w.set_view("transcript")
-    w.load_detail()
-    w.controls()
-    assert w.partial_button.isVisibleTo(w)
-    assert w.source_lost(record)
-    w.timer.stop()
-    w.close()
-    w.deleteLater()
-    app.processEvents()

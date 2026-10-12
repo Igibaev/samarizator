@@ -32,10 +32,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import live, local_llm, screencapture
-from .bundle import tool
+from . import local_llm
 from .config import FINAL_PROMPT_LIMIT, INSTRUCTIONS_LIMIT, Settings
-from .live import BOTH, DEVICE, MICROPHONE, NATIVE, SYSTEM
 from .summary_prompts import DEFAULT_FORMAT, FINAL_FORMATS
 from .theme import ACCENT, pixmap, set_flag
 from .widgets import label, primary, separator, tag
@@ -174,7 +172,6 @@ class SettingsDialog(QDialog):
     PAGES = [
         ("Основное", "gear", "#8e8e93"),
         ("Шаблон итогового текста", "lines", "#0a7aff"),
-        ("Live-запись", "mic", "#ff3b30"),
         ("Для опытных", "sliders", "#636366"),
     ]
 
@@ -220,7 +217,6 @@ class SettingsDialog(QDialog):
         outer.addLayout(right, 1)
         self.build_general()
         self.build_template()
-        self.build_live()
         self.build_advanced()
         self.nav.currentRowChanged.connect(self.stack.setCurrentIndex)
         self.nav.setCurrentRow(0)
@@ -379,86 +375,6 @@ class SettingsDialog(QDialog):
         layout.addLayout(row)
         self.stack.addWidget(scroll)
 
-    def build_live(self):
-        s = self.settings
-        scroll, layout = page("Live-запись")
-        sources = Group(layout, "Источник")
-        source = QComboBox()
-        for value, title in [
-            (MICROPHONE, "Только микрофон"),
-            (SYSTEM, "Только системный звук"),
-            (BOTH, "Микрофон и звук звонка"),
-        ]:
-            source.addItem(title, value)
-        source.setCurrentIndex(max(0, source.findData(s.live_source)))
-        self.fields["live_source"] = source
-        sources.row("Что записывать", source)
-        backend = QComboBox()
-        for value, title in [
-            (NATIVE, "Штатно (ScreenCaptureKit)"),
-            (DEVICE, "Устройство петли"),
-        ]:
-            backend.addItem(title, value)
-        backend.setCurrentIndex(max(0, backend.findData(s.live_system_backend)))
-        self.fields["live_system_backend"] = backend
-        sources.row(
-            "Захват системного звука",
-            backend,
-            subtitle="Штатный способ не требует драйверов. Петля (BlackHole, Loopback) — если штатный "
-            "запрещён политикой компании.",
-        )
-        self.helper = screencapture.status()
-        sources.note(("✓ " if self.helper["available"] else "⚠ ") + self.helper["message"])
-        devices = Group(layout, "Устройства")
-        self.inputs, self.loopback = self.live_devices()
-        for key, title, only_loopback in [
-            ("live_microphone_device", "Микрофон", False),
-            ("live_system_device", "Системный звук", True),
-        ]:
-            box = QComboBox()
-            box.setEditable(True)
-            box.setMinimumWidth(240)
-            box.addItem("По умолчанию", "")
-            for _, name in self.loopback if only_loopback else self.inputs:
-                box.addItem(name, name)
-            saved = getattr(s, key)
-            found = box.findData(saved)
-            if saved and found < 0:
-                box.addItem(saved, saved)
-                found = box.count() - 1
-            box.setCurrentIndex(max(0, found))
-            self.fields[key] = box
-            devices.row(title, box)
-        if self.inputs and not self.loopback:
-            devices.note(
-                "Устройства петли не видно — оно нужно только для запасного способа. Установите его и "
-                "откройте настройки снова либо впишите имя вручную."
-            )
-        mixing = QComboBox()
-        for value, title in [
-            ("gentle", "Мягкое выравнивание"),
-            ("no-resample", "Без выравнивания"),
-            ("stretch", "Выравнивание темпом"),
-            ("hard-stuff", "Вставка тишины"),
-            ("legacy-pan", "Как до 14.09.2026"),
-        ]:
-            mixing.addItem(title, value)
-        mixing.setCurrentIndex(max(0, mixing.findData(s.live_mix)))
-        self.fields["live_mix"] = mixing
-        mix = Group(layout, "Сведение двух дорожек")
-        mix.row(
-            "Профиль",
-            mixing,
-            subtitle="Микрофон и системный звук идут от разных часов. Сравнить профили: "
-            "python -m samarizator.live compare-mix",
-        )
-        mix.note(
-            "Микрофон и системный звук пишутся в один файл раздельными каналами. При выводе в динамики "
-            "микрофон повторно захватит собеседника — используйте наушники."
-        )
-        layout.addStretch(1)
-        self.stack.addWidget(scroll)
-
     def build_advanced(self):
         s = self.settings
         scroll, layout = page("Для опытных")
@@ -615,17 +531,6 @@ class SettingsDialog(QDialog):
             self.fields[key].setChecked(getattr(profile, key))
         if not self.fields["vad_model"].text().strip():
             self.fields["vad_model"].setText(profile.vad_model)
-
-    @staticmethod
-    def live_devices():
-        """Enumerate macOS inputs for the pickers; elsewhere the fields stay free text."""
-        if not live.capture_supported():
-            return [], []
-        try:
-            devices = live.audio_devices(tool("ffmpeg"))
-        except live.LiveCaptureError:
-            return [], []
-        return devices, live.system_audio_devices(devices)
 
     def pick_format(self, index):
         key = self.fields["final_format"].itemData(index)

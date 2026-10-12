@@ -16,7 +16,6 @@ GREY = "#aeaeb2"
 
 # 24×24 stroke paths, drawn in the requested colour.
 ICONS = {
-    "mic": '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/>',
     "plus": '<path d="M12 5v14M5 12h14"/>',
     "search": '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
     "gear": '<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1'
