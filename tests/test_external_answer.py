@@ -104,10 +104,10 @@ def test_replacing_the_models_final_text_asks_first(privacy, monkeypatch):
     assert page.save_answer("Новый ответ ИИ") is True
 
 
-def test_an_external_summary_is_exported_and_shown_for_what_it_is(meeting, qapp):
+def test_an_external_summary_is_saved_and_shown_for_what_it_is(meeting, qapp):
     from PySide6.QtWidgets import QLabel
 
-    from samarizator.knowledge import export
+    from samarizator.knowledge import summary_markdown
     from samarizator.pages import FinalPage
     from samarizator.summary_page import SummaryPage
 
@@ -115,7 +115,7 @@ def test_an_external_summary_is_exported_and_shown_for_what_it_is(meeting, qapp)
     store.save_chunk(mid, 0, SPEECH)
     summary = with_external_answer(None, "# Итоги\n\nДоговор до пятницы.", "2026-10-04T18:00")
     store.update(mid, summary=json.dumps(summary))
-    note = export(store, mid, settings).read_text()
+    note = summary_markdown(store, mid)
     assert EXTERNAL_TITLE in note and "Договор до пятницы." in note
     page = SummaryPage(store.segment)
     page.show_summary(mid, summary, {})

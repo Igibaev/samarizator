@@ -89,3 +89,27 @@ def test_explain_clears_a_stale_reason_when_the_button_becomes_usable():
     assert not button.isEnabled() and button.toolTip() == "Сначала выберите запись."
     explain(button, True)
     assert button.isEnabled()
+
+
+def test_summary_is_saved_only_where_the_user_picks(window, tmp_path, monkeypatch):
+    import json
+
+    win, _ = window
+    mid = recording(win, tmp_path, status="done", complete=True)
+    win.store.save_chunk(mid, 0, [dict(start=5, end=8, speaker="Речь", text="Бюджет утвердили.")])
+    sid = win.store.segments(mid)[0]["id"]
+    item = dict(kind="decision", text="Бюджет утверждён", evidence=[sid], owner=None, due=None)
+    view = dict(overview="Итог", items=[item], topics=[])
+    win.store.update(mid, summary=json.dumps(dict(**view, brief=view, detailed=dict(**view, resolved=[]))))
+    win.refresh_list()
+    assert not win.save_summary.isHidden() and win.save_summary.isEnabled()
+
+    target = tmp_path / "out" / "сводка.md"
+    target.parent.mkdir()
+    monkeypatch.setattr(
+        "samarizator.app.QFileDialog.getSaveFileName", lambda *args: (str(target), "Markdown (*.md)")
+    )
+    win.export_summary()
+    text = target.read_text(encoding="utf-8")
+    assert "Бюджет утверждён" in text and "(00:00:05)" in text
+    assert win.store.meeting(mid)["note"] is None

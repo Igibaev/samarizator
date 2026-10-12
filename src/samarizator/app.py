@@ -38,7 +38,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import __version__, feedback, local_llm, obsidian
+from . import __version__, feedback, local_llm
 from . import progress as work
 from .bundle import python_command, tool
 from .chat import ChatEngine, ChatPanel, ChatWorker
@@ -509,9 +509,10 @@ class Window(QMainWindow):
         self.transcribe.clicked.connect(lambda: self.start("transcribe"))
         self.summarize = QPushButton("Создать сводку")
         self.summarize.clicked.connect(lambda: self.start("summary"))
-        self.obsidian = primary(QPushButton("Открыть в Obsidian"))
-        self.obsidian.clicked.connect(self.open_obsidian)
-        for button in [self.cancel, self.transcribe, self.summarize, self.obsidian]:
+        self.save_summary = primary(QPushButton("Сохранить в Markdown…"))
+        self.save_summary.setToolTip("Итоговый текст и сводка одним файлом — в папку, которую вы выберете")
+        self.save_summary.clicked.connect(self.export_summary)
+        for button in [self.cancel, self.transcribe, self.summarize, self.save_summary]:
             right.addWidget(button)
         holder = QWidget()
         holder.setLayout(right)
@@ -532,7 +533,7 @@ class Window(QMainWindow):
         for level in range(3):
             self.views.set_compact(level >= 1)
             self.ask_button.setText("" if level >= 2 else "Спросить")
-            self.obsidian.setText("Obsidian" if level >= 2 else "Открыть в Obsidian")
+            self.save_summary.setText("Сохранить…" if level >= 2 else "Сохранить в Markdown…")
             self.toolbar_right.layout().invalidate()
             need = title + self.views.sizeHint().width() + self.toolbar_right.layout().sizeHint().width()
             if need <= available:
@@ -550,12 +551,6 @@ class Window(QMainWindow):
         self.rerun_button = menu.addAction("Распознать заново…", self.rerun_transcription)
         menu.addSeparator()
         self.source_action = menu.addAction("Открыть исходную запись", self.open_source)
-        self.reveal_action = menu.addAction("Показать заметку в Finder", self.reveal_note)
-        self.reexport = menu.addAction("Экспортировать в Obsidian заново", lambda: self.start("export"))
-        menu.addAction(
-            "Открыть папку заметок",
-            lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(self.settings.vault)),
-        )
         self.export_transcript_action = menu.addAction(
             "Экспорт расшифровки в Markdown…", self.export_transcript
         )
@@ -932,17 +927,8 @@ class Window(QMainWindow):
         self.start("final")
 
     def external_answer_saved(self, mid):
-        """The answer of an external AI is now the record's final text: show it, update the note."""
-        meeting = self.store.meeting(mid)
+        """The answer of an external AI is now the record's final text: show it."""
         note = "Ответ внешней нейросети сохранён как итоговый текст записи."
-        if meeting["summary"] and not self.job:
-            from .knowledge import export
-
-            try:
-                export(self.store, mid, Settings.from_dict(json.loads(meeting["settings"])).resolved())
-                note += " Заметка Obsidian обновлена."
-            except (OSError, ValueError) as exc:
-                note += f" Заметку обновить не удалось: {exc}"
         if mid == self.mid:
             self.view = "final"
             self.load_detail()
@@ -965,15 +951,6 @@ class Window(QMainWindow):
         else:
             state.pop(key, None)
         self.store.save_checkpoint(mid, "tasks-done", 0, state)
-        meeting = self.store.meeting(mid)
-        if meeting["note"] and meeting["summary"] and not self.job:
-            from .knowledge import export
-
-            try:
-                export(self.store, mid, Settings.from_dict(json.loads(meeting["settings"])).resolved())
-                self.progress.setText("Отметка задачи сохранена и в заметке Obsidian.")
-            except (OSError, ValueError) as exc:
-                self.progress.setText(f"Отметка сохранена, заметку обновить не удалось: {exc}")
 
     # -- questions about the summary ---------------------------------------------------
 
@@ -1160,7 +1137,7 @@ class Window(QMainWindow):
             self,
             "Удалить запись",
             f"Удалить «{meeting['title']}» из приложения? Расшифровка и сводка будут удалены безвозвратно.\n"
-            "Исходный аудио/видео файл и уже экспортированные заметки в Obsidian не удаляются.",
+            "Исходный аудио/видео файл и уже сохранённые вами файлы не удаляются.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
@@ -1644,10 +1621,6 @@ class Window(QMainWindow):
         box.addWidget(view)
         dialog.exec()
 
-    def reveal_note(self):
-        if self.mid and (note := self.store.meeting(self.mid)["note"]):
-            QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(note).parent)))
-
     # -- playback ---------------------------------------------------------------------
 
     def play_segment(self):
@@ -1818,6 +1791,25 @@ class Window(QMainWindow):
             return
         self.progress.setText(f"Расшифровка сохранена: {Path(path).name}")
 
+    def export_summary(self):
+        """Final text and summary as one Markdown file, written only where the user picks."""
+        from .knowledge import summary_markdown
+
+        if not self.mid or not self.store.meeting(self.mid)["summary"]:
+            return
+        meeting = self.store.meeting(self.mid)
+        name = re.sub(r'[\\/:*?"<>|]+', " ", meeting["title"]).strip() or "Сводка"
+        default = str(Path.home() / "Documents" / f"{name} — сводка.md")
+        path, _ = QFileDialog.getSaveFileName(self, "Сохранить сводку", default, "Markdown (*.md)")
+        if not path:
+            return
+        try:
+            Path(path).write_text(summary_markdown(self.store, self.mid), encoding="utf-8")
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "Сохранить сводку", f"Не удалось сохранить файл: {exc}")
+            return
+        self.progress.setText(f"Сводка сохранена: {Path(path).name}")
+
     def rerun_transcription(self):
         if self.job or not self.mid:
             return
@@ -1864,7 +1856,6 @@ class Window(QMainWindow):
                     "final_prompt",
                     "input_chars",
                     "max_output_tokens",
-                    "vault",
                     "memory_gb",
                     "threads",
                 ]:
@@ -2006,10 +1997,8 @@ class Window(QMainWindow):
             bool(complete) and not busy,
             working if busy else "Сначала распознайте запись целиком.",
         )
-        explain(self.reexport, ready and not busy and summarized, "")
         explain(self.delete_action, ready and not busy, "")
         explain(self.source_action, ready, "")
-        explain(self.reveal_action, ready and bool(meeting["note"]), "")
         explain(self.audio_action, ready, "")
         has_text = ready and bool(self.store.segment_counts(self.mid)[0])
         explain(self.export_transcript_action, has_text, "Расшифровки ещё нет.")
@@ -2035,7 +2024,7 @@ class Window(QMainWindow):
         self.summarize.setVisible(ready and complete and not modelled and not here)
         resumable = bool(complete) and not modelled and self.store.summary_progress(self.mid)
         self.summarize.setText("Продолжить сводку" if resumable else "Создать сводку")
-        self.obsidian.setVisible(ready and summarized and not here)
+        self.save_summary.setVisible(ready and summarized and not here)
         self.cancel.setVisible(here)
         self.views.setVisible(ready)
         self.more_button.setVisible(ready)
@@ -2058,7 +2047,6 @@ class Window(QMainWindow):
         self.stop_button.setVisible(playing)
         if playing:
             self.playbar.setVisible(True)
-        self.obsidian.setEnabled(ready and bool(meeting["note"]) and summarized)
         roles = [role for role, _ in self.missing_models()]
         names = {
             "whisper": "Скачать модель распознавания",
@@ -2080,39 +2068,6 @@ class Window(QMainWindow):
     def open_source(self):
         if self.mid:
             QDesktopServices.openUrl(QUrl.fromLocalFile(self.store.meeting(self.mid)["source"]))
-
-    def open_obsidian(self):
-        if not self.mid or not (note := self.store.meeting(self.mid)["note"]):
-            return
-        # Ask Obsidian which vaults it knows rather than guessing a name from the
-        # settings folder: the name only matches if the user opened that exact folder
-        # as a vault, and a note can also live inside a vault registered higher up.
-        url = obsidian.note_url(note)
-        if url and QDesktopServices.openUrl(QUrl(url)):
-            return
-        folder = Path(self.settings.vault).expanduser()
-        registered = "\n".join(f"• {location}" for _, location in obsidian.vaults())
-        message = (
-            "Obsidian не знает хранилища с этой заметкой.\n\n"
-            f"Заметка лежит в {folder}. Откройте Obsidian → «Открыть папку как хранилище» "
-            "и выберите эту папку — одного наличия папки на диске недостаточно, "
-            "ссылка obsidian:// работает только с зарегистрированным хранилищем."
-        )
-        if registered:
-            message += "\n\nСейчас Obsidian знает такие хранилища:\n" + registered
-        elif not obsidian.config_path().is_file():
-            message = (
-                "Не найден конфиг Obsidian — похоже, приложение не установлено или ни разу "
-                f"не запускалось. Заметки лежат в {folder} и открываются любым "
-                "Markdown-редактором."
-            )
-        box = QMessageBox(self)
-        box.setWindowTitle("Не удалось открыть в Obsidian")
-        box.setText(message)
-        box.addButton("Показать папку", QMessageBox.ButtonRole.AcceptRole)
-        box.addButton("Закрыть", QMessageBox.ButtonRole.RejectRole)
-        if box.exec() == 0:
-            QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(note).parent)))
 
     def closeEvent(self, event):
         if self.download_job:

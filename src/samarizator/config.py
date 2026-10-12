@@ -27,7 +27,6 @@ class Settings:
     # Recognition on Metal: many times faster and cooler than the CPU on Apple Silicon.
     gpu: bool = True
     whisper_model: str = ""
-    vault: str = ""
     input_chars: int = 12000
     max_output_tokens: int = 4096
     pause_boundaries: bool = False
@@ -179,7 +178,6 @@ class Settings:
             # No recognition model yet: the welcome screen offers the one that suits this Mac.
             whisper_model=str(whisper) if Path(whisper).is_file() else "",
             llm_model=str(llm) if llm else "",
-            vault=str(Path.home() / "Documents/Samarizator"),
         )
         from .local_llm import ram_gb
 

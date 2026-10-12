@@ -23,4 +23,4 @@ Samarizator не записывает звук: ни микрофон, ни си
 не запрашивает.
 
 Данные: ~/Library/Application Support/Samarizator
-Заметки: ~/Documents/Samarizator
+Файлы Markdown: только там, куда вы их сохраните

@@ -12,7 +12,7 @@ import pytest
 
 from samarizator import local_llm
 from samarizator.config import Settings
-from samarizator.knowledge import export
+from samarizator.knowledge import summary_markdown
 from samarizator.summary import final_candidates, final_document, regenerate_final, summarize
 from samarizator.summary_prompts import FINAL_FORMATS
 
@@ -116,8 +116,7 @@ def test_summary_runs_end_to_end_through_a_local_server(meeting, fake_server):
             f"http://127.0.0.1:{port}/health", timeout=1
         )
     store.update(mid, summary=json.dumps(result, ensure_ascii=False))
-    note = export(store, mid, settings)
-    text = note.read_text(encoding="utf-8")
+    text = summary_markdown(store, mid)
     assert "## Итоговый текст · Протокол встречи" in text
     assert "\n### Протокол\n" in text and "\n#### Решения\n" in text
 
@@ -352,7 +351,7 @@ def test_timeline_parts_follow_source_blocks(meeting, fake_server):
     assert all(a["last"] == b["first"] for a, b in zip(parts, parts[1:]))
 
 
-def test_ticked_tasks_are_ticked_in_the_obsidian_note(meeting):
+def test_ticked_tasks_are_ticked_in_the_saved_markdown(meeting):
     from samarizator.knowledge import task_key
 
     store, mid, settings = meeting
@@ -369,7 +368,7 @@ def test_ticked_tasks_are_ticked_in_the_obsidian_note(meeting):
     view = dict(overview="Итог", items=[task], topics=[])
     store.update(mid, summary=json.dumps(dict(**view, brief=view, detailed=dict(**view, resolved=[task]))))
     store.save_checkpoint(mid, "tasks-done", 0, {task_key(task): True})
-    text = export(store, mid, settings).read_text(encoding="utf-8")
+    text = summary_markdown(store, mid)
     assert "- [x] Посчитать скидки" in text
 
 

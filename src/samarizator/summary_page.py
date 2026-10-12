@@ -357,7 +357,7 @@ class SummaryPage(QScrollArea):
             box = QCheckBox()
             box.setObjectName("task")
             box.setChecked(bool(done.get(key)))
-            box.setToolTip("Отметить выполненной — отметка попадёт и в заметку Obsidian")
+            box.setToolTip("Отметить выполненной — отметка попадёт и в сохранённый Markdown")
             box.toggled.connect(lambda state, k=key: self.taskToggled.emit(self.mid, k, state))
             line.addWidget(box, 0, Qt.AlignmentFlag.AlignTop)
             body = QVBoxLayout()

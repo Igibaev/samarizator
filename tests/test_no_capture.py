@@ -1,4 +1,4 @@
-"""The allowed-by-security build reads files only: no microphone, no system audio, no screen."""
+"""The allowed-by-security build reads files only: no microphone, system audio, screen or Obsidian."""
 
 import importlib.util
 import plistlib
@@ -46,3 +46,10 @@ def test_live_settings_of_older_versions_are_dropped():
     old = dict(live_source="both", live_system_backend="screencapturekit", live_mix="gentle")
     settings = Settings.from_dict(old)
     assert not any(name.startswith("live_") for name in vars(settings))
+
+
+def test_no_obsidian_integration():
+    assert importlib.util.find_spec("samarizator.obsidian") is None
+    assert "vault" not in Settings.__dataclass_fields__
+    for path in (ROOT / "src").rglob("*.py"):
+        assert "obsidian" not in path.read_text(encoding="utf-8").lower(), path.name

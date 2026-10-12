@@ -341,11 +341,6 @@ class SettingsDialog(QDialog):
             "Учитывается на каждом шаге сводки. Правила точности встроены и не отключаются: только "
             "факты из записи, честные статусы решений, ссылки на реплики."
         )
-        notes = Group(layout, "Заметки")
-        self.hidden("vault", s.vault).textChanged.connect(lambda text: self.vault_label.setText(text))
-        pick_vault = QPushButton("Выбрать…")
-        pick_vault.clicked.connect(lambda: self.pick("vault", self.fields["vault"]))
-        self.vault_label = notes.row("Папка для Obsidian", pick_vault, subtitle=s.vault)
         layout.addStretch(1)
         self.stack.addWidget(scroll)
 
@@ -665,11 +660,7 @@ class SettingsDialog(QDialog):
         self.describe_decider()
 
     def pick(self, key, widget):
-        path = (
-            QFileDialog.getExistingDirectory(self, "Папка базы знаний")
-            if key == "vault"
-            else QFileDialog.getOpenFileName(self, "Выберите локальную модель")[0]
-        )
+        path = QFileDialog.getOpenFileName(self, "Выберите локальную модель")[0]
         if path:
             widget.setText(path)
 

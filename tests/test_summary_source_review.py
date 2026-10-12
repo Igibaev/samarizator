@@ -3,7 +3,7 @@ import json
 import httpx
 import pytest
 
-from samarizator.knowledge import export
+from samarizator.knowledge import summary_markdown
 from samarizator.summary import (
     LocalClient,
     SummaryFormatError,
@@ -149,7 +149,7 @@ def test_review_failure_preserves_draft_warns_and_retries_without_reextracting(m
     warning = result["detailed"]["quality_warning"]
     assert warning and result["brief"]["quality_warning"] == warning
     store.update(mid, summary=json.dumps(result))
-    assert warning in export(store, mid, settings).read_text()
+    assert warning in summary_markdown(store, mid)
     assert client.audits == (1 if failure == "network" else 3)
     client.repaired = True
     result = summarize(store, mid, settings, client=client)

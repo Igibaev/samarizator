@@ -40,7 +40,6 @@ ICONS = {
     "download": '<path d="M12 4v12M6 11l6 6 6-6M5 20h14"/>',
     "send": '<path d="M12 19V5M6 11l6-6 6 6"/>',
     "chat": '<path d="M20 12a8 8 0 0 1-11.6 7.1L4 20l1-4.2A8 8 0 1 1 20 12z"/>',
-    "obsidian": '<path d="M14 3h7v7M10 14 21 3M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/>',
 }
 
 

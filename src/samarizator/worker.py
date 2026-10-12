@@ -180,28 +180,17 @@ def main():
             elif phase == "retry":
                 retry_uncertain(store, mid, settings, Path(temp))
             elif phase == "summary":
-                from .knowledge import export
                 from .summary import summarize
 
                 result = summarize(store, mid, settings, lambda msg: status(store, mid, msg), work=Path(temp))
-                store.update(mid, summary=json.dumps(result, ensure_ascii=False))
-                export(store, mid, settings)
-                store.update(mid, status="done", error=None)
+                store.update(mid, summary=json.dumps(result, ensure_ascii=False), status="done", error=None)
             elif phase == "final":
-                from .knowledge import export
                 from .summary import regenerate_final
 
                 result = regenerate_final(
                     store, mid, settings, lambda msg: status(store, mid, msg), work=Path(temp)
                 )
-                store.update(mid, summary=json.dumps(result, ensure_ascii=False))
-                export(store, mid, settings)
-                store.update(mid, status="done", error=None)
-            elif phase == "export":
-                from .knowledge import export
-
-                export(store, mid, settings)
-                store.update(mid, status="done", error=None)
+                store.update(mid, summary=json.dumps(result, ensure_ascii=False), status="done", error=None)
             else:
                 raise ValueError("Неизвестная операция.")
     except Exception as exc:

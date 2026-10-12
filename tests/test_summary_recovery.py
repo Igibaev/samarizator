@@ -4,7 +4,7 @@ from dataclasses import asdict
 import httpx
 import pytest
 
-from samarizator.knowledge import export
+from samarizator.knowledge import summary_markdown
 from samarizator.summary import (
     LocalClient,
     SummaryFormatError,
@@ -277,5 +277,5 @@ def test_bad_final_compression_preserves_detailed_summary_and_returns_safe_brief
     assert result["brief"]["items"][0]["evidence"]
     assert "Финальное сжатие" in result["brief"]["generation_warning"]
     store.update(mid, summary=json.dumps(result))
-    note = export(store, mid, settings).read_text()
+    note = summary_markdown(store, mid)
     assert "> Финальное сжатие" in note and "## Подробная сводка" in note

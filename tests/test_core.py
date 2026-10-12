@@ -6,7 +6,7 @@ import time
 import pytest
 
 from samarizator.config import Settings
-from samarizator.knowledge import export, topic_name
+from samarizator.knowledge import stamp, summary_markdown
 from samarizator.media import parse_whisper, whisper
 from samarizator.process import BudgetExceeded, rss_tree, supervise
 from samarizator.summary import blocks, summarize, validate_summary
@@ -228,22 +228,19 @@ def test_ledger_preserves_late_topics_and_cached_maps(meeting):
     assert fake.calls - first == 1  # only final synthesis; map results resumed
 
 
-def test_obsidian_evidence_and_manual_edits_preserved(meeting):
+def test_summary_markdown_cites_times_and_writes_nothing(meeting, tmp_path):
     store, mid, settings = meeting
     store.save_chunk(mid, 0, [segment()])
     sid = store.segments(mid)[0]["id"]
     summary = result(sid)
     summary["ledger"] = summary["items"]
     store.update(mid, summary=json.dumps(summary))
-    first = export(store, mid, settings)
-    assert f"#^s{sid}" in first.read_text()
-    original = first.read_text() + "\nМои ручные заметки\n"
-    first.write_text(original)
-    second = export(store, mid, settings)
-    assert first != second
-    assert first.read_text() == original
-    # Topic names go into a vault path, so traversal and separators must not survive.
-    assert "/" not in topic_name("../../Secret [x]") and ".." not in topic_name("..")
+    before = sorted(tmp_path.rglob("*"))
+    text = summary_markdown(store, mid)
+    start = stamp(store.segments(mid)[0]["start"])
+    assert f"({start})" in text and "[[" not in text and "^s" not in text
+    # Rendering only returns text: files appear where the user saves them, nowhere else.
+    assert sorted(tmp_path.rglob("*")) == before
 
 
 def test_memory_watchdog_stops_process_group(tmp_path):

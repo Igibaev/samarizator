@@ -107,11 +107,10 @@ class Store:
             "duration",
             "channels",
             "summary",
-            "note",
             "error",
             "settings",
             "title",
-            "source",  # a live recording is renamed from its partial file when it stops
+            "source",  # the user points the record at its moved file
         }
         if not values or not set(values) <= allowed:
             raise ValueError("Invalid meeting fields")

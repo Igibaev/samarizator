@@ -132,8 +132,8 @@ def test_many_independent_decisions_do_not_require_lossy_reduction():
     assert warnings and "Между блоками" in warnings[0]
 
 
-def test_failed_optional_resolution_keeps_both_summaries_and_export(meeting):
-    from samarizator.knowledge import export
+def test_failed_optional_resolution_keeps_both_summaries_in_markdown(meeting):
+    from samarizator.knowledge import summary_markdown
 
     store, mid, s = meeting
     store.save_chunk(mid, 0, [dict(start=1, end=2, speaker="A", text="Решение принято")])
@@ -150,7 +150,7 @@ def test_failed_optional_resolution_keeps_both_summaries_and_export(meeting):
     assert result["brief"]["items"] and result["detailed"]["items"]
     assert result["detailed"]["resolution_warning"] and not result["detailed"]["resolved"]
     store.update(mid, summary=json.dumps(result))
-    content = export(store, mid, s).read_text()
+    content = summary_markdown(store, mid)
     assert "Проверка решений" in content and "Кратко" in content and "Подробная сводка" in content
 
 

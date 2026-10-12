@@ -8,7 +8,7 @@ import pytest
 
 from samarizator.audio_quality import diagnose, nearest_pause, plan_chunks
 from samarizator.config import Settings
-from samarizator.knowledge import export
+from samarizator.knowledge import summary_markdown
 from samarizator.media import dedup_seam, fingerprint, parse_whisper, whisper
 from samarizator.summary import reconcile_decisions, summarize, validate_summary
 from samarizator.worker import retry_uncertain, transcribe
@@ -280,7 +280,7 @@ def test_summarize_reconciles_decisions_without_touching_the_full_ledger(meeting
     assert result["detailed"]["resolved"] == [final]
 
     store.update(mid, summary=json.dumps(result))
-    content = export(store, mid, settings).read_text()
+    content = summary_markdown(store, mid)
     assert "Собеседник" not in content
     assert "## Итог по решениям" in content
     assert "Выпуск отменён (итог)" in content
@@ -309,10 +309,9 @@ def test_detailed_summary_preserves_facts_dropped_from_brief_and_cancelled_tasks
     assert len(result["brief"]["items"]) == 1
     assert len(result["detailed"]["items"]) == 2
     store.update(mid, summary=json.dumps(result))
-    content = export(store, mid, settings).read_text()
+    content = summary_markdown(store, mid)
     assert "## Кратко · тезисы" in content and "## Подробная сводка" in content
-    # A topic seen in one meeting stays a property, without spawning an orphan note.
-    assert "17 млн" in content and 'topics: ["Бюджет"]' in content
+    assert "17 млн" in content and "Темы: Бюджет" in content
     assert "[отменено]" in content and "- [ ]" not in content
     cancelled["status"] = "made-up"
     with pytest.raises(ValueError, match="статус"):
