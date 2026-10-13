@@ -31,6 +31,9 @@ SRC="$WORK/src"
 OUT="$WORK/out-$ARCH"
 IDENTITY="${SAMARIZATOR_SIGN_IDENTITY:--}"
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)"
+# This branch builds the edition without sound capture and Obsidian; the name says so on the
+# .dmg and in the window title, so it is never mistaken for the regular build of the same version.
+EDITION="-security"
 COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo local)"
 JOBS="$(sysctl -n hw.ncpu)"
 ENTITLEMENTS="$ROOT/packaging/macos/entitlements.plist"
@@ -144,7 +147,7 @@ for name in ["bundle.json", *[manifest[r] for r in ("whisper", "vad", "llm") if 
     shutil.copyfile(source / name, target / name)
 PY
 chmod 755 "$RES"/bin/*
-echo "$VERSION · $COMMIT" > "$RES/build.txt"
+echo "$VERSION$EDITION · $COMMIT" > "$RES/build.txt"
 
 say "Подпись ($IDENTITY)"
 for binary in "$RES"/bin/*; do
@@ -176,7 +179,7 @@ cp -R "$APP" "$STAGE/"
 ln -s /Applications "$STAGE/Applications"
 cp packaging/macos/README-dmg.txt "$STAGE/Как установить.txt"
 SUFFIX="${SAMARIZATOR_BUNDLE_LLM:+-with-$SAMARIZATOR_BUNDLE_LLM}"
-DMG="$ROOT/dist/Samarizator-$VERSION-$ARCH$SUFFIX.dmg"
+DMG="$ROOT/dist/Samarizator-$VERSION$EDITION-$ARCH$SUFFIX.dmg"
 mkdir -p "$ROOT/dist"
 rm -f "$DMG"
 # hdiutil sometimes reports "Resource busy" while macOS still scans the fresh bundle: retry.

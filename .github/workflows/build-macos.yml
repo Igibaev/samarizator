@@ -105,3 +105,7 @@ jobs:
           name: Samarizator ${{ steps.version.outputs.tag }}
           body_path: packaging/macos/RELEASE_NOTES.md
           files: dist/*.dmg
+          # A tag with a suffix (v0.3.1-security) is a separate edition: published as a
+          # pre-release and never made "latest", so the download page keeps the regular build.
+          prerelease: ${{ contains(steps.version.outputs.tag, '-') }}
+          make_latest: ${{ contains(steps.version.outputs.tag, '-') && 'false' || 'true' }}
