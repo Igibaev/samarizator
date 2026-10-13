@@ -18,10 +18,15 @@ on:
         default: ""
   push:
     tags: ["v*"]
-    branches: ["main", "claude/**"]
+    branches: ["main", "claude/**", "allowed-by-security"]
 
 permissions:
   contents: write
+
+env:
+  # The allowed-by-security branch releases a separate edition: its tag carries this suffix,
+  # which makes the release a pre-release that never becomes "latest" (see Publish release).
+  EDITION: "-security"
 
 jobs:
   build:
@@ -93,7 +98,7 @@ jobs:
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
           else
-            echo "tag=v$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)" >> "$GITHUB_OUTPUT"
+            echo "tag=v$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)$EDITION" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Publish release
